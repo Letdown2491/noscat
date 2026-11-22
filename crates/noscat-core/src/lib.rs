@@ -9,6 +9,7 @@
 
 pub mod advert;
 pub mod identity;
+pub mod relay;
 
 pub use advert::Advert;
 pub use identity::Identity;

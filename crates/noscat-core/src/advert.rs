@@ -6,7 +6,6 @@
 //! NIP-40 expiration. Relays see *that* a node advertises, not who talks to it —
 //! traversal signaling (the sensitive part) is a separate, gift-wrapped channel.
 
-use nostr::event::tag::TagStandard;
 use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +64,7 @@ pub enum AdvertError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Sign(#[from] nostr::event::builder::Error),
+    Sign(#[from] nostr::error::Error),
 }
 
 impl Advert {
@@ -84,7 +83,7 @@ impl Advert {
                 Tag::identifier(ADVERT_IDENTIFIER),
                 Tag::expiration(Timestamp::from(expires_at)),
             ])
-            .sign_with_keys(identity.keys())
+            .finalize(identity.keys())
             .map_err(AdvertError::Sign)
     }
 
@@ -101,22 +100,17 @@ impl Advert {
         let identifier = event
             .tags
             .iter()
-            .filter_map(|t| match t.as_standardized() {
-                Some(TagStandard::Identifier(d)) => Some(d.to_string()),
-                _ => None,
-            })
-            .next();
-        if identifier.as_deref() != Some(ADVERT_IDENTIFIER) {
+            .find(|t| t.kind() == "d")
+            .and_then(|t| t.content());
+        if identifier != Some(ADVERT_IDENTIFIER) {
             return Err(AdvertError::BadIdentifier);
         }
         let expires_at = event
             .tags
             .iter()
-            .filter_map(|t| match t.as_standardized() {
-                Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
-                _ => None,
-            })
-            .next()
+            .find(|t| t.kind() == "expiration")
+            .and_then(|t| t.content())
+            .and_then(|v| v.parse::<u64>().ok())
             .ok_or(AdvertError::MissingExpiration)?;
         if expires_at <= now.as_secs() {
             return Err(AdvertError::Expired(expires_at));
@@ -166,7 +160,7 @@ mod tests {
     fn rejects_wrong_kind() {
         let id = Identity::generate();
         let event = EventBuilder::new(Kind::TextNote, "not an advert")
-            .sign_with_keys(id.keys())
+            .finalize(id.keys())
             .expect("sign");
         assert!(matches!(
             Advert::from_event(&event, Timestamp::now()),

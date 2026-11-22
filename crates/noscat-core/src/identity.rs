@@ -2,15 +2,14 @@
 //! identity, and (later) the Noise static key — the same pattern FIPS uses
 //! ("there is no separate Nostr key", research/fips.md §4).
 
-use nostr::key::Error as KeyError;
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::*;
 
 /// Errors from identity operations.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
-    #[error(transparent)]
-    Secret(#[from] KeyError),
+    #[error("invalid secret key: {0}")]
+    Secret(String),
 }
 
 /// A noscat node identity. Wraps a Nostr keypair.
@@ -34,7 +33,7 @@ impl Identity {
     /// Restore an identity from a secret key given as hex or `nsec...` bech32.
     pub fn from_secret(secret: &str) -> Result<Self, IdentityError> {
         Ok(Self {
-            keys: Keys::parse(secret)?,
+            keys: Keys::parse(secret).map_err(|e| IdentityError::Secret(e.to_string()))?,
         })
     }
 

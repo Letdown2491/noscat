@@ -10,7 +10,18 @@ authors = ["noscat contributors"]
 
 [workspace.dependencies]
 noscat-core = { path = "crates/noscat-core" }
-nostr = { version = "0.44", features = ["nip44", "nip59"] }
+nostr = { version = "0.45", features = ["nip44", "nip59"] }
+nostr-sdk = { version = "0.45" }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "io-util",
+    "sync",
+    "signal",
+] }
+futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
