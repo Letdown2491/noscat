@@ -1597,7 +1597,7 @@ checksum = "fd6f12461d14b5768028d39fab3cdfbcefb0bc7f09e95f413a00b6fdedcc9c2d"
 
 [[package]]
 name = "noscat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "noscat-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
