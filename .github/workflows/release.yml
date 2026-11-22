@@ -176,10 +176,16 @@ jobs:
         run: |
           SHA_ARM=$(sha256sum dist/noscat-$GITHUB_REF_NAME-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
           SHA_X86=$(sha256sum dist/noscat-$GITHUB_REF_NAME-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_LIN_ARM=$(sha256sum dist/noscat-$GITHUB_REF_NAME-aarch64-unknown-linux-musl.tar.gz | cut -d' ' -f1)
+          SHA_LIN_X86=$(sha256sum dist/noscat-$GITHUB_REF_NAME-x86_64-unknown-linux-musl.tar.gz | cut -d' ' -f1)
           sed -e "s/__VERSION__/${{ steps.ver.outputs.version }}/" \
               -e "s/__SHA256_AARCH64__/$SHA_ARM/" \
               -e "s/__SHA256_X86_64__/$SHA_X86/" \
+              -e "s/__SHA256_LINUX_AARCH64__/$SHA_LIN_ARM/" \
+              -e "s/__SHA256_LINUX_X86_64__/$SHA_LIN_X86/" \
               packaging/noscat.rb > dist/noscat.rb
+          # All placeholders must be gone; a missed sed means a broken formula.
+          ! grep '__SHA256__\|__VERSION__' dist/noscat.rb
           cat dist/noscat.rb
 
       - name: Attach everything to the release

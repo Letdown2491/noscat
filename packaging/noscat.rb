@@ -17,6 +17,17 @@ class Noscat < Formula
     end
   end
 
+  # The Linux binaries are static musl builds: no runtime deps on any distro.
+  on_linux do
+    if Hardware::CPU.intel?
+      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "__SHA256_LINUX_X86_64__"
+    else
+      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "__SHA256_LINUX_AARCH64__"
+    end
+  end
+
   def install
     bin.install "noscat"
     man1.install "noscat.1"
