@@ -9,10 +9,10 @@ class Noscat < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-aarch64-macos.tar.gz"
+      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "__SHA256_AARCH64__"
     else
-      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-x86_64-macos.tar.gz"
+      url "https://github.com/Letdown2491/noscat/releases/download/v#{version}/noscat-v#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "__SHA256_X86_64__"
     end
   end
