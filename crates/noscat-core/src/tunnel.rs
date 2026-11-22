@@ -15,7 +15,7 @@
 //! be silently lost. An interrupted transfer leaves a partial file plus a
 //! meta sidecar; the next attempt resumes from the receiver's acked point.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -38,8 +38,15 @@ const ADVERT_WAIT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// One punch/handshake round: blast candidates, then listen for a reply.
 const ROUND: Duration = Duration::from_secs(4);
+/// Cadence of the listener's punch loop.
+const PUNCH_EVERY: Duration = Duration::from_secs(2);
 /// UDP read buffer: Noise caps messages well below the 65535 IP limit.
 const BUF: usize = 65535;
+/// Largest payload a single Noise message can carry, so it still fits in one
+/// UDP datagram: 65507 = IP(20) + UDP(8) max datagram, minus the 16-byte
+/// Poly1305 tag. A full 64 KiB TCP read would blow both snow's message cap
+/// and the kernel's, so the pump reads at most this much per turn.
+const MAX_PAYLOAD: usize = 65_507 - 16;
 /// File-transfer chunk: MTU-sized so a frame never fragments into multiple
 /// IP packets — one datagram, one loss unit. Throughput comes from the
 /// sliding window (many small in-flight frames), not from huge datagrams.
@@ -88,9 +95,11 @@ pub fn noise_keypair(identity: &Identity) -> Result<([u8; 32], [u8; 32]), Tunnel
     Ok((noise::noise_public(&privkey), privkey))
 }
 
-/// Fat kernel buffers for a UDP socket: defaults (~212 KB) are smaller than
-/// one window burst (32 × 16 KiB), so bursts would overflow the peer's
-/// receive queue and every burst would need replay rounds to land.
+/// Fat kernel buffers for a test socket (production sockets get theirs in
+/// `bind_udp` via socket2): defaults (~212 KB) are smaller than one window
+/// burst (32 × 16 KiB), so bursts would overflow the peer's receive queue
+/// and every burst would need replay rounds to land.
+#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(unix)]
 fn tune_buffers(sock: &std::net::UdpSocket) {
     use std::os::fd::AsRawFd;
@@ -111,6 +120,7 @@ fn tune_buffers(sock: &std::net::UdpSocket) {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 fn tune_buffers(_sock: &std::net::UdpSocket) {}
 
 /// Bind a UDP socket with fat kernel buffers.
@@ -173,7 +183,7 @@ async fn punch_loop(socket: Arc<UdpSocket>, candidates: Arc<Mutex<Vec<SocketAddr
         for addr in targets {
             let _ = socket.send_to(PUNCH, addr).await;
         }
-        sleep(Duration::from_secs(2)).await;
+        sleep(PUNCH_EVERY).await;
     }
 }
 
@@ -462,12 +472,45 @@ async fn dial_session(
 ///
 /// Local stdin EOF sends a FIN (an authenticated empty Noise payload); a FIN
 /// from the peer ends the receive side; the session ends when both happened.
+/// Where a pump's tunnel datagrams come from: an exclusive socket (the
+/// single-session paths) or the per-session channel a router demuxes into
+/// (the shared-socket listener).
+enum Datagrams<'a> {
+    Socket(Arc<UdpSocket>, SocketAddr),
+    Channel(&'a mut mpsc::UnboundedReceiver<Vec<u8>>),
+}
+
+impl Datagrams<'_> {
+    /// Next tunnel datagram, written into `wire`; `None` = the source closed.
+    async fn recv(&mut self, wire: &mut [u8]) -> Result<Option<usize>, TunnelError> {
+        match self {
+            Datagrams::Socket(socket, peer) => loop {
+                let (n, from) = socket.recv_from(wire).await?;
+                if from != *peer {
+                    tracing::debug!(%from, "ignoring packet from stranger");
+                    continue;
+                }
+                return Ok(Some(n));
+            },
+            Datagrams::Channel(rx) => match rx.recv().await {
+                None => Ok(None),
+                Some(d) => {
+                    let n = d.len();
+                    wire[..n].copy_from_slice(&d);
+                    Ok(Some(n))
+                }
+            },
+        }
+    }
+}
+
 async fn pump<R, W>(
     mut reader: R,
     mut writer: W,
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     mut session: snow::TransportState,
+    datagrams: &mut Datagrams<'_>,
 ) -> Result<(), TunnelError>
 where
     R: AsyncRead + Unpin,
@@ -479,7 +522,10 @@ where
     let mut stdin_open = true;
     loop {
         tokio::select! {
-            n = reader.read(&mut plain), if stdin_open => {
+            // Cap the read at the largest payload a Noise message can carry:
+            // a fast local writer can fill the whole buffer, and an oversized
+            // write_message would kill the session with a snow Input error.
+            n = reader.read(&mut plain[..MAX_PAYLOAD]), if stdin_open => {
                 match n {
                     Ok(0) => {
                         let n = session.write_message(b"", &mut wire)?;
@@ -493,12 +539,11 @@ where
                     Err(e) => return Err(e.into()),
                 }
             }
-            r = socket.recv_from(&mut wire) => {
-                let (n, from) = r?;
-                if from != peer {
-                    tracing::debug!(%from, "ignoring packet from stranger");
-                    continue;
-                }
+            r = datagrams.recv(&mut wire) => {
+                let n = match r? {
+                    None => return Ok(()), // source closed
+                    Some(n) => n,
+                };
                 match session.read_message(&wire[..n], &mut plain) {
                     Ok(0) if !stdin_open => return Ok(()), // mutual close
                     Ok(0) => {
@@ -532,7 +577,8 @@ pub async fn serve(
     let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
     let (socket, peer, hs, who) = session.finish().await;
     eprintln!("# 🔗 tunnel up with {who} — bridging stdio");
-    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs).await?;
+    let mut src = Datagrams::Socket(socket.clone(), peer);
+    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await?;
     Ok(who)
 }
 
@@ -546,12 +592,18 @@ pub async fn pipe(
     let session = dial_session(identity, target, relays, psk).await?;
     let (socket, peer, hs, _) = session.finish().await;
     eprintln!("# 🔗 tunnel up with {target} at udp/{peer} — bridging stdio");
-    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs).await
+    let mut src = Datagrams::Socket(socket.clone(), peer);
+    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await
 }
 
 /// Expose a local TCP service to tailnet peers: each tunnel is spliced to a
-/// fresh connection to `to`. Runs forever, re-advertising between sessions;
-/// with a `psk`, only tailnet members can connect at all.
+/// fresh connection to `to`. Runs forever; with a `psk`, only tailnet
+/// members can connect at all.
+///
+/// Concurrent sessions are first-class: one shared UDP socket on `listen`
+/// carries every session, with a router demuxing datagrams by source address
+/// (see [`TunnelListener`]). Each accepted tunnel is bridged to `to` on its
+/// own task, and the accept loop immediately waits for the next peer.
 pub async fn expose_tcp(
     identity: &Identity,
     listen: SocketAddr,
@@ -560,20 +612,303 @@ pub async fn expose_tcp(
     ttl_secs: u64,
     psk: Option<&[u8; 32]>,
 ) -> Result<(), TunnelError> {
+    let mut listener = bind_listener(identity, listen, relays, ttl_secs, psk).await?;
     loop {
-        let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
-        let (socket, peer, hs, who) = session.finish().await;
+        let session = listener.accept().await?;
+        let (socket, peer, hs, who, mut datagrams) = session.finish().await;
         eprintln!("# 🔗 tunnel up with {who} — forwarding to tcp/{to}");
-        match tokio::net::TcpStream::connect(to).await {
-            Ok(conn) => {
-                let (rd, wr) = tokio::io::split(conn);
-                if let Err(e) = pump(rd, wr, socket, peer, hs).await {
-                    tracing::warn!(%e, "tunnel session ended with error");
+        let sessions = listener.sessions.clone();
+        tokio::spawn(async move {
+            let mut src = Datagrams::Channel(&mut datagrams);
+            match tokio::net::TcpStream::connect(to).await {
+                Ok(conn) => {
+                    let (rd, wr) = tokio::io::split(conn);
+                    if let Err(e) = pump(rd, wr, socket, peer, hs, &mut src).await {
+                        tracing::warn!(%e, "tunnel session ended with error");
+                    }
                 }
+                Err(e) => tracing::warn!("cannot reach local service tcp/{to}: {e}"),
             }
-            Err(e) => tracing::warn!("cannot reach local service tcp/{to}: {e}"),
+            sessions.lock().expect("sessions lock").remove(&peer);
+            eprintln!("# 🔁 session with {who} closed");
+        });
+    }
+}
+
+/// A long-lived listener for many concurrent sessions: one UDP socket on the
+/// listen port, one advert, and a router task that owns the socket's receive
+/// side and demuxes every datagram by source address. Established sessions
+/// get their flows on dedicated channels; an unknown source (a new dialer's
+/// Noise msg1) surfaces from [`TunnelListener::accept`]. This is the shape
+/// WireGuard uses too — per-session sockets on a shared port cannot work,
+/// because the kernel's flow hash would pin a dialer's datagrams to one
+/// arbitrary session socket forever.
+struct TunnelListener {
+    socket: Arc<UdpSocket>,
+    noise_priv: [u8; 32],
+    psk: Option<[u8; 32]>,
+    relays: Vec<String>,
+    accept_rx: mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
+    /// Established sessions: source addr -> that session's tunnel datagrams.
+    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Handshakes in progress: source addr -> its msg3-era datagrams.
+    handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+}
+
+/// Bind the shared listen socket, publish one advert, and start the router,
+/// the shared traversal watcher, and the punch loop.
+async fn bind_listener(
+    identity: &Identity,
+    listen: SocketAddr,
+    relays: &[String],
+    ttl_secs: u64,
+    psk: Option<&[u8; 32]>,
+) -> Result<TunnelListener, TunnelError> {
+    let (noise_pub, noise_priv) = noise_keypair(identity)?;
+    let socket = bind_udp(listen)?;
+    let local = socket.local_addr()?;
+
+    let endpoints = discover_endpoints(&socket).await?;
+    crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
+    eprintln!(
+        "# 🐈 serving as {} on udp/{local} (candidates: {}) — concurrent sessions welcome (Ctrl-C to quit)",
+        identity.npub(),
+        endpoints
+            .iter()
+            .map(|e| e.addr.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (accept_tx, accept_rx) = mpsc::unbounded_channel();
+
+    // Router: demux every datagram by source address. Punch markers and
+    // other sub-frame junk are dropped here — they carry no state.
+    let r_socket = socket.clone();
+    let r_sessions = sessions.clone();
+    let r_handshakes = handshakes.clone();
+    tokio::spawn(async move {
+        let mut wire = [0u8; BUF];
+        loop {
+            let (n, from) = match r_socket.recv_from(&mut wire).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(%e, "router recv failed");
+                    continue;
+                }
+            };
+            if n < MIN_FRAME {
+                continue;
+            }
+            route_datagram(from, &wire[..n], &r_sessions, &r_handshakes, &accept_tx);
         }
-        eprintln!("# 🔁 session closed — advertising again…");
+    });
+
+    // Traversal: one shared watcher for all sessions. A dialer's gift-wrapped
+    // candidate list is recorded under the addrs it points at (the punch loop
+    // needs a target), and answered with ours, so both NAT mappings get
+    // opened from the inside.
+    let candidates: Arc<Mutex<HashMap<SocketAddr, Vec<SocketAddr>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (tx, mut rx) = mpsc::channel::<(PublicKey, crate::traversal::TraversalPayload)>(16);
+    let watch_identity = identity.clone();
+    let watch_relays = relays.to_vec();
+    tokio::spawn(async move {
+        let _ = crate::traversal::watch_traversal(watch_identity, watch_relays, tx).await;
+    });
+    let c_candidates = candidates.clone();
+    let reply_identity = identity.clone();
+    let reply_noise = noise_pub;
+    let reply_endpoints = endpoints.clone();
+    let reply_relays = relays.to_vec();
+    tokio::spawn(async move {
+        while let Some((sender, payload)) = rx.recv().await {
+            let eps = parse_endpoints(&payload.endpoints);
+            tracing::info!(%sender, ?eps, "traversal request received");
+            c_candidates
+                .lock()
+                .expect("candidates lock")
+                .extend(eps.iter().map(|a| (*a, eps.clone())));
+            let _ = crate::traversal::send_traversal(
+                &reply_identity,
+                sender,
+                reply_noise,
+                reply_endpoints.clone(),
+                &reply_relays,
+            )
+            .await;
+        }
+    });
+
+    // Punch loop: keep the serve-side NAT mappings open toward every
+    // candidate that has not grown into an established session yet. The
+    // dialer's own punch + msg1 opened the mapping in one direction; this
+    // opens it in ours, which stricter NATs need before msg2 can land.
+    let p_socket = socket.clone();
+    let p_sessions = sessions.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(PUNCH_EVERY).await;
+            let targets: Vec<SocketAddr> = {
+                let established = p_sessions.lock().expect("sessions lock");
+                candidates
+                    .lock()
+                    .expect("candidates lock")
+                    .keys()
+                    .filter(|a| !established.contains_key(a))
+                    .cloned()
+                    .collect()
+            };
+            for addr in targets {
+                let _ = p_socket.send_to(PUNCH, addr).await;
+            }
+        }
+    });
+
+    Ok(TunnelListener {
+        socket,
+        noise_priv,
+        psk: psk.cloned(),
+        relays: relays.to_vec(),
+        accept_rx,
+        sessions,
+        handshakes,
+    })
+}
+
+/// Send one datagram to its session (by source address), to the handshake
+/// currently being accepted from that source, or — an unknown source — to
+/// the accept queue as a candidate handshake opener.
+fn route_datagram(
+    from: SocketAddr,
+    datagram: &[u8],
+    sessions: &Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>,
+    handshakes: &Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>,
+    accept: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+) {
+    if let Some(tx) = sessions.lock().expect("sessions lock").get(&from) {
+        let _ = tx.send(datagram.to_vec());
+        return;
+    }
+    if let Some(tx) = handshakes.lock().expect("handshakes lock").get(&from) {
+        let _ = tx.send(datagram.to_vec());
+        return;
+    }
+    let _ = accept.send((from, datagram.to_vec()));
+}
+
+/// One accepted tunnel: the shared socket for egress, a dedicated channel
+/// for ingress, and its own Noise transport. The channel is dropped when the
+/// session's pump ends; the listener's session map entry goes with it.
+struct ListenerSession {
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    session: snow::TransportState,
+    who: String,
+    data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Background lookup of the dialer's npub (relay round-trip). Display
+    /// only — the data path must never wait on it.
+    who_lookup: Option<tokio::task::JoinHandle<String>>,
+}
+
+impl ListenerSession {
+    /// Abort the display-name lookup and deconstruct into the transport
+    /// parts for the pump.
+    async fn finish(
+        mut self,
+    ) -> (
+        Arc<UdpSocket>,
+        SocketAddr,
+        snow::TransportState,
+        String,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        let who = match self.who_lookup.take() {
+            Some(h) if h.is_finished() => h.await.unwrap_or_else(|_| self.who.clone()),
+            Some(h) => {
+                h.abort();
+                self.who
+            }
+            None => self.who,
+        };
+        (self.socket, self.peer, self.session, who, self.data_rx)
+    }
+}
+
+impl TunnelListener {
+    /// Serve the next dialer that completes the handshake: take its msg1 off
+    /// the accept queue, answer msg2, and wait for msg3 — all routed through
+    /// the shared socket's demux. Returns with the session registered in the
+    /// router's map, so its pump starts receiving flows immediately.
+    async fn accept(&mut self) -> Result<ListenerSession, TunnelError> {
+        let mut plain = [0u8; BUF];
+        let mut wire = [0u8; BUF];
+        loop {
+            let (from, msg1) = match self.accept_rx.recv().await {
+                Some(m) => m,
+                None => return Err(TunnelError::NoHandshake),
+            };
+            let mut hs = noise::responder(&self.noise_priv, self.psk.as_ref())?;
+            if hs.read_message(&msg1, &mut plain).is_err() {
+                continue; // not a handshake opener for us
+            }
+
+            // Register before msg2 goes out: the dialer's msg3 can only
+            // follow it, and must land in our channel, not the accept queue.
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            self.handshakes.lock().expect("handshakes lock").insert(from, tx);
+            let n = hs.write_message(b"", &mut wire)?;
+            self.socket.send_to(&wire[..n], from).await?;
+
+            let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+            let ok = loop {
+                match timeout_at(deadline, rx.recv()).await {
+                    Err(_) | Ok(None) => break false,
+                    Ok(Some(dgram)) => match hs.read_message(&dgram, &mut plain) {
+                        Ok(_) => break true,
+                        Err(snow::Error::Decrypt) => continue, // punch echo or msg1 replay
+                        Err(_) => break false,
+                    },
+                }
+            };
+            self.handshakes.lock().expect("handshakes lock").remove(&from);
+            if !ok {
+                continue; // dialer vanished mid-handshake; serve the next
+            }
+
+            let initiator_noise: [u8; 32] = hs
+                .get_remote_static()
+                .ok_or(TunnelError::NoHandshake)?
+                .try_into()
+                .map_err(|_| TunnelError::NoHandshake)?;
+            let session = noise::into_transport(hs)?;
+            let who = format!("noise key {}", hex::encode(initiator_noise));
+            let lookup_relays = self.relays.clone();
+            let fallback = who.clone();
+            let who_lookup = tokio::spawn(async move {
+                match crate::relay::fetch_advert_for(&lookup_relays, Some(initiator_noise), None)
+                    .await
+                {
+                    Ok(Some(advert)) => advert.npub.to_string(),
+                    _ => fallback,
+                }
+            });
+
+            let (data_tx, data_rx) = mpsc::unbounded_channel();
+            self.sessions.lock().expect("sessions lock").insert(from, data_tx);
+            return Ok(ListenerSession {
+                socket: self.socket.clone(),
+                peer: from,
+                session,
+                who,
+                data_rx,
+                who_lookup: Some(who_lookup),
+            });
+        }
     }
 }
 
@@ -590,19 +925,28 @@ pub async fn forward_tcp(
 ) -> Result<(), TunnelError> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     eprintln!("# 🐈 forwarding tcp/0.0.0.0:{port} over tunnels to {target}");
+    let psk = psk.copied();
     loop {
         let (conn, client) = listener.accept().await?;
         eprintln!("# 🔈 connection from {client} — dialing {target}…");
-        match dial_session(identity, target, relays, psk).await {
-            Ok(session) => {
-                let (socket, peer, hs, _) = session.finish().await;
-                let (rd, wr) = tokio::io::split(conn);
-                if let Err(e) = pump(rd, wr, socket, peer, hs).await {
-                    tracing::warn!(%e, "tunnel session ended with error");
+        // Each connection gets its own tunnel on its own task; the accept
+        // loop is free for the next one.
+        let identity = identity.clone();
+        let target = target.to_string();
+        let relays = relays.to_vec();
+        tokio::spawn(async move {
+            match dial_session(&identity, &target, &relays, psk.as_ref()).await {
+                Ok(session) => {
+                    let (socket, peer, hs, _) = session.finish().await;
+                    let (rd, wr) = tokio::io::split(conn);
+                    let mut src = Datagrams::Socket(socket.clone(), peer);
+                    if let Err(e) = pump(rd, wr, socket, peer, hs, &mut src).await {
+                        tracing::warn!(%e, "tunnel session ended with error");
+                    }
                 }
+                Err(e) => eprintln!("# ⚠️  cannot establish tunnel for {client}: {e}"),
             }
-            Err(e) => eprintln!("# ⚠️  cannot establish tunnel for {client}: {e}"),
-        }
+        });
     }
 }
 
@@ -1318,6 +1662,42 @@ async fn receive_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The listener's router demuxes datagrams strictly by source address:
+    /// an established session's flow goes only to its channel, a handshake
+    /// in progress gets its own, and anything unknown surfaces from the
+    /// accept queue. This is what lets concurrent sessions share one UDP
+    /// port without the kernel pinning a flow to the wrong socket.
+    #[test]
+    fn router_demuxes_by_source() {
+        let (accept_tx, mut accept_rx) = mpsc::unbounded_channel();
+        let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let established: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+        let (est_tx, mut est_rx) = mpsc::unbounded_channel();
+        sessions.lock().unwrap().insert(established, est_tx);
+        let handshaking: SocketAddr = "10.0.0.2:2222".parse().unwrap();
+        let (hs_tx, mut hs_rx) = mpsc::unbounded_channel();
+        handshakes.lock().unwrap().insert(handshaking, hs_tx);
+        let unknown: SocketAddr = "10.0.0.3:3333".parse().unwrap();
+
+        route_datagram(established, b"flow", &sessions, &handshakes, &accept_tx);
+        route_datagram(handshaking, b"msg3", &sessions, &handshakes, &accept_tx);
+        route_datagram(unknown, b"msg1", &sessions, &handshakes, &accept_tx);
+
+        assert_eq!(est_rx.try_recv().unwrap(), b"flow");
+        assert_eq!(hs_rx.try_recv().unwrap(), b"msg3");
+        let (from, msg1) = accept_rx.try_recv().unwrap();
+        assert_eq!(from, unknown);
+        assert_eq!(msg1, b"msg1");
+        // Nothing spilled across channels.
+        assert!(est_rx.try_recv().is_err());
+        assert!(hs_rx.try_recv().is_err());
+        assert!(accept_rx.try_recv().is_err());
+    }
 
     /// Full transfer roundtrip over real UDP loopback — through a proxy that
     /// drops every 7th data-plane frame (~14% loss). Proves the sliding

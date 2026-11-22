@@ -124,6 +124,11 @@ noscat forward <A's npub> --port 2222 --tailnet ./device-b
 ssh -p 2222 localhost
 ```
 
+Sessions are concurrent: the exposed side serves every peer from one shared
+UDP port (datagrams are demuxed by source address), and each `forward`
+connection dials its own tunnel — parallel `ssh`/`scp`/browser connections
+just work.
+
 ### File transfer
 
 ```
@@ -146,6 +151,9 @@ sha256 before it lands under its real name.
 - ~~Multi-member tailnets with ACL policy as Marmot GroupContext components.~~ (done)
 - ~~Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.~~ (done)
 - ~~NIP draft.~~ (drafted: `docs/nip-noscat.md`)
+- ~~Concurrent sessions for `expose`.~~ (done)
+
+Every roadmap item is closed; the next milestone is yours to propose.
 
 ## Development
 
