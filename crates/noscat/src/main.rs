@@ -51,6 +51,10 @@ enum Command {
         /// Reuse the same identity across runs by storing its secret in this file.
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
+        /// Restrict the tunnel to this tailnet's device directory (MLS group
+        /// membership becomes the authorization).
+        #[arg(long)]
+        tailnet: Option<std::path::PathBuf>,
     },
     /// Pipe stdio into a tunnel to a peer by npub.
     Pipe {
@@ -62,6 +66,10 @@ enum Command {
         /// Use this identity instead of a fresh ephemeral one (hex or nsec).
         #[arg(long)]
         identity: Option<String>,
+        /// Restrict the tunnel to this tailnet's device directory (MLS group
+        /// membership becomes the authorization).
+        #[arg(long)]
+        tailnet: Option<std::path::PathBuf>,
     },
     /// Tailnet: a device's MLS group for owned-device meshing (spike).
     #[command(subcommand)]
@@ -128,8 +136,18 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    match cli.command {
-        Command::Keygen { show_secret } => {
+    // The tailnet's epoch PSK, if the operator scoped the tunnel to a group.
+    fn tailnet_psk(dir: &std::path::PathBuf) -> anyhow::Result<[u8; 32]> {
+        let device = noscat_core::tailnet::Device::open(dir)?;
+        let psk = device.tunnel_psk().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let psk: [u8; 32] = psk
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("unexpected PSK length"))?;
+        eprintln!("# 🔐 tunnel bound to tailnet (epoch PSK loaded from {})", dir.display());
+        Ok(psk)
+    }
+
+    match cli.command {        Command::Keygen { show_secret } => {
             let id = noscat_core::Identity::generate();
             println!("{}", id.npub());
             if show_secret {
@@ -181,6 +199,7 @@ fn main() -> anyhow::Result<()> {
             relays,
             ttl,
             identity,
+            tailnet,
         } => {
             let id = match &identity {
                 Some(path) => {
@@ -197,11 +216,13 @@ fn main() -> anyhow::Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
             let rt = tokio::runtime::Runtime::new()?;
+            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
             let who = rt.block_on(noscat_core::tunnel::serve(
                 &id,
                 listen,
                 &relays_or_default(relays),
                 ttl,
+                psk.as_ref(),
             ))?;
             eprintln!("# session with {who} closed");
         }
@@ -209,6 +230,7 @@ fn main() -> anyhow::Result<()> {
             target,
             relays,
             identity,
+            tailnet,
         } => {
             let id = match &identity {
                 Some(secret) => noscat_core::Identity::from_secret(secret)
@@ -216,10 +238,12 @@ fn main() -> anyhow::Result<()> {
                 None => noscat_core::Identity::generate(),
             };
             let rt = tokio::runtime::Runtime::new()?;
+            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
             rt.block_on(noscat_core::tunnel::pipe(
                 &id,
                 &target,
                 &relays_or_default(relays),
+                psk.as_ref(),
             ))?;
         }
         Command::Tailnet(cmd) => {

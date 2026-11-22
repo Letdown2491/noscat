@@ -11,8 +11,12 @@
 
 use snow::{Builder, HandshakeState, TransportState};
 
-/// The Noise pattern the data plane speaks. Both ends are noscat.
+/// The Noise pattern the data plane speaks. Both ends are noscat. With a
+/// tailnet PSK, `psk0` is appended: the group's epoch secret is mixed into
+/// the handshake's first key derivation, so only group members can complete
+/// the handshake at all (see `crate::tailnet`).
 pub const NOISE_PATTERN: &str = "Noise_XK_25519_ChaChaPoly_SHA256";
+pub const NOISE_PSK_PATTERN: &str = "Noise_XKpsk0_25519_ChaChaPoly_SHA256";
 
 /// Domain separation for deriving the Noise static key from the identity secret.
 const DERIVE_SALT: &[u8] = b"noscat";
@@ -60,13 +64,20 @@ pub fn noise_public(privkey: &[u8; 32]) -> [u8; 32] {
 fn builder<'a>(
     local_static: Option<&'a [u8; 32]>,
     remote_static: Option<&'a [u8; 32]>,
+    psk: Option<&'a [u8; 32]>,
 ) -> Result<Builder<'a>, NoiseError> {
-    let params: snow::params::NoiseParams = NOISE_PATTERN.parse()?;
+    let params: snow::params::NoiseParams = match psk {
+        Some(_) => NOISE_PSK_PATTERN.parse()?,
+        None => NOISE_PATTERN.parse()?,
+    };
     let mut b = Builder::with_resolver(
         params,
         std::boxed::Box::new(snow::resolvers::DefaultResolver),
     );
     b = b.prologue(PROLOGUE)?;
+    if let Some(psk) = psk {
+        b = b.psk(0, psk)?;
+    }
     if let Some(local) = local_static {
         b = b.local_private_key(local)?;
     }
@@ -81,13 +92,14 @@ fn builder<'a>(
 pub fn initiator(
     local_static: &[u8; 32],
     remote_static: &[u8; 32],
+    psk: Option<&[u8; 32]>,
 ) -> Result<HandshakeState, NoiseError> {
-    Ok(builder(Some(local_static), Some(remote_static))?.build_initiator()?)
+    Ok(builder(Some(local_static), Some(remote_static), psk)?.build_initiator()?)
 }
 
 /// Start a responder handshake: we know our own static key only.
-pub fn responder(local_static: &[u8; 32]) -> Result<HandshakeState, NoiseError> {
-    Ok(builder(Some(local_static), None)?.build_responder()?)
+pub fn responder(local_static: &[u8; 32], psk: Option<&[u8; 32]>) -> Result<HandshakeState, NoiseError> {
+    Ok(builder(Some(local_static), None, psk)?.build_responder()?)
 }
 
 /// Split a finished handshake into the transport session.
@@ -119,8 +131,8 @@ mod tests {
         // The client uses the server's *public* Noise key, exactly like it
         // would from a fetched advert (the advert publishes noise_public()).
         let server_noise_pub = noise_public(&server_static);
-        let mut hs_c = initiator(&client_static, &server_noise_pub).expect("initiator");
-        let mut hs_s = responder(&server_static).expect("responder");
+        let mut hs_c = initiator(&client_static, &server_noise_pub, None).expect("initiator");
+        let mut hs_s = responder(&server_static, None).expect("responder");
 
         let mut buf_c = [0u8; 65535];
         let mut buf_s = [0u8; 65535];
@@ -159,5 +171,46 @@ mod tests {
         let n = t_s.write_message(b"pong", &mut buf_c).expect("write");
         let n = t_c.read_message(&buf_c[..n], &mut buf_s).expect("read");
         assert_eq!(&buf_s[..n], b"pong");
+    }
+
+    /// The tailnet binding: with a PSK, only holders of the group's epoch
+    /// secret complete the handshake. A stranger with a valid-looking Noise
+    /// key of its own fails at msg 1.
+    #[test]
+    fn psk_binds_handshake_to_the_tailnet() {
+        let server_secret = [1u8; 32];
+        let client_secret = [2u8; 32];
+        let server_static = noise_static_from_identity(&server_secret).expect("derive");
+        let client_static = noise_static_from_identity(&client_secret).expect("derive");
+        let server_noise_pub = noise_public(&server_static);
+
+        let epoch_psk: [u8; 32] =
+            noise_static_from_identity(&[9u8; 32]).expect("derive"); // any group secret
+        let stranger_psk: [u8; 32] =
+            noise_static_from_identity(&[10u8; 32]).expect("derive");
+
+        // Same group PSK on both ends: everything proceeds as usual.
+        let mut hs_c =
+            initiator(&client_static, &server_noise_pub, Some(&epoch_psk)).expect("initiator");
+        let mut hs_s = responder(&server_static, Some(&epoch_psk)).expect("responder");
+        let mut buf_c = [0u8; 65535];
+        let mut buf_s = [0u8; 65535];
+        let n = hs_c.write_message(b"", &mut buf_c).expect("msg1");
+        hs_s.read_message(&buf_c[..n], &mut buf_s).expect("read1");
+        let n = hs_s.write_message(b"", &mut buf_c).expect("msg2");
+        hs_c.read_message(&buf_c[..n], &mut buf_s).expect("read2");
+        let n = hs_c.write_message(b"hello", &mut buf_c).expect("msg3");
+        let n = hs_s.read_message(&buf_c[..n], &mut buf_s).expect("read3");
+        assert_eq!(&buf_s[..n], b"hello");
+
+        // A stranger's PSK: the transcript diverges and decryption fails.
+        let mut hs_c =
+            initiator(&client_static, &server_noise_pub, Some(&epoch_psk)).expect("initiator");
+        let mut hs_s = responder(&server_static, Some(&stranger_psk)).expect("responder");
+        let n = hs_c.write_message(b"", &mut buf_c).expect("msg1");
+        assert!(
+            hs_s.read_message(&buf_c[..n], &mut buf_s).is_err(),
+            "a non-member must not be able to open the handshake"
+        );
     }
 }

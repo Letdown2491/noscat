@@ -184,17 +184,21 @@ where
 /// Serve one tunnel: bind, advertise candidates, exchange traversal signaling,
 /// handshake with the first peer, then bridge stdio over the encrypted
 /// channel. Resolves when the session closes, reporting the peer's identity.
+///
+/// With a `psk` (the tailnet's epoch secret), the handshake is bound to the
+/// group: only members of the same tailnet can complete it.
 pub async fn serve(
     identity: &Identity,
     listen: SocketAddr,
     relays: &[String],
     ttl_secs: u64,
+    psk: Option<&[u8; 32]>,
 ) -> Result<String, TunnelError> {
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
     let socket = Arc::new(UdpSocket::bind(listen).await?);
     let local = socket.local_addr()?;
-    let mut hs = noise::responder(&noise_priv)?;
+    let mut hs = noise::responder(&noise_priv, psk)?;
 
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
@@ -292,8 +296,15 @@ pub async fn serve(
 }
 
 /// Dial a peer by npub: gather candidates (advert + gift-wrapped traversal
-/// exchange), punch UDP holes, handshake, and bridge stdio.
-pub async fn pipe(identity: &Identity, target: &str, relays: &[String]) -> Result<(), TunnelError> {
+/// exchange), punch UDP holes, handshake, and bridge stdio. With a `psk` (the
+/// tailnet's epoch secret), only members of the same tailnet can complete the
+/// handshake.
+pub async fn pipe(
+    identity: &Identity,
+    target: &str,
+    relays: &[String],
+    psk: Option<&[u8; 32]>,
+) -> Result<(), TunnelError> {
     let target_pubkey = PublicKey::parse(target).map_err(|_| TunnelError::BadAdvert)?;
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
@@ -338,7 +349,7 @@ pub async fn pipe(identity: &Identity, target: &str, relays: &[String]) -> Resul
     // Punch + handshake rounds: blast msg1 at every known candidate, listen
     // for msg2 from anywhere (its source is the mapping that got us through).
     // Between rounds, fold in candidates the peer signaled gift-wrapped.
-    let mut hs = noise::initiator(&noise_priv, &advert.noise_pub)?;
+    let mut hs = noise::initiator(&noise_priv, &advert.noise_pub, psk)?;
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
     let n = hs.write_message(b"", &mut wire)?;
