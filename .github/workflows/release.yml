@@ -220,11 +220,20 @@ jobs:
             echo "Cargo.toml version != tag version ($VERSION); bump it before tagging."
             exit 1
           fi
-          cargo publish --locked -p noscat-core
+          # Idempotent: a rerun of a half-finished publish must skip crates
+          # whose version is already on the index instead of failing there.
+          publish_if_missing() {
+            if curl -fsSL "https://crates.io/api/v1/crates/$1/$VERSION" > /dev/null 2>&1; then
+              echo "$1 $VERSION is already published; skipping"
+            else
+              cargo publish --locked -p "$1"
+            fi
+          }
+          publish_if_missing noscat-core
           sleep 15 # let crates.io index noscat-core before dependents land
-          cargo publish --locked -p noscat-client
+          publish_if_missing noscat-client
           sleep 15 # let crates.io index noscat-client before noscat lands
-          cargo publish --locked -p noscat
+          publish_if_missing noscat
 
       - name: Attach everything to the release
         uses: softprops/action-gh-release@v2
