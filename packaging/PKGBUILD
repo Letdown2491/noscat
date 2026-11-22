@@ -1,0 +1,40 @@
+# Maintainer: Letdown2491 <https://github.com/Letdown2491>
+# AUR source package: builds noscat from the release tag with cargo.
+# Submit as `noscat` (or copy as `noscat-bin` pointing at the release
+# tarball). Bump pkgrel on PKGBUILD-only changes, pkgver on new tags.
+pkgname=noscat
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
+arch=(x86_64)
+url="https://github.com/Letdown2491/noscat"
+license=(MIT)
+depends=(glibc)
+makedepends=(cargo)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+b2sums=(SKIP) # replace with the tag's b2sum from the release page
+
+build() {
+    cd "$pkgname-$pkgver"
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked
+    # Regenerate completions from the built binary (kept current with clap).
+    ./target/release/noscat completions bash > noscat.bash
+    ./target/release/noscat completions zsh  > _noscat
+    ./target/release/noscat completions fish > noscat.fish
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --release --locked
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 target/release/noscat -t "$pkgdir/usr/bin/"
+    install -Dm644 packaging/noscat.1 "$pkgdir/usr/share/man/man1/noscat.1"
+    install -Dm644 noscat.bash "$pkgdir/usr/share/bash-completion/completions/noscat"
+    install -Dm644 _noscat "$pkgdir/usr/share/zsh/site-functions/_noscat"
+    install -Dm644 noscat.fish "$pkgdir/usr/share/fish/vendor_completions.d/noscat.fish"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

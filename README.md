@@ -17,6 +17,33 @@ Think `tailcat` (Tailscale's data plane without its control plane), but:
 
 The wire protocol is specified in the draft NIP: [`docs/nip-noscat.md`](docs/nip-noscat.md).
 
+## Install
+
+Latest release binaries and packages: <https://github.com/Letdown2491/noscat/releases>.
+
+Quick install (Linux and macOS, into `~/.local/bin`):
+
+```
+curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh
+```
+
+Linux packages (`.deb`, `.rpm`, `.apk`, `.pkg.tar.zst` for arch) attach to
+every release, built from static musl binaries - no dependencies. On Arch,
+a source `PKGBUILD` lives in [`packaging/PKGBUILD`](packaging/PKGBUILD) for
+the AUR. On macOS, a Homebrew formula (`noscat.rb` in the release assets,
+generated per release with checksums) is ready to drop into the
+`Letdown2491/homebrew-tap` tap. On Windows, grab the zip from the release
+(a winget manifest is in [`packaging/winget/`](packaging/winget/)).
+
+From source (any platform with a Rust toolchain):
+
+```
+cargo install --locked --git https://github.com/Letdown2491/noscat
+```
+
+Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell>`)
+and a man page.
+
 ## Status
 
 **Working** - three layers, each verified live across containers over public relays

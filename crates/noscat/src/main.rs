@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
@@ -153,6 +154,12 @@ enum Command {
     /// Tailnet: a device's MLS group for owned-device meshing (spike).
     #[command(subcommand)]
     Tailnet(TailnetCommand),
+    /// Emit shell completions (hidden; used by packaging).
+    #[command(hide = true)]
+    Completions {
+        /// The shell to generate completions for.
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -256,7 +263,11 @@ fn main() -> anyhow::Result<()> {
         Ok(psk)
     }
 
-    match cli.command {        Command::Keygen { show_secret } => {
+    match cli.command {
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "noscat", &mut std::io::stdout());
+        }
+        Command::Keygen { show_secret } => {
             let id = noscat_core::Identity::generate();
             println!("{}", id.npub());
             if show_secret {
