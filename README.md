@@ -19,48 +19,16 @@ The wire protocol is specified in the draft NIP: [`docs/nip-noscat.md`](docs/nip
 
 ## Install
 
-Latest release binaries and packages: <https://github.com/Letdown2491/noscat/releases>.
-
 Quick install (Linux and macOS, into `~/.local/bin`):
 
 ```
 curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh
 ```
 
-Linux packages (`.deb`, `.rpm`, `.apk`) attach to every release, built from
-static musl binaries - no dependencies. On macOS and Linux Homebrew:
+Homebrew: `brew install Letdown2491/tap/noscat` - and there is more (pacman
+repo, Scoop, winget, Nix, cargo, deb/rpm/apk, the BSD story):
 
-```
-brew install Letdown2491/tap/noscat
-```
-
-On Arch (and ARM SBCs), a pacman repository is published per release -
-add to `/etc/pacman.conf` and `pacman -Sy noscat`:
-
-```ini
-[noscat]
-SigLevel = Never
-Server = https://letdown2491.github.io/noscat/x86_64
-# Server = https://letdown2491.github.io/noscat/aarch64
-```
-
-(A source `PKGBUILD` lives in [`packaging/PKGBUILD`](packaging/PKGBUILD);
-AUR submission is pending account registration reopening.)
-
-On Windows: `scoop bucket add letdown2491 https://github.com/Letdown2491/scoop-bucket`
-then `scoop install noscat`, or grab the zip from the release. A winget
-manifest is pending merge in the community repo
-([#486661](https://github.com/microsoft/winget-pkgs/pull/486661)).
-
-Nix users: `nix run github:Letdown2491/noscat`.
-
-From source (any platform with a Rust toolchain):
-
-```
-cargo install --locked --git https://github.com/Letdown2491/noscat
-```
-
-(once published to crates.io, plain `cargo install noscat` also works).
+**Full installation options: [`INSTALL.md`](INSTALL.md)**
 
 Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell>`)
 and a man page.
