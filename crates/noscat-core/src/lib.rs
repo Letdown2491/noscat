@@ -1,6 +1,6 @@
 //! noscat-core: the Nostr-native userspace tunnel and mesh library.
 //!
-//! Layering (see research/00-synthesis.md):
+//! Layering:
 //! - `identity` — one secp256k1 keypair is the Nostr identity, the mesh identity,
 //!   and the Noise static key (the FIPS pattern).
 //! - `advert` — signed, expiring endpoint advertisements on Nostr (FIPS kind-37195 pattern).

@@ -1,6 +1,6 @@
 //! Noise sessions for the data plane.
 //!
-//! Design note (deliberate deviation from FIPS, research/fips.md §4): FIPS uses
+//! Design note (deliberate deviation from the FIPS design this mirrors): it uses
 //! the Nostr keypair directly as a Noise secp256k1 static key. snow does not
 //! speak secp256k1, and mislabeling a custom DH as "25519" would be worse than
 //! the trade, so the MVP derives a curve25519 static key from the identity

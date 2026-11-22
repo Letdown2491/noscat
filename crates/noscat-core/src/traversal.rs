@@ -1,5 +1,5 @@
 //! Traversal signaling: gift-wrapped (NIP-59) endpoint exchange, following
-//! FIPS's kind-21059 pattern (research/fips.md §3).
+//! the FIPS design's kind-21059 pattern.
 //!
 //! The public advert carries a node's *stationary* addresses. The ephemeral
 //! half — the port mappings each side just opened for this specific session —

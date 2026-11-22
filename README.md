@@ -17,21 +17,33 @@ Think `tailcat` (Tailscale's data plane without its control plane), but:
 
 ## Status
 
-**Working MVP** — netcat-mode tunnels end to end: identity → relay advert → discovery →
-Noise-XK handshake over UDP → stdio bridge. Verified live across two containers with
-discovery through public relays (`wss://nos.lol`).
+**Working** — three layers, each verified live across containers over public relays
+(`wss://nos.lol`, `wss://relay.primal.net`, `wss://nostr.mom`):
+
+1. **Tunnels** (netcat mode): identity → relay advert → discovery → Noise-XK handshake
+   over UDP → stdio bridge, with STUN reflexive discovery and NIP-59 gift-wrapped
+   (kind-21059) endpoint signaling + UDP hole punching.
+2. **Tailnet** (owned devices): an MLS group per tailnet on OpenMLS —
+   `tailnet create/publish/invite/join`. Devices publish MLS key packages
+   (kind 30443); invitations are NIP-59 gift-wrapped Welcomes (kind 30444).
+3. **File transfer**: `send`/`receive` over the same tunnels, with an ACK +
+   retransmit layer so large files survive socket-buffer overflow; a clean
+   return means the whole file is on disk at the peer.
 
 - `crates/noscat-core` — the library:
   - `identity` — one secp256k1 keypair is the Nostr identity and the mesh identity.
   - `advert` — signed, expiring endpoint advertisements (FIPS kind-37195 pattern),
     carrying the node's Noise static key, cryptographically bound to the npub by the
     event signature.
-  - `relay` — publish/fetch/watch adverts over any relays you configure.
+  - `relay` — publish/fetch/watch adverts, key packages, over any relays you configure.
   - `noise` — Noise XK sessions (`snow`, curve25519 + ChaChaPoly). The Noise static key
     is derived from the identity secret via HKDF (a deliberate, documented deviation
     from FIPS's direct secp256k1 static; see the module docs).
+  - `stun` — hand-rolled RFC 5389 Binding requests (no extra dependency).
+  - `traversal` — gift-wrapped candidate exchange and tailnet message watching.
+  - `tailnet` — MLS group management; `export_secret` derives the epoch tunnel PSK.
   - `tunnel` — the data plane: one UDP datagram = one Noise message; stdio bridging
-    with netcat-style half-close semantics.
+    with netcat-style half-close semantics; reliable file transfer on top.
 - `crates/noscat` — the CLI.
 
 ### Try it
@@ -50,21 +62,54 @@ echo hello | noscat pipe <A's npub>
 ```
 
 Everything B types lands on A's stdout, encrypted, peer-to-peer; relays carry only the
-discovery. `--identity <file>` (serve) and `--identity <nsec|hex>` (pipe) pin identities
-across runs; by default they are ephemeral.
+discovery. `--identity <file>` (serve/receive) and `--identity <nsec|hex>` (pipe/send)
+pin identities across runs; by default they are ephemeral.
 
 Also available: `noscat keygen`, `noscat advertise`, `noscat watch`.
 
-### Roadmap (from [research/00-synthesis.md](research/00-synthesis.md))
+### Tailnets (devices you own)
 
-- NAT traversal: STUN endpoint discovery + gift-wrapped kind-21059 signaling.
+```
+# On the owner (device A), once:
+noscat tailnet create --dir ./device-a
+
+# On the joiner (device B):
+noscat tailnet publish --dir ./device-b     # publishes its MLS key package
+
+# Back on the owner:
+noscat tailnet invite <B's npub> --dir ./device-a
+
+# On the joiner:
+noscat tailnet join --dir ./device-b
+```
+
+Both devices now derive the same epoch PSK. Scope any tunnel to the group with
+`--tailnet <dir>` — the handshake becomes `Noise_XKpsk0`, so only members of the
+same tailnet can complete it, and removing a device (next epoch) fails its
+handshakes cryptographically:
+
+```
+noscat serve --tailnet ./device-a
+echo hi | noscat pipe <A's npub> --tailnet ./device-b
+```
+
+### File transfer
+
+```
+# Receiver (A):
+noscat receive --out ./incoming --tailnet ./device-a
+
+# Sender (B):
+noscat send ./report.pdf <A's npub> --tailnet ./device-b
+```
+
+### Roadmap
+
 - `port-forward`/`serve` modes (arbitrary TCP services, not just stdio).
-- Tailnet control plane: one MLS group per tailnet (Marmot component model),
-  ACLs as GroupContext components.
+- Transfer throughput (sliding-window ACKs) and resume.
+- Multi-member tailnets with ACL policy as Marmot GroupContext components.
+- Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.
 - NIP draft.
-
-See [research/](research/) for the deep dives that shaped the design (FIPS,
-nostr-vpn, Marmot/MLS).
 
 ## Development
 

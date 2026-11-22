@@ -71,6 +71,43 @@ enum Command {
         #[arg(long)]
         tailnet: Option<std::path::PathBuf>,
     },
+    /// Send a file over a tunnel to a peer by npub.
+    Send {
+        /// The file to send.
+        path: std::path::PathBuf,
+        /// The receiving peer's npub.
+        target: String,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// Use this identity instead of a fresh ephemeral one (hex or nsec).
+        #[arg(long)]
+        identity: Option<String>,
+        /// Restrict the tunnel to this tailnet's device directory.
+        #[arg(long)]
+        tailnet: Option<std::path::PathBuf>,
+    },
+    /// Receive one file over a tunnel, into --out (default: cwd).
+    Receive {
+        /// Directory to write the incoming file into.
+        #[arg(long, default_value = ".")]
+        out: std::path::PathBuf,
+        /// UDP address to listen on.
+        #[arg(long, default_value = "0.0.0.0:41641")]
+        listen: String,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// Reuse the same identity across runs by storing its secret in this file.
+        #[arg(long)]
+        identity: Option<std::path::PathBuf>,
+        /// Restrict the tunnel to this tailnet's device directory.
+        #[arg(long)]
+        tailnet: Option<std::path::PathBuf>,
+        /// Advert lifetime in seconds.
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
+    },
     /// Tailnet: a device's MLS group for owned-device meshing (spike).
     #[command(subcommand)]
     Tailnet(TailnetCommand),
@@ -245,6 +282,49 @@ fn main() -> anyhow::Result<()> {
                 &relays_or_default(relays),
                 psk.as_ref(),
             ))?;
+        }
+        Command::Send { path, target, relays, identity, tailnet } => {
+            let id = match &identity {
+                Some(secret) => noscat_core::Identity::from_secret(secret)
+                    .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
+                None => noscat_core::Identity::generate(),
+            };
+            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(noscat_core::tunnel::send_file(
+                &id,
+                &target,
+                &path,
+                &relays_or_default(relays),
+                psk.as_ref(),
+            ))?;
+        }
+        Command::Receive { out, listen, relays, identity, tailnet, ttl } => {
+            let id = match &identity {
+                Some(path) => {
+                    let secret = std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+                    noscat_core::Identity::from_secret(secret.trim()).map_err(|e| {
+                        anyhow::anyhow!("bad identity in {}: {e}", path.display())
+                    })?
+                }
+                None => noscat_core::Identity::generate(),
+            };
+            let listen: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
+            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            let (who, path) = rt.block_on(noscat_core::tunnel::receive_file(
+                &id,
+                listen,
+                &relays_or_default(relays),
+                ttl,
+                &out,
+                psk.as_ref(),
+            ))?;
+            eprintln!("# session with {who} closed");
+            println!("{}", path.display());
         }
         Command::Tailnet(cmd) => {
             let rt = tokio::runtime::Runtime::new()?;

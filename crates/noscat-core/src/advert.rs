@@ -1,7 +1,7 @@
 //! Overlay adverts: signed, expiring endpoint advertisements published to Nostr
 //! relays so peers can discover where a node is reachable.
 //!
-//! This mirrors FIPS's kind-37195 overlay advert (research/fips.md §3): a
+//! This mirrors the FIPS design's kind-37195 overlay advert: a
 //! parameterized replaceable event with a fixed `d` tag, JSON payload, and a
 //! NIP-40 expiration. Relays see *that* a node advertises, not who talks to it —
 //! traversal signaling (the sensitive part) is a separate, gift-wrapped channel.

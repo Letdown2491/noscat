@@ -1,6 +1,6 @@
 //! The tailnet: one MLS group per owner's set of devices, built on OpenMLS.
 //!
-//! Design (research/00-synthesis.md, "Marmot-shaped, OpenMLS-native"):
+//! Design (Marmot-shaped, OpenMLS-native):
 //! - Every device is a Nostr identity (npub) plus an MLS Ed25519 signing key
 //!   derived from the same secret (HKDF, same pattern as `crate::noise`).
 //! - A device advertises its ability to join by publishing an MLS *key
