@@ -28,6 +28,14 @@ class Noscat < Formula
     end
   end
 
+  # Linux bottles pour without a C toolchain (the binary is static musl);
+  # macOS Homebrew always has CLT, so plain-URL installs are fine there.
+  bottle do
+    root_url "https://github.com/Letdown2491/noscat/releases/download/v__VERSION__"
+    sha256 cellar: :any_skip_relocation, x86_64_linux: "__SHA256_BOTTLE_X86_64_LINUX__"
+    sha256 cellar: :any_skip_relocation, arm64_linux: "__SHA256_BOTTLE_ARM64_LINUX__"
+  end
+
   def install
     bin.install "noscat"
     man1.install "noscat.1"
