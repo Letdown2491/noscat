@@ -182,6 +182,117 @@ psk0. Consequences:
 Removal of a device therefore requires no notification to the removed
 device: it is locked out by the ratchet itself.
 
+## File transfer framing
+
+File transfer (`send`/`receive`) rides any established session — tailnet-
+scoped or not — as a small tagged protocol on top of the Noise transport.
+One Noise message = one UDP datagram, and the session's Noise nonces advance
+strictly sequentially and never appear on the wire; every reliability
+mechanism below is built on replaying *previously transmitted ciphertexts*
+(re-encryption would produce a nonce the peer cannot decrypt).
+
+Exactly one transfer runs per session. All integers are big-endian.
+
+### Message types
+
+Every plaintext payload begins with a one-byte type tag:
+
+| Tag | Name | Payload | Direction |
+|---|---|---|---|
+| `0x01` | HEADER | JSON, below | sender → receiver |
+| `0x02` | CHUNK | u32 seq + ≤1200 bytes | sender → receiver |
+| `0x03` | ACK | u32 next-expected-seq | receiver → sender |
+| `0x04` | FIN | (empty) | sender → receiver |
+| `0x05` | RESUME | u32 next-expected-seq | receiver → sender |
+
+An authenticated frame smaller than 21 bytes MUST be treated as junk and
+dropped: the only datagrams that fail to decrypt below that size are
+traversal punch markers, which carry no transfer state.
+
+### HEADER
+
+The sender opens with a HEADER whose plaintext, after the tag, is minified
+JSON:
+
+```json
+{
+  "name": "report.pdf",
+  "len": 104857600,
+  "sha256": "7d6b56faef7f6fc4b07c9e84a3b7505d21383ca0d6c58ab1479b5e56e2a56dfc"
+}
+```
+
+- `name` is only a filename (no path separators); receivers MUST sanitize it
+  before joining it to their output directory.
+- `len` is the file size in bytes.
+- `sha256` is the lowercase-hex SHA-256 of the *whole* file. It is the
+  transfer's identity: a receiver-held partial file is resumed only when its
+  recorded `(len, sha256)` match, and the finished file is verified against
+  it before being published under its real name.
+
+The sender repeats the HEADER (same ciphertext) on a short retry budget. Any
+authenticated reply proves the receiver is listening; losing the reply is not
+fatal, because chunk ACKs re-ack the header implicitly.
+
+The receiver answers with a **RESUME** frame carrying its resume point: the
+number of complete chunks it already holds durably from a previous
+interrupted attempt with the same `(len, sha256)`, or `0`. RESUME MAY equal
+the total chunk count (the previous attempt wrote everything but died before
+confirming), in which case the sender proceeds directly to the FIN exchange.
+
+### CHUNK phase
+
+The file is split into `total = ceil(len / 1200)` chunks of at most 1200
+bytes (MTU-sized: one datagram is one loss unit, and a full window burst —
+about 39 KiB — fits inside default kernel socket buffers). Chunk `i` covers
+bytes `[i·1200, min(len, (i+1)·1200))`, and its frame payload is
+`u32 seq` + the raw bytes. Sequences start at the resume point.
+
+The sender keeps up to 32 chunks in flight. A chunk unacked after 400 ms is
+retransmitted — by replaying the *same ciphertext*, never re-encrypting —
+and after 120 failed retries per chunk the transfer is abandoned. The
+receiver writes chunks strictly in order: because snow only decrypts frames
+in nonce order and the sender emits seqs in nonce order, every frame that
+decrypts *is* the next expected chunk; frames beyond a gap are undecryptable
+and skipped.
+
+The receiver ACKs cumulatively — "I expect seq *n* next" — only at window
+boundaries and at the final chunk. Every ack is a fresh Noise message the
+sender must consume in order, so a lost ack makes later acks undecryptable
+until a replay fills the nonce gap; the receiver therefore keeps a bounded
+history of recent ack ciphertexts and replays it (a) periodically, and (b)
+immediately whenever the sender's retransmissions show it is stuck. On the
+sender side, acks with `seq` below the highest seen are stale replays and
+ignored.
+
+### FIN and completion
+
+After the last chunk the sender sends FIN and waits until either a
+cumulative ack reaches `total` or the receiver FINs back. The receiver,
+having flushed the file to disk, verifies the streamed bytes (including any
+resumed prefix) against the HEADER's `sha256`; only on a match does it
+rename the partial into place, and it then answers every sender replay with
+its FIN plus ack history for a linger period (10 s in the reference
+implementation) so the sender's wait always resyncs and completes only after
+the file is truly on disk. A sha256 mismatch or an incomplete transfer MUST
+leave the partial file (and its resume state) in place for the next attempt.
+
+### Resume state (receiver-local)
+
+Receivers persist, next to the partial file `<name>.noscat-part`, a sidecar
+recording `(len, sha256, acked-chunk-count)`, refreshed at every window-
+boundary ack *after* the flush. This sidecar is local state, never on the
+wire. On the next HEADER:
+
+- If the sidecar's `(len, sha256)` matches and the partial file holds at
+  least the recorded chunk count, resume: seed the running sha256 with the
+  durable prefix, append from there, and answer RESUME with the recorded
+  count.
+- Otherwise discard the partial and start from scratch.
+
+Senders SHOULD refuse transfers whose chunk count would exceed
+`u32::MAX` (about 5 TiB at 1200-byte chunks).
+
 ## Client behavior summary
 
 1. `advert`: publish/refresh kind `37195` with endpoints and `noise_pub`.
@@ -194,6 +305,8 @@ device: it is locked out by the ratchet itself.
    process per the receiver rules above.
 6. `serve`/`pipe`/`connect`: resolve the peer's advert, establish the Noise
    session (XKpsk0 when a tailnet is in scope), and pump bytes.
+7. `send`/`receive`: run the file-transfer framing above over the session;
+   interrupted transfers resume from the receiver's durable point.
 
 ## Security Considerations
 
@@ -217,10 +330,26 @@ device: it is locked out by the ratchet itself.
 - **Key package hygiene.** Publishers SHOULD use fresh key packages with a
   bounded lifetime and republish on a schedule; the parameterized
   replaceable kind makes the latest one authoritative.
+- **Transfer authenticity and integrity.** The transfer header travels
+  inside the Noise channel, so its `sha256` and `name` are authenticated
+  against the sender's static key — a man-in-the-middle cannot substitute a
+  file or name. The sha256 additionally catches corruption and partial
+  writes below the Noise layer (crashes between write and finalize); a
+  mismatched finished file is never renamed into place.
+- **Resume state is not attacker-controlled across files.** A partial file
+  is only continued when its recorded `(len, sha256)` matches the new
+  header, so a stale or hostile sidecar cannot splice bytes from one file
+  into another; worst case it forces a fresh transfer. The sidecar lives
+  next to the output and is never transmitted.
+- **Replay within a transfer.** Replayed ciphertexts are load-bearing (they
+  are how lost frames and acks recover) and safe: snow rejects replayed
+  nonces with a decrypt failure, which the receiver answers by replaying
+  its ack history, never by re-processing the frame.
 
 ## Reference implementation
 
 A complete userspace implementation in Rust lives at
 <https://github.com/Letdown2491/noscat> (crates `noscat-core`:
-`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`). It builds on
+`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`, `tunnel.rs` — the
+last of which implements the transfer framing above). It builds on
 OpenMLS 0.8 and nostr-tools-compatible kinds (Marmot's key-package slot).
