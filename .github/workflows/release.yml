@@ -222,11 +222,18 @@ jobs:
           fi
           # Idempotent: a rerun of a half-finished publish must skip crates
           # whose version is already on the index instead of failing there.
+          # (A curl pre-check against the index does not work here: crates.io
+          # rate-limits GitHub Actions runner IPs, so the probe itself
+          # errors.) Publish and read the outcome instead.
           publish_if_missing() {
-            if curl -fsSL "https://crates.io/api/v1/crates/$1/$VERSION" > /dev/null 2>&1; then
+            local out
+            if out=$(cargo publish --locked -p "$1" 2>&1); then
+              echo "published $1 $VERSION"
+            elif echo "$out" | grep -q "already exists"; then
               echo "$1 $VERSION is already published; skipping"
             else
-              cargo publish --locked -p "$1"
+              echo "$out" >&2
+              exit 1
             fi
           }
           publish_if_missing noscat-core
