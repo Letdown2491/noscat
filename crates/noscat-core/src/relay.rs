@@ -129,6 +129,55 @@ pub async fn fetch_advert_for(
     Ok(found)
 }
 
+/// Fetch a device's published MLS key package (tailnet kind 30443) by author.
+///
+/// `None` means "nothing arrived in time" — usually the device has not run
+/// `noscat tailnet publish` yet.
+pub async fn fetch_key_package(
+    relays: &[String],
+    device: PublicKey,
+) -> Result<Option<Event>, RelayError> {
+    use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
+
+    if relays.is_empty() {
+        return Err(RelayError::NoRelays);
+    }
+    let filter = Filter::new()
+        .kind(Kind::Custom(KEY_PACKAGE_KIND))
+        .identifier(KEY_PACKAGE_IDENTIFIER)
+        .author(device);
+
+    let client = Client::new();
+    for relay in relays {
+        client.add_relay(relay).await?;
+    }
+    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
+        .await
+        .map_err(|_| RelayError::ConnectTimeout)?;
+    client.subscribe(filter).await?;
+
+    let mut notifications = client.notifications();
+    let found = timeout(
+        FETCH_WAIT,
+        async {
+            while let Some(notification) = notifications.next().await {
+                let ClientNotification::Event { event, .. } = notification else {
+                    continue;
+                };
+                if event.pubkey == device {
+                    return Some(event.as_ref().clone());
+                }
+            }
+            None
+        },
+    )
+    .await
+    .unwrap_or(None);
+
+    client.shutdown().await;
+    Ok(found)
+}
+
 /// Subscribe to noscat adverts on the given relays and print them as they
 /// arrive, until the task is cancelled. Returns when the stream ends.
 pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {

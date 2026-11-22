@@ -63,6 +63,57 @@ enum Command {
         #[arg(long)]
         identity: Option<String>,
     },
+    /// Tailnet: a device's MLS group for owned-device meshing (spike).
+    #[command(subcommand)]
+    Tailnet(TailnetCommand),
+}
+
+#[derive(Subcommand)]
+enum TailnetCommand {
+    /// Create a tailnet owned by this device's directory.
+    Create {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Publish this device's MLS key package so the owner can invite it.
+    Publish {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Invite a device (by npub) into this device's tailnet.
+    Invite {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// The invitee's npub.
+        device: String,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Wait for a gift-wrapped invitation and join the tailnet.
+    Join {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Print the tailnet's current epoch tunnel PSK (hex).
+    Psk {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -170,6 +221,40 @@ fn main() -> anyhow::Result<()> {
                 &target,
                 &relays_or_default(relays),
             ))?;
+        }
+        Command::Tailnet(cmd) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            match cmd {
+                TailnetCommand::Create { dir, relays: _ } => {
+                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                    device.create_tailnet()?;
+                    eprintln!(
+                        "# ✅ tailnet created; owner is {} (dir: {})",
+                        device.identity.npub(),
+                        dir.display()
+                    );
+                }
+                TailnetCommand::Publish { dir, relays } => {
+                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                    rt.block_on(device.publish_key_package(&relays_or_default(relays)))?;
+                    eprintln!("# 📢 key package published as {}", device.identity.npub());
+                }
+                TailnetCommand::Invite { dir, device: npub, relays } => {
+                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                    let invitee = nostr::prelude::PublicKey::parse(&npub)
+                        .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
+                    rt.block_on(device.invite(invitee, &relays_or_default(relays)))?;
+                    eprintln!("# ✅ invited {npub} into the tailnet");
+                }
+                TailnetCommand::Join { dir, relays } => {
+                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                    rt.block_on(device.join_tailnet(&relays_or_default(relays)))?;
+                }
+                TailnetCommand::Psk { dir } => {
+                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                    println!("{}", hex::encode(device.tunnel_psk()?));
+                }
+            }
         }
     }
     Ok(())

@@ -12,6 +12,7 @@ pub mod identity;
 pub mod noise;
 pub mod relay;
 pub mod stun;
+pub mod tailnet;
 pub mod traversal;
 pub mod tunnel;
 
