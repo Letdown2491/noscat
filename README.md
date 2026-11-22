@@ -135,8 +135,8 @@ noscat send ./report.pdf <A's npub> --tailnet ./device-b
 ### Roadmap
 
 - Transfer throughput (sliding-window ACKs) and resume.
-- Multi-member tailnets with ACL policy as Marmot GroupContext components.
-- Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.
+- ~~Multi-member tailnets with ACL policy as Marmot GroupContext components.~~ (done)
+- ~~Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.~~ (done)
 - NIP draft.
 
 ## Development

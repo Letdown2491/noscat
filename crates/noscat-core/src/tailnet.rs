@@ -11,10 +11,10 @@
 //!   the Noise handshake in `crate::tunnel` only completes for group members
 //!   of the same epoch. Removing a device ratchets the epoch — it is out.
 //!
-//! Storage caveat (spike): OpenMLS state is persisted through the memory
-//! storage's own file serialization (`openmls_memory_storage::persistence`),
-//! which upstream marks test-only. The NIP will require a real storage
-//! profile (SQLite) before this leaves spike status.
+//! Storage: OpenMLS state (key packages, trees, secrets) lives in a SQLite
+//! storage profile (`openmls_sqlite_storage`, serde-JSON codec) at
+//! `<device>/mls.sqlite3`, migrated on open. The group id rides in a
+//! `tailnet.json` sidecar so `Device::open` knows which group to load.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -52,6 +52,8 @@ pub enum TailnetError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Nostr(#[from] nostr::error::Error),
     #[error(transparent)]
@@ -88,27 +90,67 @@ pub struct Device {
     group_id: Option<GroupId>,
 }
 
-/// OpenMLS provider with *our* storage handle: OpenMlsRustCrypto bundles a
-/// private memory storage with no mutable accessor, and we need `&mut` to
-/// load persisted state.
+/// A serde-JSON codec for the SQLite MLS store: OpenMLS 0.8 derives
+/// `Serialize`/`Deserialize` on all stored entity types.
+#[derive(Default)]
+pub struct JsonCodec;
+
+impl openmls_sqlite_storage::Codec for JsonCodec {
+    type Error = serde_json::Error;
+
+    fn to_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(value)
+    }
+
+    fn from_slice<T: serde::de::DeserializeOwned>(slice: &[u8]) -> Result<T, Self::Error> {
+        serde_json::from_slice(slice)
+    }
+}
+
+/// The concrete store type: serde-JSON codec over an owned rusqlite handle.
+type SqliteStore =
+    openmls_sqlite_storage::SqliteStorageProvider<JsonCodec, openmls_sqlite_storage::Connection>;
+
+/// OpenMLS provider with a SQLite storage profile: all MLS state (key
+/// packages, trees, secrets, groups) survives process restarts through
+/// `<device>/mls.sqlite3`. `Default` builds an in-memory store (tests).
 pub struct Provider {
     crypto: openmls_rust_crypto::RustCrypto,
-    storage: openmls_memory_storage::MemoryStorage,
+    storage: SqliteStore,
+}
+
+impl Provider {
+    /// Open (creating and migrating if necessary) an on-disk MLS store.
+    pub fn open(path: &std::path::Path) -> Result<Self, TailnetError> {
+        Self::from_connection(openmls_sqlite_storage::Connection::open(path)?)
+    }
+
+    fn from_connection(connection: openmls_sqlite_storage::Connection) -> Result<Self, TailnetError> {
+        let mut storage = SqliteStore::new(connection);
+        storage
+            .run_migrations()
+            .map_err(|e| TailnetError::Mls(format!("mls store migration failed: {e}")))?;
+        Ok(Self {
+            crypto: openmls_rust_crypto::RustCrypto::default(),
+            storage,
+        })
+    }
 }
 
 impl Default for Provider {
     fn default() -> Self {
-        Self {
-            crypto: openmls_rust_crypto::RustCrypto::default(),
-            storage: openmls_memory_storage::MemoryStorage::default(),
-        }
+        Self::from_connection(
+            openmls_sqlite_storage::Connection::open_in_memory()
+                .expect("in-memory sqlite always opens"),
+        )
+        .expect("in-memory sqlite migration cannot fail")
     }
 }
 
 impl openmls_traits::OpenMlsProvider for Provider {
     type CryptoProvider = openmls_rust_crypto::RustCrypto;
     type RandProvider = openmls_rust_crypto::RustCrypto;
-    type StorageProvider = openmls_memory_storage::MemoryStorage;
+    type StorageProvider = SqliteStore;
 
     fn crypto(&self) -> &Self::CryptoProvider {
         &self.crypto
@@ -134,21 +176,8 @@ impl Device {
             id
         };
 
-        // Load MLS state if this device already has one.
-        let mut provider = Provider::default();
-        let mls_path = dir.join("mls.json");
-        if mls_path.exists() {
-            let file = std::fs::File::open(&mls_path)?;
-            provider
-                .storage
-                .load_from_file(&file)
-                .map_err(|e| {
-                    TailnetError::Mls(format!(
-                        "cannot load MLS state from {}: {e}",
-                        mls_path.display()
-                    ))
-                })?;
-        }
+        // Load MLS state (SQLite storage profile) if this device has one.
+        let provider = Provider::open(&dir.join("mls.sqlite3"))?;
 
         let signer = mls_signer(&identity)?;
         signer
@@ -173,16 +202,9 @@ impl Device {
         })
     }
 
-    /// Persist MLS state to the device directory.
+    /// Persist device state. MLS state is written to SQLite by OpenMLS itself
+    /// as operations run; this only refreshes the group-id sidecar.
     fn persist(&self) -> Result<(), TailnetError> {
-        let mls_path = self.dir.join("mls.json");
-        let file = std::fs::File::create(&mls_path).map_err(|e| {
-            TailnetError::Mls(format!("create {}: {e}", mls_path.display()))
-        })?;
-        self.provider
-            .storage
-            .save_to_file(&file)
-            .map_err(|e| TailnetError::Mls(format!("cannot save MLS state: {e}")))?;
         if let Some(gid) = &self.group_id {
             let gid_path = self.dir.join("tailnet.json");
             std::fs::write(&gid_path, format!("{}\n", hex::encode(gid.as_slice())))
