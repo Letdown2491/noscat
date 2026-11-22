@@ -12,9 +12,10 @@ use tokio::time::timeout;
 use crate::advert::{Advert, AdvertError, Endpoint, ADVERT_IDENTIFIER, ADVERT_KIND};
 use crate::identity::Identity;
 
-/// Relays used when the operator does not configure any. Same examples the
-/// FIPS docs use; overridable with `--relay`.
-pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.damus.io", "wss://nos.lol"];
+/// Relays used when the operator does not configure any. Overridable with
+/// `--relay`. Chosen for uptime; nos.lol carried every message in testing
+/// while others flaked.
+pub const DEFAULT_RELAYS: &[&str] = &["wss://nos.lol", "wss://relay.primal.net", "wss://nostr.mom"];
 
 /// How long to wait for relay connections before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

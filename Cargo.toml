@@ -17,6 +17,7 @@ curve25519-dalek = "4.1"
 secp256k1 = { version = "0.30", default-features = false, features = ["alloc", "std", "rand"] }
 hkdf = "0.12"
 sha2 = "0.10"
+rand = "0.9"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

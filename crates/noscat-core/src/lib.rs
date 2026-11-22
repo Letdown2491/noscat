@@ -11,6 +11,8 @@ pub mod advert;
 pub mod identity;
 pub mod noise;
 pub mod relay;
+pub mod stun;
+pub mod traversal;
 pub mod tunnel;
 
 pub use advert::Advert;
