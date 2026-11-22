@@ -80,6 +80,8 @@ pub enum TunnelError {
     UnsafePath(PathBuf),
     #[error("transfer stalled: the path keeps dropping data or the peer stopped responding")]
     TransferStalled,
+    #[error("transfer too large: {0} bytes exceeds the u32 chunk ceiling (~5 TiB)")]
+    TransferTooLarge(u64),
 }
 
 /// The identity's Noise keypair (public, private), derived from its secret —
@@ -354,7 +356,17 @@ async fn serve_session(
     let puncher = tokio::spawn(punch_loop(socket.clone(), peer_candidates));
 
     let hs = noise::responder(&noise_priv, psk)?;
-    let mut session = accept_handshake(hs, &socket, relays).await?;
+    let mut session = match accept_handshake(hs, &socket, relays).await {
+        Ok(s) => s,
+        // The handshake failed: tear down the signaling tasks too, or they
+        // (and their relay connections) outlive this call.
+        Err(e) => {
+            for task in [watch, replier, puncher] {
+                task.abort();
+            }
+            return Err(e);
+        }
+    };
     session.tasks = vec![watch, replier, puncher];
     Ok(session)
 }
@@ -421,6 +433,7 @@ async fn dial_session(
     let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     let peer = loop {
         if tokio::time::Instant::now() >= deadline {
+            watch.abort();
             return Err(TunnelError::HandshakeTimeout);
         }
         for addr in &candidates {
@@ -436,7 +449,10 @@ async fn dial_session(
                     Err(e) => tracing::debug!(%from, %e, "stray datagram during handshake"),
                 }
             }
-            Ok(Err(e)) => return Err(e.into()),
+            Ok(Err(e)) => {
+                watch.abort();
+                return Err(e.into());
+            }
             Err(_) => {}
         }
         while let Ok((sender, payload)) = rx.try_recv() {
@@ -477,7 +493,7 @@ async fn dial_session(
 /// (the shared-socket listener).
 enum Datagrams<'a> {
     Socket(Arc<UdpSocket>, SocketAddr),
-    Channel(&'a mut mpsc::UnboundedReceiver<Vec<u8>>),
+    Channel(&'a mut mpsc::Receiver<Vec<u8>>),
 }
 
 impl Datagrams<'_> {
@@ -648,11 +664,11 @@ struct TunnelListener {
     noise_priv: [u8; 32],
     psk: Option<[u8; 32]>,
     relays: Vec<String>,
-    accept_rx: mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
+    accept_rx: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     /// Established sessions: source addr -> that session's tunnel datagrams.
-    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
     /// Handshakes in progress: source addr -> its msg3-era datagrams.
-    handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+    handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
 }
 
 /// Bind the shared listen socket, publish one advert, and start the router,
@@ -680,11 +696,11 @@ async fn bind_listener(
             .join(", ")
     );
 
-    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+    let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let (accept_tx, accept_rx) = mpsc::unbounded_channel();
+    let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
 
     // Router: demux every datagram by source address. Punch markers and
     // other sub-frame junk are dropped here — they carry no state.
@@ -729,10 +745,16 @@ async fn bind_listener(
         while let Some((sender, payload)) = rx.recv().await {
             let eps = parse_endpoints(&payload.endpoints);
             tracing::info!(%sender, ?eps, "traversal request received");
-            c_candidates
-                .lock()
-                .expect("candidates lock")
-                .extend(eps.iter().map(|a| (*a, eps.clone())));
+            {
+                let mut map = c_candidates.lock().expect("candidates lock");
+                if map.len() < MAX_CANDIDATE_PEERS || map.keys().any(|k| eps.contains(k)) {
+                    map.extend(eps.iter().map(|a| (*a, eps.clone())));
+                } else {
+                    // Flood guard: too many distinct peers are already being
+                    // punched; ignore the rest until they free up.
+                    tracing::warn!("candidate table full; ignoring traversal request");
+                }
+            }
             let _ = crate::traversal::send_traversal(
                 &reply_identity,
                 sender,
@@ -783,22 +805,36 @@ async fn bind_listener(
 /// Send one datagram to its session (by source address), to the handshake
 /// currently being accepted from that source, or — an unknown source — to
 /// the accept queue as a candidate handshake opener.
+///
+/// All three queues are bounded: datagrams are only ever dropped when a
+/// consumer stalls. A handshake replay recovers itself (the dialer re-sends
+/// msg1 every round); a session whose queue overflows is torn down — its
+/// pump has no retransmit layer, so silent drops would corrupt the bridged
+/// stream, and an unbounded queue would let one stalled peer balloon memory.
 fn route_datagram(
     from: SocketAddr,
     datagram: &[u8],
-    sessions: &Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>,
-    handshakes: &Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>,
-    accept: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    sessions: &Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>,
+    handshakes: &Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>,
+    accept: &mpsc::Sender<(SocketAddr, Vec<u8>)>,
 ) {
-    if let Some(tx) = sessions.lock().expect("sessions lock").get(&from) {
-        let _ = tx.send(datagram.to_vec());
-        return;
+    {
+        let mut map = sessions.lock().expect("sessions lock");
+        if let Some(tx) = map.get(&from) {
+            if tx.try_send(datagram.to_vec()).is_err() {
+                // Queue full (peer stalled) or already closed: end the
+                // session. Dropping the sender closes its channel, and the
+                // pump reading it returns.
+                map.remove(&from);
+            }
+            return;
+        }
     }
     if let Some(tx) = handshakes.lock().expect("handshakes lock").get(&from) {
-        let _ = tx.send(datagram.to_vec());
+        let _ = tx.try_send(datagram.to_vec());
         return;
     }
-    let _ = accept.send((from, datagram.to_vec()));
+    let _ = accept.try_send((from, datagram.to_vec()));
 }
 
 /// One accepted tunnel: the shared socket for egress, a dedicated channel
@@ -809,7 +845,7 @@ struct ListenerSession {
     peer: SocketAddr,
     session: snow::TransportState,
     who: String,
-    data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    data_rx: mpsc::Receiver<Vec<u8>>,
     /// Background lookup of the dialer's npub (relay round-trip). Display
     /// only — the data path must never wait on it.
     who_lookup: Option<tokio::task::JoinHandle<String>>,
@@ -825,7 +861,7 @@ impl ListenerSession {
         SocketAddr,
         snow::TransportState,
         String,
-        mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
     ) {
         let who = match self.who_lookup.take() {
             Some(h) if h.is_finished() => h.await.unwrap_or_else(|_| self.who.clone()),
@@ -859,10 +895,21 @@ impl TunnelListener {
 
             // Register before msg2 goes out: the dialer's msg3 can only
             // follow it, and must land in our channel, not the accept queue.
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (tx, mut rx) = mpsc::channel(HANDSHAKE_QUEUE);
             self.handshakes.lock().expect("handshakes lock").insert(from, tx);
-            let n = hs.write_message(b"", &mut wire)?;
-            self.socket.send_to(&wire[..n], from).await?;
+            // Any failure from here on must free the handshakes entry, or
+            // this source stays routed to a dead channel forever.
+            let n = match hs.write_message(b"", &mut wire) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.handshakes.lock().expect("handshakes lock").remove(&from);
+                    return Err(e.into());
+                }
+            };
+            if let Err(e) = self.socket.send_to(&wire[..n], from).await {
+                self.handshakes.lock().expect("handshakes lock").remove(&from);
+                return Err(e.into());
+            }
 
             let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
             let ok = loop {
@@ -898,7 +945,7 @@ impl TunnelListener {
                 }
             });
 
-            let (data_tx, data_rx) = mpsc::unbounded_channel();
+            let (data_tx, data_rx) = mpsc::channel(SESSION_QUEUE);
             self.sessions.lock().expect("sessions lock").insert(from, data_tx);
             return Ok(ListenerSession {
                 socket: self.socket.clone(),
@@ -1004,8 +1051,26 @@ const RTO: Duration = Duration::from_millis(400);
 const FIN_LINGER: Duration = Duration::from_secs(10);
 /// Retransmission budget per chunk before declaring the path too lossy.
 const MAX_RETRIES: u32 = 120;
+/// Header-ack retry budget: enough to survive a burst of lost replies
+/// (the receiver replays its ack history on every header replay) without
+/// hanging the setup for long when the path is truly dead.
+const HEADER_RETRIES: u32 = 10;
 /// Receiver-side inactivity bound: the sender stopped answering.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Per-session datagram queue depth in the listener's router. Pump sessions
+/// have no retransmit layer, so a full queue tears the session down instead
+/// of dropping frames (silent loss would corrupt the bridged stream) — a
+/// bounded queue keeps one stalled or hostile peer from buffering the
+/// internet in memory. 64 × max frame ≈ 4 MiB worst case.
+const SESSION_QUEUE: usize = 64;
+/// Queue depth for a handshake in progress (msg3-era datagrams only).
+const HANDSHAKE_QUEUE: usize = 16;
+/// Queue depth of candidate handshake openers waiting for `accept`.
+const ACCEPT_QUEUE: usize = 64;
+/// Cap on distinct peer candidate lists held by the listener: a flood of
+/// gift-wrapped traversal requests must not grow the map (or the punch
+/// loop's sweep) without bound.
+const MAX_CANDIDATE_PEERS: usize = 256;
 
 /// One encrypted send + the ack round-trip for it (header and FIN frames).
 ///
@@ -1339,7 +1404,7 @@ where
                     file.flush().await?;
                     if let Some((meta_path, meta)) = meta.as_mut() {
                         meta.chunks = seq as u64 + 1;
-                        let _ = std::fs::write(meta_path, serde_json::to_string(meta)?);
+                        let _ = tokio::fs::write(meta_path, serde_json::to_string(meta)?).await;
                     }
                     ack_and_replay(socket, peer, hs, TAG_ACK, seq + 1, history, &mut wire, false)
                         .await?;
@@ -1431,9 +1496,12 @@ async fn send_stream(
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
 
-    // -> header; a small ack budget: a lost header ack self-heals once the
-    // chunks flow (their acks replay the header ack too). The reply carries
-    // the receiver's resume point (chunks already on disk from an
+    // -> header; a modest retry budget: without an ack we cannot know the
+    // receiver's resume point, and guessing "start from zero" would corrupt
+    // a resumed transfer (duplicated bytes, then a sha mismatch) — so a dead
+    // path here aborts the attempt instead. Retrying is cheap: the receiver
+    // keeps its partial, and the next attempt resumes from it. The reply
+    // carries the receiver's resume point (chunks already on disk from an
     // interrupted attempt) or u32::MAX if a FIN completed the wait.
     let mut msg = vec![TAG_HEADER];
     msg.extend(serde_json::to_string(&TransferHeader {
@@ -1441,17 +1509,16 @@ async fn send_stream(
         len,
         sha256: hex::encode(file_sha),
     })?.into_bytes());
-    let reply = match send_and_ack(socket, peer, hs, &msg, None, 3, &mut plain, &mut wire).await {
-        Ok(reply) => reply,
-        Err(e) => {
-            tracing::debug!("header ack not heard ({e}); streaming anyway");
-            0
-        }
-    };
+    let reply = send_and_ack(socket, peer, hs, &msg, None, HEADER_RETRIES, &mut plain, &mut wire).await?;
 
-    // -> chunks through the sliding window, starting at the resume point.
+    // u32 chunk indexing is the wire protocol's hard ceiling (see the NIP):
+    // refuse anything past it rather than wrap the chunk count.
+    let total_chunks = len.div_ceil(CHUNK as u64);
+    if total_chunks > u32::MAX as u64 {
+        return Err(TunnelError::TransferTooLarge(len));
+    }
+    let total_chunks = total_chunks as u32;
     let started = Instant::now();
-    let total_chunks = len.div_ceil(CHUNK as u64) as u32;
     let resumed = reply != u32::MAX && reply > 0;
     let first = reply.min(total_chunks);
     if resumed {
@@ -1539,7 +1606,13 @@ async fn receive_stream(
     let final_path = out_dir.join(&name);
     let part_path = out_dir.join(format!("{}.noscat-part", name.display()));
     let meta_path = out_dir.join(format!("{}.noscat-part.meta", name.display()));
-    let total_chunks = header.len.div_ceil(CHUNK as u64) as u32;
+    // u32 chunk indexing is the wire protocol's hard ceiling; a header past
+    // it (or an absurd length like u64::MAX) is refused rather than trusted.
+    let total_chunks = header.len.div_ceil(CHUNK as u64);
+    if total_chunks > u32::MAX as u64 {
+        return Err(TunnelError::TransferTooLarge(header.len));
+    }
+    let total_chunks = total_chunks as u32;
     eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
 
     // Resume decision: a partial file from an interrupted attempt continues
@@ -1643,9 +1716,9 @@ async fn receive_stream(
         match timeout_at(quiet, socket.recv_from(&mut wire)).await {
             Err(_) => break, // sender gone quiet: it has our confirmation
             Ok(r) => {
-                let (_, from) = r?;
-                if from != peer {
-                    continue;
+                let (n, from) = r?;
+                if from != peer || n < MIN_FRAME {
+                    continue; // stranger or punch-sized junk: keep lingering
                 }
                 socket.send_to(&fin, peer).await?;
                 for ct in history.iter() {
@@ -1670,17 +1743,17 @@ mod tests {
     /// port without the kernel pinning a flow to the wrong socket.
     #[test]
     fn router_demuxes_by_source() {
-        let (accept_tx, mut accept_rx) = mpsc::unbounded_channel();
-        let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+        let (accept_tx, mut accept_rx) = mpsc::channel(ACCEPT_QUEUE);
+        let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> =
+        let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let established: SocketAddr = "10.0.0.1:1111".parse().unwrap();
-        let (est_tx, mut est_rx) = mpsc::unbounded_channel();
+        let (est_tx, mut est_rx) = mpsc::channel(8);
         sessions.lock().unwrap().insert(established, est_tx);
         let handshaking: SocketAddr = "10.0.0.2:2222".parse().unwrap();
-        let (hs_tx, mut hs_rx) = mpsc::unbounded_channel();
+        let (hs_tx, mut hs_rx) = mpsc::channel(8);
         handshakes.lock().unwrap().insert(handshaking, hs_tx);
         let unknown: SocketAddr = "10.0.0.3:3333".parse().unwrap();
 
@@ -1697,6 +1770,36 @@ mod tests {
         assert!(est_rx.try_recv().is_err());
         assert!(hs_rx.try_recv().is_err());
         assert!(accept_rx.try_recv().is_err());
+    }
+
+    /// A full session queue must tear the session down, not drop frames
+    /// silently (a pump has no retransmit layer) and not buffer forever:
+    /// the router removes the sender, so the session's channel closes and
+    /// its pump observes end-of-source.
+    #[tokio::test]
+    async fn full_session_queue_ends_the_session() {
+        let (accept_tx, _accept_rx) = mpsc::channel(ACCEPT_QUEUE);
+        let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let peer: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        sessions.lock().unwrap().insert(peer, tx);
+
+        for i in 0..2u8 {
+            route_datagram(peer, &[i], &sessions, &handshakes, &accept_tx);
+        }
+        // Queue is full now: the next frame ends the session instead of
+        // being silently dropped.
+        route_datagram(peer, &[9], &sessions, &handshakes, &accept_tx);
+        assert!(
+            sessions.lock().unwrap().get(&peer).is_none(),
+            "overflowed session must be removed from the router"
+        );
+        assert_eq!(rx.recv().await.unwrap(), [0]);
+        assert_eq!(rx.recv().await.unwrap(), [1]);
+        assert!(rx.recv().await.is_none(), "channel must be closed");
     }
 
     /// Full transfer roundtrip over real UDP loopback — through a proxy that

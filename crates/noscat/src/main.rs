@@ -242,7 +242,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // The tailnet's epoch PSK, if the operator scoped the tunnel to a group.
-    fn tailnet_psk(dir: &std::path::PathBuf) -> anyhow::Result<[u8; 32]> {
+    fn tailnet_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
         let device = noscat_core::tailnet::Device::open(dir)?;
         let psk = device.tunnel_psk().map_err(|e| anyhow::anyhow!("{e}"))?;
         let psk: [u8; 32] = psk
@@ -321,7 +321,7 @@ fn main() -> anyhow::Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
             let rt = tokio::runtime::Runtime::new()?;
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             let who = rt.block_on(noscat_core::tunnel::serve(
                 &id,
                 listen,
@@ -343,7 +343,7 @@ fn main() -> anyhow::Result<()> {
                 None => noscat_core::Identity::generate(),
             };
             let rt = tokio::runtime::Runtime::new()?;
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             rt.block_on(noscat_core::tunnel::pipe(
                 &id,
                 &target,
@@ -357,7 +357,7 @@ fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
                 None => noscat_core::Identity::generate(),
             };
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(noscat_core::tunnel::send_file(
                 &id,
@@ -381,7 +381,7 @@ fn main() -> anyhow::Result<()> {
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             let rt = tokio::runtime::Runtime::new()?;
             let (who, path) = rt.block_on(noscat_core::tunnel::receive_file(
                 &id,
@@ -411,7 +411,7 @@ fn main() -> anyhow::Result<()> {
             let to: std::net::SocketAddr = to
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --to address: {e}"))?;
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(noscat_core::tunnel::expose_tcp(
                 &id,
@@ -428,7 +428,7 @@ fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
                 None => noscat_core::Identity::generate(),
             };
-            let psk = tailnet.as_ref().map(tailnet_psk).transpose()?;
+            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(noscat_core::tunnel::forward_tcp(
                 &id,

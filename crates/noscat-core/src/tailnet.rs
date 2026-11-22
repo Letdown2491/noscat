@@ -21,7 +21,6 @@ use std::time::Duration;
 
 use nostr::nips::nip59::GiftWrapBuilder;
 use nostr::prelude::*;
-use nostr_sdk::prelude::*;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
@@ -169,9 +168,34 @@ impl Device {
         std::fs::create_dir_all(dir)?;
         let secret_path = dir.join("identity.nsec");
         let identity = if secret_path.exists() {
-            Identity::from_secret(std::fs::read_to_string(&secret_path)?.trim())?
+            let identity = Identity::from_secret(std::fs::read_to_string(&secret_path)?.trim())?;
+            // Heal secrets written by older versions with default (loose)
+            // permissions: only the owner should ever read this file.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &secret_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            identity
         } else {
             let id = Identity::generate();
+            // Created owner-only from the start: the nsec is the device's
+            // master secret (Nostr, Noise, and MLS all derive from it).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                use std::io::Write as _;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&secret_path)?
+                    .write_all(format!("{}\n", id.secret_hex()).as_bytes())?;
+            }
+            #[cfg(not(unix))]
             std::fs::write(&secret_path, format!("{}\n", id.secret_hex()))?;
             id
         };
@@ -326,11 +350,7 @@ impl Device {
             .finalize(self.identity.keys())
             .map_err(|e| TailnetError::Nostr(e))?;
 
-        let client = Client::new();
-        for relay in relays {
-            client.add_relay(relay).await?;
-        }
-        client.connect().and_wait(Duration::from_secs(8)).await;
+        let client = crate::relay::connect_client(relays).await?;
         client.send_event(&event).await?;
         client.shutdown().await;
         Ok(())
@@ -542,11 +562,7 @@ impl Device {
             .finalize(self.identity.keys())
             .map_err(|e| TailnetError::Nostr(e))?;
 
-        let client = Client::new();
-        for relay in relays {
-            client.add_relay(relay).await?;
-        }
-        client.connect().and_wait(Duration::from_secs(8)).await;
+        let client = crate::relay::connect_client(relays).await?;
         client.send_event(&gift_wrap).await?;
         client.shutdown().await;
         Ok(())

@@ -26,14 +26,14 @@ const GIFT_WRAP_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TraversalError {
-    #[error("no relays configured")]
-    NoRelays,
     #[error(transparent)]
     Sdk(#[from] nostr_sdk::error::Error),
     #[error(transparent)]
     Nostr(#[from] nostr::error::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Relay(#[from] crate::relay::RelayError),
 }
 
 /// Payload sealed inside the gift wrap: "here is who I am on the data plane
@@ -54,9 +54,6 @@ pub async fn send_traversal(
     endpoints: Vec<Endpoint>,
     relays: &[String],
 ) -> Result<(), TraversalError> {
-    if relays.is_empty() {
-        return Err(TraversalError::NoRelays);
-    }
     let payload = serde_json::to_string(&TraversalPayload {
         noise_pub: hex::encode(noise_pub),
         endpoints,
@@ -72,11 +69,7 @@ pub async fn send_traversal(
         .expiration(GIFT_WRAP_TTL)
         .finalize(identity.keys())?;
 
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().and_wait(Duration::from_secs(8)).await;
+    let client = crate::relay::connect_client(relays).await?;
     client.send_event(&gift_wrap).await?;
     client.shutdown().await;
     Ok(())
@@ -91,14 +84,7 @@ pub async fn watch_traversal(
     relays: Vec<String>,
     tx: mpsc::Sender<(PublicKey, TraversalPayload)>,
 ) -> Result<(), TraversalError> {
-    if relays.is_empty() {
-        return Err(TraversalError::NoRelays);
-    }
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().and_wait(Duration::from_secs(8)).await;
+    let client = crate::relay::connect_client(&relays).await?;
     let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
     client.subscribe(filter).await?;
 
@@ -134,14 +120,7 @@ pub async fn watch_tailnet(
 ) -> Result<(), TraversalError> {
     use crate::tailnet::TAILNET_KIND;
 
-    if relays.is_empty() {
-        return Err(TraversalError::NoRelays);
-    }
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().and_wait(Duration::from_secs(8)).await;
+    let client = crate::relay::connect_client(&relays).await?;
     let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
     client.subscribe(filter).await?;
 

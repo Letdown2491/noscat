@@ -23,6 +23,23 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for a matching advert before giving up.
 const FETCH_WAIT: Duration = Duration::from_secs(15);
 
+/// A connected client over `relays` — the one place relay plumbing is set
+/// up. Callers that publish/fetch shut the client down when done; the
+/// long-lived `watch_*` streams just drop it.
+pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayError> {
+    if relays.is_empty() {
+        return Err(RelayError::NoRelays);
+    }
+    let client = Client::new();
+    for relay in relays {
+        client.add_relay(relay).await?;
+    }
+    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
+        .await
+        .map_err(|_| RelayError::ConnectTimeout)?;
+    Ok(client)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("no relays configured")]
@@ -50,14 +67,7 @@ pub async fn publish_advert(
     }
     let event = Advert::event(identity, endpoints, noise_pub, ttl_secs, Timestamp::now())?;
 
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
-        .await
-        .map_err(|_| RelayError::ConnectTimeout)?;
-
+    let client = connect_client(relays).await?;
     let output = client.send_event(&event).await?;
     for (url, status) in &output.success {
         tracing::info!(%url, ?status, "advert published");
@@ -78,9 +88,6 @@ pub async fn fetch_advert_for(
     noise_key: Option<[u8; 32]>,
     npub: Option<PublicKey>,
 ) -> Result<Option<Advert>, RelayError> {
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
     let mut filter = Filter::new()
         .kind(Kind::Custom(ADVERT_KIND))
         .identifier(ADVERT_IDENTIFIER);
@@ -88,13 +95,7 @@ pub async fn fetch_advert_for(
         filter = filter.author(pk);
     }
 
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
-        .await
-        .map_err(|_| RelayError::ConnectTimeout)?;
+    let client = connect_client(relays).await?;
     client.subscribe(filter).await?;
 
     let mut notifications = client.notifications();
@@ -139,21 +140,12 @@ pub async fn fetch_key_package(
 ) -> Result<Option<Event>, RelayError> {
     use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
 
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
     let filter = Filter::new()
         .kind(Kind::Custom(KEY_PACKAGE_KIND))
         .identifier(KEY_PACKAGE_IDENTIFIER)
         .author(device);
 
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
-        .await
-        .map_err(|_| RelayError::ConnectTimeout)?;
+    let client = connect_client(relays).await?;
     client.subscribe(filter).await?;
 
     let mut notifications = client.notifications();
@@ -181,16 +173,7 @@ pub async fn fetch_key_package(
 /// Subscribe to noscat adverts on the given relays and print them as they
 /// arrive, until the task is cancelled. Returns when the stream ends.
 pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
-    let client = Client::new();
-    for relay in relays {
-        client.add_relay(relay).await?;
-    }
-    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
-        .await
-        .map_err(|_| RelayError::ConnectTimeout)?;
+    let client = connect_client(relays).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(ADVERT_KIND))

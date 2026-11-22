@@ -101,8 +101,9 @@ fn parse_response(msg: &[u8], txid: &[u8; 12]) -> Result<Option<SocketAddr>, Stu
     while attrs.len() >= 4 {
         let atype = u16::from_be_bytes([attrs[0], attrs[1]]);
         let alen = u16::from_be_bytes([attrs[2], attrs[3]]) as usize;
-        if attrs.len() < 4 + alen {
-            break;
+        let advance = 4 + alen.div_ceil(4) * 4;
+        if attrs.len() < advance {
+            break; // truncated TLV (padding included): refuse to slice past the end
         }
         let value = &attrs[4..4 + alen];
         if atype == ATTR_XOR_MAPPED || atype == ATTR_MAPPED {
@@ -110,7 +111,7 @@ fn parse_response(msg: &[u8], txid: &[u8; 12]) -> Result<Option<SocketAddr>, Stu
                 return Ok(Some(addr));
             }
         }
-        attrs = &attrs[4 + alen.div_ceil(4) * 4..];
+        attrs = &attrs[advance..];
     }
     Ok(None)
 }
@@ -174,5 +175,25 @@ mod tests {
         msg[0..2].copy_from_slice(&BINDING_RESPONSE.to_be_bytes());
         msg[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         assert!(parse_response(&msg, &[1u8; 12]).is_err());
+    }
+
+    /// A TLV whose padded length straddles the end of the message must be
+    /// skipped, not sliced past: a malformed attribute once panicked the
+    /// parser instead of just failing to yield an address.
+    #[test]
+    fn truncated_padded_tlv_is_not_a_panic() {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&BINDING_RESPONSE.to_be_bytes());
+        msg.extend_from_slice(&9u16.to_be_bytes()); // 9-byte attr: pads to 12
+        msg.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
+        let txid = [3u8; 12];
+        msg.extend_from_slice(&txid);
+        msg.extend_from_slice(&ATTR_XOR_MAPPED.to_be_bytes());
+        msg.extend_from_slice(&8u16.to_be_bytes());
+        msg.extend_from_slice(&[0x00, 0x01, 0xD4, 0x31]); // header only: 8 claimed, 4 present
+
+        // 4 (TLV header) + 4 (partial value) < padded 12: the walker must
+        // break cleanly (no address, no panic).
+        assert!(parse_response(&msg, &txid).unwrap().is_none());
     }
 }
