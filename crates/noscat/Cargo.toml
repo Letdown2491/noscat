@@ -1,0 +1,21 @@
+[package]
+name = "noscat"
+description = "like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "noscat"
+path = "src/main.rs"
+
+[dependencies]
+noscat-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

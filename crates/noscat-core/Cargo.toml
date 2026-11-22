@@ -1,0 +1,19 @@
+[package]
+name = "noscat-core"
+description = "Core library for noscat: a Nostr-native userspace tunnel and mesh tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nostr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+
+[lints]
+workspace = true
