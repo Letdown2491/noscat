@@ -134,9 +134,15 @@ noscat receive --out ./incoming --tailnet ./device-a
 noscat send ./report.pdf <A's npub> --tailnet ./device-b
 ```
 
+Transfers are resumable: an interrupted attempt leaves `report.pdf.noscat-part`
+plus a sidecar recording how many chunks were acked, and the next
+`send` of the same file picks up where the last one stopped — the sender is
+told to skip ahead, and the finished file is verified against the sender's
+sha256 before it lands under its real name.
+
 ### Roadmap
 
-- Transfer throughput (sliding-window ACKs) and resume.
+- ~~Transfer throughput (sliding-window ACKs) and resume.~~ (done)
 - ~~Multi-member tailnets with ACL policy as Marmot GroupContext components.~~ (done)
 - ~~Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.~~ (done)
 - ~~NIP draft.~~ (drafted: `docs/nip-noscat.md`)
