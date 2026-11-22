@@ -1,11 +1,14 @@
-# Release pipeline: push a tag (v0.1.0, v0.2.0, ...) and every package below
-# is built and attached to a GitHub Release.
+# Release: tag v* builds every package and attaches it to the GitHub
+# release. One leg per architecture, each on a native runner (no cross
+# toolchains - musl.cc is unreachable from runners, and native musl-gcc
+# comes from the distro's musl-tools package).
 #
-# - Linux (amd64 + arm64): static musl binaries -> deb/rpm/apk/archlinux via
-#   nfpm, plus tarballs for the install script.
-# - macOS (aarch64 + x86_64): unsigned tarballs + a generated Homebrew
-#   formula (noscat.rb) with real sha256s, for the Letdown2491/homebrew-tap.
-# - Windows (x86_64): zip for the winget manifest.
+# - Linux (x86_64 + aarch64): static musl binaries -> deb/rpm/apk/archlinux
+#   via nfpm (one config, packaging/nfpm.yaml), plus tarballs for the
+#   curl|sh install script.
+# - macOS (aarch64 + x86_64): unsigned tarballs; the publish job generates
+#   the Homebrew formula (noscat.rb) with real sha256s for the tap.
+# - Windows (x86_64): zip for the winget manifest (packaging/winget/).
 name: release
 
 on:
@@ -18,137 +21,169 @@ permissions:
 jobs:
   linux:
     name: linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
         include:
           - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
             nfpm_arch: amd64
           - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
             nfpm_arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install C toolchain for bundled sqlite (rusqlite)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Install aarch64 musl cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+
+      - name: Install musl-gcc (native; bundled sqlite needs a C compiler)
         run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C "$HOME"
-          echo "$HOME/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Build (static musl)
-        env:
-          CC_AARCH64_UNKNOWN_LINUX_MUSL: aarch64-linux-musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Stage contents
+
+      - name: Stage and smoke-check
         run: |
           mkdir -p staging/completions dist
           cp target/${{ matrix.target }}/release/noscat staging/noscat
           cp packaging/noscat.1 staging/
+          ./staging/noscat --version
           ./staging/noscat completions bash  > staging/completions/noscat.bash
           ./staging/noscat completions zsh   > staging/completions/noscat.zsh
           ./staging/noscat completions fish  > staging/completions/noscat.fish
           tar -czf dist/noscat-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz \
               -C staging noscat noscat.1 completions
+
       - name: Install nfpm
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Package (deb, rpm, apk, archlinux)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.nfpm_arch }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          export VERSION
-          export ARCH=${{ matrix.nfpm_arch }}
           for fmt in deb rpm apk archlinux; do
             nfpm package -f packaging/nfpm.yaml -p "$fmt" -t dist/
           done
+          # Smoke: each package reads back and names the payload.
           ls -la dist/
+          dpkg-deb --info dist/noscat_${VERSION}_${{ matrix.nfpm_arch }}.deb | head -20
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.target }}
           path: dist/*
+          retention-days: 1
 
   macos:
     name: macos ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            runner: macos-latest # arm64 (macos-26)
           - target: x86_64-apple-darwin
-            os: macos-13
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Stage and tar
+
+      - name: Stage and smoke-check
         run: |
           mkdir -p staging/completions dist
           cp target/${{ matrix.target }}/release/noscat staging/noscat
           cp packaging/noscat.1 staging/
+          ./staging/noscat --version
           ./staging/noscat completions bash > staging/completions/noscat.bash
           ./staging/noscat completions zsh  > staging/completions/noscat.zsh
           ./staging/noscat completions fish > staging/completions/noscat.fish
           tar -czf dist/noscat-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz \
               -C staging noscat noscat.1 completions
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.target }}
           path: dist/*
+          retention-days: 1
 
   windows:
     name: windows x86_64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Build
         run: cargo build --release --locked
-      - name: Zip
+
+      - name: Zip and smoke-check
         shell: pwsh
         run: |
           mkdir dist
-          Copy-Item target/release/noscat.exe dist/
-          Compress-Archive -Path dist/noscat.exe `
+          & target/release/noscat.exe --version
+          Compress-Archive -Path target/release/noscat.exe `
             -DestinationPath dist/noscat-$env:GITHUB_REF_NAME-windows-amd64.zip
-          Remove-Item dist/noscat.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: dist/*
+          retention-days: 1
 
   release:
     name: publish release
     needs: [linux, macos, windows]
-    runs-on: ubuntu-latest
+    # needs holds the publish for the whole build matrix: a failed arch
+    # publishes nothing, which is the right shape for a release.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the artifacts
+        uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Generate Homebrew formula with real sha256s
+
+      - name: Generate the Homebrew formula with real sha256s
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           SHA_ARM=$(sha256sum dist/noscat-$GITHUB_REF_NAME-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
           SHA_X86=$(sha256sum dist/noscat-$GITHUB_REF_NAME-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
-          sed -e "s/__VERSION__/$VERSION/" \
+          sed -e "s/__VERSION__/${{ steps.ver.outputs.version }}/" \
               -e "s/__SHA256_AARCH64__/$SHA_ARM/" \
               -e "s/__SHA256_X86_64__/$SHA_X86/" \
               packaging/noscat.rb > dist/noscat.rb
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" --generate-notes --draft=false
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          cat dist/noscat.rb
+
+      - name: Attach everything to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
