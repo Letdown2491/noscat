@@ -36,6 +36,9 @@ pub struct Endpoint {
 /// JSON payload carried in the advert event content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvertPayload {
+    /// The node's curve25519 Noise static public key, hex — bound to the npub
+    /// by this event's signature (see `crate::noise` for the derivation note).
+    pub noise_pub: String,
     pub endpoints: Vec<Endpoint>,
 }
 
@@ -44,6 +47,8 @@ pub struct AdvertPayload {
 pub struct Advert {
     /// The advertising node (event author).
     pub npub: PublicKey,
+    /// Noise static public key, cryptographically bound to `npub` by the signature.
+    pub noise_pub: [u8; 32],
     pub endpoints: Vec<Endpoint>,
     /// Unix seconds after which this advert should be considered stale.
     pub expires_at: u64,
@@ -59,6 +64,8 @@ pub enum AdvertError {
     BadIdentifier,
     #[error("missing expiration tag")]
     MissingExpiration,
+    #[error("advert payload does not carry a 32-byte noise key")]
+    BadNoiseKey,
     #[error("advert is expired (unix {0})")]
     Expired(u64),
     #[error(transparent)]
@@ -72,10 +79,14 @@ impl Advert {
     pub fn event(
         identity: &Identity,
         endpoints: Vec<Endpoint>,
+        noise_pub: [u8; 32],
         ttl_secs: u64,
         now: Timestamp,
     ) -> Result<Event, AdvertError> {
-        let payload = AdvertPayload { endpoints };
+        let payload = AdvertPayload {
+            noise_pub: hex::encode(noise_pub),
+            endpoints,
+        };
         let expires_at = now.as_secs().saturating_add(ttl_secs);
         let json = serde_json::to_string(&payload)?;
         EventBuilder::new(Kind::Custom(ADVERT_KIND), json)
@@ -116,8 +127,13 @@ impl Advert {
             return Err(AdvertError::Expired(expires_at));
         }
         let payload: AdvertPayload = serde_json::from_str(&event.content)?;
+        let noise_bytes = hex::decode(&payload.noise_pub)
+            .map_err(|_| AdvertError::BadNoiseKey)?;
+        let noise_pub: [u8; 32] =
+            noise_bytes.try_into().map_err(|_| AdvertError::BadNoiseKey)?;
         Ok(Self {
             npub: event.pubkey,
+            noise_pub,
             endpoints: payload.endpoints,
             expires_at,
         })
@@ -142,6 +158,7 @@ mod tests {
         let event = Advert::event(
             &id,
             vec![endpoint(Transport::Udp, "203.0.113.7:41641")],
+            [9u8; 32],
             3600,
             now,
         )
@@ -149,6 +166,7 @@ mod tests {
 
         let parsed = Advert::from_event(&event, now).expect("parse advert");
         assert_eq!(parsed.npub, id.public_key());
+        assert_eq!(parsed.noise_pub, [9u8; 32]);
         assert_eq!(
             parsed.endpoints,
             vec![endpoint(Transport::Udp, "203.0.113.7:41641")]
@@ -173,7 +191,7 @@ mod tests {
         let id = Identity::generate();
         let now = Timestamp::now();
         // TTL of 1 second, but claim "now" is far in the future.
-        let event = Advert::event(&id, vec![], 1, now).expect("sign advert");
+        let event = Advert::event(&id, vec![], [9u8; 32], 1, now).expect("sign advert");
         let later = Timestamp::from(now.as_secs() + 120);
         assert!(matches!(
             Advert::from_event(&event, later),

@@ -9,7 +9,9 @@
 
 pub mod advert;
 pub mod identity;
+pub mod noise;
 pub mod relay;
+pub mod tunnel;
 
 pub use advert::Advert;
 pub use identity::Identity;

@@ -19,6 +19,9 @@ pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.damus.io", "wss://nos.lol"];
 /// How long to wait for relay connections before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to wait for a matching advert before giving up.
+const FETCH_WAIT: Duration = Duration::from_secs(15);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("no relays configured")]
@@ -37,13 +40,14 @@ pub enum RelayError {
 pub async fn publish_advert(
     identity: &Identity,
     endpoints: Vec<Endpoint>,
+    noise_pub: [u8; 32],
     ttl_secs: u64,
     relays: &[String],
 ) -> Result<(), RelayError> {
     if relays.is_empty() {
         return Err(RelayError::NoRelays);
     }
-    let event = Advert::event(identity, endpoints, ttl_secs, Timestamp::now())?;
+    let event = Advert::event(identity, endpoints, noise_pub, ttl_secs, Timestamp::now())?;
 
     let client = Client::new();
     for relay in relays {
@@ -59,8 +63,69 @@ pub async fn publish_advert(
     }
     for (url, err) in &output.failed {
         tracing::warn!(%url, %err, "relay rejected advert");
-    }    client.shutdown().await;
+    }
+    client.shutdown().await;
     Ok(())
+}
+
+/// Fetch the freshest advert matching a Noise key and/or npub from the relays.
+///
+/// Subscribes, waits up to [`FETCH_WAIT`] for a valid, unexpired advert, then
+/// disconnects. `None` means "nothing valid arrived in time".
+pub async fn fetch_advert_for(
+    relays: &[String],
+    noise_key: Option<[u8; 32]>,
+    npub: Option<PublicKey>,
+) -> Result<Option<Advert>, RelayError> {
+    if relays.is_empty() {
+        return Err(RelayError::NoRelays);
+    }
+    let mut filter = Filter::new()
+        .kind(Kind::Custom(ADVERT_KIND))
+        .identifier(ADVERT_IDENTIFIER);
+    if let Some(pk) = npub {
+        filter = filter.author(pk);
+    }
+
+    let client = Client::new();
+    for relay in relays {
+        client.add_relay(relay).await?;
+    }
+    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
+        .await
+        .map_err(|_| RelayError::ConnectTimeout)?;
+    client.subscribe(filter).await?;
+
+    let mut notifications = client.notifications();
+    let found = timeout(
+        FETCH_WAIT,
+        async {
+            while let Some(notification) = notifications.next().await {
+                let ClientNotification::Event { event, .. } = notification else {
+                    continue;
+                };
+                let advert = match Advert::from_event(&event, Timestamp::now()) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::debug!(%e, "ignoring invalid advert");
+                        continue;
+                    }
+                };
+                if let Some(want_noise) = noise_key {
+                    if advert.noise_pub != want_noise {
+                        continue;
+                    }
+                }
+                return Some(advert);
+            }
+            None
+        },
+    )
+    .await
+    .unwrap_or(None);
+
+    client.shutdown().await;
+    Ok(found)
 }
 
 /// Subscribe to noscat adverts on the given relays and print them as they

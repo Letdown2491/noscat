@@ -37,6 +37,32 @@ enum Command {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
+    /// Serve a tunnel: advertise a UDP endpoint, bridge the first peer to stdio.
+    Serve {
+        /// UDP address to listen on, e.g. `0.0.0.0:41641`.
+        #[arg(long, default_value = "0.0.0.0:41641")]
+        listen: String,
+        /// Relay URLs to advertise on (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// Advert lifetime in seconds.
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
+        /// Reuse the same identity across runs by storing its secret in this file.
+        #[arg(long)]
+        identity: Option<std::path::PathBuf>,
+    },
+    /// Pipe stdio into a tunnel to a peer by npub.
+    Pipe {
+        /// The peer's npub.
+        target: String,
+        /// Relay URLs to search for the peer's advert (repeatable).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// Use this identity instead of a fresh ephemeral one (hex or nsec).
+        #[arg(long)]
+        identity: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,10 +110,12 @@ fn main() -> anyhow::Result<()> {
             }
             let id = noscat_core::Identity::generate();
             eprintln!("# 🐈 advertising as {}", id.npub());
+            let (noise_pub, _) = noscat_core::tunnel::noise_keypair(&id)?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(noscat_core::relay::publish_advert(
                 &id,
                 parsed,
+                noise_pub,
                 ttl,
                 &relays_or_default(relays),
             ))?;
@@ -96,6 +124,52 @@ fn main() -> anyhow::Result<()> {
         Command::Watch { relays } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(noscat_core::relay::watch_adverts(&relays_or_default(relays)))?;
+        }
+        Command::Serve {
+            listen,
+            relays,
+            ttl,
+            identity,
+        } => {
+            let id = match &identity {
+                Some(path) => {
+                    let secret = std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+                    let secret = secret.trim();
+                    noscat_core::Identity::from_secret(secret).map_err(|e| {
+                        anyhow::anyhow!("bad identity in {}: {e}", path.display())
+                    })?
+                }
+                None => noscat_core::Identity::generate(),
+            };
+            let listen: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
+            let rt = tokio::runtime::Runtime::new()?;
+            let who = rt.block_on(noscat_core::tunnel::serve(
+                &id,
+                listen,
+                &relays_or_default(relays),
+                ttl,
+            ))?;
+            eprintln!("# session with {who} closed");
+        }
+        Command::Pipe {
+            target,
+            relays,
+            identity,
+        } => {
+            let id = match &identity {
+                Some(secret) => noscat_core::Identity::from_secret(secret)
+                    .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
+                None => noscat_core::Identity::generate(),
+            };
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(noscat_core::tunnel::pipe(
+                &id,
+                &target,
+                &relays_or_default(relays),
+            ))?;
         }
     }
     Ok(())
