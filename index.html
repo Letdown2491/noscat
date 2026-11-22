@@ -1,0 +1,14 @@
+# noscat pacman repository
+
+Prebuilt x86_64 and aarch64 packages, published by the release workflow.
+
+## Setup
+
+Add to /etc/pacman.conf:
+
+```ini
+[noscat]
+SigLevel = Never
+Server = https://letdown2491.github.io/noscat/x86_64
+```
+(and aarch64 for ARM devices) then `pacman -Sy noscat`.
