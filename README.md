@@ -83,10 +83,25 @@ noscat tailnet invite <B's npub> --dir ./device-a
 noscat tailnet join --dir ./device-b
 ```
 
-Both devices now derive the same epoch PSK. Scope any tunnel to the group with
-`--tailnet <dir>` — the handshake becomes `Noise_XKpsk0`, so only members of the
-same tailnet can complete it, and removing a device (next epoch) fails its
-handshakes cryptographically:
+Membership is policy-enforced MLS: the group context carries an ACL extension
+naming the owner, and every member rejects commits from anyone else — even a
+validly signed one. The owner can add more devices (`publish` + `invite`, one
+per device) and remove them:
+
+```
+# On the owner:
+noscat tailnet members --dir ./device-a   # who is in, at which epoch
+noscat tailnet remove <B's npub> --dir ./device-a
+
+# On the other members (picks up the owner's commit from the relays):
+noscat tailnet sync --dir ./device-c
+```
+
+Both devices now derive the same epoch PSK. Removing a device ratchets the
+MLS epoch: the removed device's PSK goes stale immediately, so its handshakes
+fail cryptographically even if it keeps trying. Scope any tunnel to the group
+with `--tailnet <dir>` — the handshake becomes `Noise_XKpsk0`, so only members
+of the same tailnet can complete it:
 
 ```
 noscat serve --tailnet ./device-a

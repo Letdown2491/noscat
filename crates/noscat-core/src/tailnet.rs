@@ -37,6 +37,10 @@ pub const TAILNET_KIND: u16 = 30444;
 pub const KEY_PACKAGE_IDENTIFIER: &str = "noscat-tailnet-kp-v1";
 /// Exporter label for the tunnel PSK (see `crate::tunnel`).
 pub const EXPORTER_LABEL: &str = "noscat/tunnel-psk-v1";
+/// GroupContext extension type carrying the tailnet policy. RFC 9420
+/// reserves 0xffa0..=0xffff for private use; OpenMLS passes unknown types
+/// through, which is exactly the Marmot-shaped hook for group policy.
+const POLICY_EXTENSION_TYPE: u16 = 0xffa0;
 /// Domain separation for deriving the MLS Ed25519 key from the identity secret.
 const MLS_DERIVE_INFO: &[u8] = b"noscat/mls-ed25519-v1";
 
@@ -64,6 +68,8 @@ pub enum TailnetError {
     NoTailnet(PathBuf),
     #[error("timed out waiting for a tailnet invitation")]
     JoinTimeout,
+    #[error("commit rejected: {0} is not authorized to change the tailnet (policy is owner-only)")]
+    PolicyViolation(String),
 }
 
 impl From<tls_codec::Error> for TailnetError {
@@ -213,16 +219,44 @@ impl Device {
             )));
         }
         let group_id = GroupId::from_slice(&self.identity.public_key().to_bytes());
+        let policy = TailnetPolicy {
+            owner: self.identity.public_key().to_bytes().to_vec(),
+        };
         let _group = MlsGroup::new_with_group_id(
             &self.provider,
             &self.signer,
-            &group_config(),
+            &group_config(&policy)?,
             group_id.clone(),
             self.credential_with_key()?,
         )
         .map_err(|e| TailnetError::Mls(e.to_string()))?;
         self.group_id = Some(group_id);
         self.persist()
+    }
+
+    /// The tailnet's membership and epoch (for `tailnet members`).
+    pub fn list_members(&self) -> Result<Vec<MemberInfo>, TailnetError> {
+        let group = self.group()?;
+        let owner = group.group_id().as_slice().to_vec();
+        let epoch = group.epoch().as_u64();
+        let mut out = Vec::new();
+        for m in group.members() {
+            let npub = hex::encode(m.credential.serialized_content());
+            out.push(MemberInfo {
+                is_owner: m.credential.serialized_content() == owner.as_slice(),
+                npub,
+                epoch,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The member matching `npub` bytes, if it is in the tailnet.
+    fn leaf_index_of(group: &MlsGroup, npub: &[u8]) -> Option<LeafNodeIndex> {
+        group
+            .members()
+            .find(|m| m.credential.serialized_content() == npub)
+            .map(|m| m.index)
     }
 
     fn credential_with_key(&self) -> Result<CredentialWithKey, TailnetError> {
@@ -234,16 +268,31 @@ impl Device {
         })
     }
 
-    /// Publish our MLS key package (kind 30443) so the owner can invite us.
-    pub async fn publish_key_package(&self, relays: &[String]) -> Result<(), TailnetError> {
-        let bundle = KeyPackage::builder()
+    /// A key package for this device. It advertises the policy extension:
+    /// a leaf node must cover every group-context extension of the tailnet
+    /// it may join (add proposals and key updates validate this).
+    fn key_package(
+        &self,
+        provider: &Provider,
+        signer: &SignatureKeyPair,
+    ) -> Result<KeyPackageBundle, TailnetError> {
+        let capabilities = Capabilities::builder()
+            .extensions(vec![ExtensionType::Unknown(POLICY_EXTENSION_TYPE)])
+            .build();
+        KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
             .build(
                 CIPHERSUITE,
-                &self.provider,
-                &self.signer,
+                provider,
+                signer,
                 self.credential_with_key()?,
             )
-            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+            .map_err(|e| TailnetError::Mls(e.to_string()))
+    }
+
+    /// Publish our MLS key package (kind 30443) so the owner can invite us.
+    pub async fn publish_key_package(&self, relays: &[String]) -> Result<(), TailnetError> {
+        let bundle = self.key_package(&self.provider, &self.signer)?;
         let bytes = bundle.key_package().tls_serialize_detached()?;
 
         // The bundle's private init/encryption keys just went into storage;
@@ -266,7 +315,9 @@ impl Device {
     }
 
     /// Invite a device (by npub) into the tailnet: fetch its key package,
-    /// commit the Add, gift-wrap the Welcome to it, and persist our new epoch.
+    /// commit the Add, gift-wrap the Welcome to it, and the commit to every
+    /// other member (they must merge it to reach the new epoch), then persist
+    /// our new epoch.
     pub async fn invite(
         &mut self,
         device: PublicKey,
@@ -293,23 +344,178 @@ impl Device {
             .map_err(|e| TailnetError::Mls(e.to_string()))?;
         self.persist()?;
 
-        // Gift-wrap both messages to the invitee; the commit matters once the
-        // tailnet has more than one existing member.
         let MlsMessageBodyOut::Welcome(welcome) = welcome.body() else {
             return Err(TailnetError::Mls("expected a Welcome from add_members".into()));
         };
+        let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+        let invitee_payload = serde_json::to_string(&TailnetMessage {
+            commit: commit_hex.clone(),
+            welcome: Some(hex::encode(welcome.tls_serialize_detached()?)),
+        })?;
+        let member_payload = serde_json::to_string(&TailnetMessage {
+            commit: commit_hex,
+            welcome: None,
+        })?;
+
+        // Welcome to the invitee; commit to every other existing member so
+        // the whole tailnet lands in the same epoch (and derives the same PSK).
+        let mut targets: Vec<PublicKey> = Vec::new();
+        for m in group.members() {
+            if m.credential.serialized_content() == self.identity.public_key().to_bytes() {
+                continue; // ourselves
+            }
+            if m.credential.serialized_content() == device.to_bytes() {
+                continue; // the invitee gets the combined payload above
+            }
+            targets.push(PublicKey::from_slice(m.credential.serialized_content())?);
+        }
+        self.send_gift_wrap(&invitee_payload, device, relays).await?;
+        for member in targets {
+            self.send_gift_wrap(&member_payload, member, relays).await?;
+        }
+        Ok(())
+    }
+
+    /// Remove a device (by npub) from the tailnet: commit the Remove, deliver
+    /// the commit to the remaining members so the epoch ratchets past the
+    /// removed device, and persist. The removed device is deliberately left
+    /// behind: its PSK stops matching, locking it out of every tunnel.
+    pub async fn remove_member(
+        &mut self,
+        device: PublicKey,
+        relays: &[String],
+    ) -> Result<(), TailnetError> {
+        let mut group = self.group()?;
+        let leaf = Self::leaf_index_of(&group, &device.to_bytes())
+            .ok_or_else(|| TailnetError::Mls(format!("{device} is not in this tailnet")))?;
+
+        let (commit, _welcome, _info) = group
+            .remove_members(&self.provider, &self.signer, &[leaf])
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        self.persist()?;
+
         let payload = serde_json::to_string(&TailnetMessage {
             commit: hex::encode(commit.tls_serialize_detached()?),
-            welcome: hex::encode(welcome.tls_serialize_detached()?),
+            welcome: None,
         })?;
+        let remaining: Vec<PublicKey> = group
+            .members()
+            .filter(|m| m.credential.serialized_content() != self.identity.public_key().to_bytes())
+            .map(|m| PublicKey::from_slice(m.credential.serialized_content()))
+            .collect::<Result<_, _>>()?;
+        for member in remaining {
+            self.send_gift_wrap(&payload, member, relays).await?;
+        }
+        Ok(())
+    }
+
+    /// Receive gift-wrapped tailnet messages for up to `wait` and merge any
+    /// commits addressed to us, enforcing the group's policy. This is how
+    /// non-owner members follow the owner's epoch advances (invites,
+    /// removals) and keep deriving the current tunnel PSK.
+    pub async fn sync_tailnet(
+        &mut self,
+        relays: &[String],
+        wait: Duration,
+    ) -> Result<usize, TailnetError> {
+        if self.group_id.is_none() {
+            return Err(TailnetError::NoTailnet(self.dir.clone()));
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(PublicKey, String)>(16);
+        let watch = tokio::spawn(crate::traversal::watch_tailnet(
+            self.identity.clone(),
+            relays.to_vec(),
+            tx,
+        ));
+        let mut merged = 0usize;
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let msg = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some((sender, payload))) => (sender, payload),
+                Ok(None) | Err(_) => break,
+            };
+            let payload: TailnetMessage = match serde_json::from_str(&msg.1) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("# ⚠️  undecodable tailnet message from {}: {e}", msg.0);
+                    continue;
+                }
+            };
+            if payload.welcome.is_some() {
+                eprintln!("# ⚠️  got an unexpected invitation from {} (already in a tailnet)", msg.0);
+                continue;
+            }
+            match self.process_commit(&payload.commit) {
+                Ok(()) => {
+                    merged += 1;
+                    eprintln!("# ⬇️  merged commit from {} (epoch {})", msg.0, self.epoch()?);
+                }
+                Err(TailnetError::PolicyViolation(e)) => {
+                    eprintln!("# 🚫 commit from {} rejected: {e}", msg.0);
+                }
+                Err(e) => eprintln!("# ⚠️  commit from {} not merged: {e}", msg.0),
+            }
+        }
+        watch.abort();
+        Ok(merged)
+    }
+
+    /// Merge one serialized commit into our group after checking the group's
+    /// policy: MLS authenticates the commit, the policy decides if the
+    /// committer may change the membership.
+    fn process_commit(&mut self, commit_hex: &str) -> Result<(), TailnetError> {
+        let mut group = self.group()?;
+        let bytes = hex::decode(commit_hex)
+            .map_err(|e| TailnetError::Mls(format!("bad commit hex: {e}")))?;
+        let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let protocol: ProtocolMessage = match message.try_into() {
+            Ok(p) => p,
+            Err(_) => return Err(TailnetError::Mls("not a public MLS message".into())),
+        };
+        let processed = group
+            .process_message(&self.provider, protocol)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let committer = processed.credential().serialized_content().to_vec();
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            return Err(TailnetError::Mls("expected a commit".into()));
+        };
+        // MLS authenticated the commit; the group's policy decides whether
+        // this committer may change the membership. The commit carries the
+        // (possibly new) group context with the policy extension.
+        let policy = TailnetPolicy::from_context(staged.group_context())?;
+        if !policy.authorizes(&committer) {
+            return Err(TailnetError::PolicyViolation(hex::encode(committer)));
+        }
+        group
+            .merge_staged_commit(&self.provider, *staged)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        self.persist()
+    }
+
+    /// The group's current epoch (display).
+    fn epoch(&self) -> Result<u64, TailnetError> {
+        Ok(self.group()?.epoch().as_u64())
+    }
+
+    /// Gift-wrap `payload` (NIP-59) to `to`.
+    async fn send_gift_wrap(
+        &self,
+        payload: &str,
+        to: PublicKey,
+        relays: &[String],
+    ) -> Result<(), TailnetError> {
         let rumor = UnsignedEvent::new(
             self.identity.public_key(),
             Timestamp::now(),
             Kind::Custom(TAILNET_KIND),
             [],
-            payload,
+            payload.to_string(),
         );
-        let gift_wrap = GiftWrapBuilder::new(device, rumor)
+        let gift_wrap = GiftWrapBuilder::new(to, rumor)
             .expiration(Duration::from_secs(7 * 24 * 3600))
             .finalize(self.identity.keys())
             .map_err(|e| TailnetError::Nostr(e))?;
@@ -345,13 +551,15 @@ impl Device {
         let msg: TailnetMessage = serde_json::from_str(&payload)?;
         eprintln!("# ✉️  invitation received from {sender} — joining…");
 
-        let welcome_bytes = hex::decode(&msg.welcome)?;
+        let welcome_bytes = hex::decode(&msg.welcome.ok_or_else(|| {
+            TailnetError::Mls("invitation carries no Welcome".into())
+        })?)?;
         let welcome =
             Welcome::tls_deserialize_exact(&mut welcome_bytes.as_slice())
                 .map_err(|e| TailnetError::Mls(e.to_string()))?;
         let staged = StagedWelcome::new_from_welcome(
             &self.provider,
-            &group_config().join_config().clone(),
+            &join_config(),
             welcome,
             None,
         )
@@ -373,14 +581,84 @@ impl Device {
 struct TailnetMessage {
     /// MLS commit (needed by other members; the invitee ignores it).
     commit: String,
-    /// MLS Welcome carrying the group secrets for the invitee.
-    welcome: String,
+    /// MLS Welcome carrying the group secrets for the invitee. Absent in
+    /// commits fanned out to existing members (epoch propagation).
+    welcome: Option<String>,
 }
 
-fn group_config() -> MlsGroupCreateConfig {
+/// The tailnet's access policy, carried as a GroupContext extension so it is
+/// authenticated by the group itself and inherited by every joiner.
+///
+/// Single-owner tailnets: only the owner may add or remove devices. Members
+/// enforce this at commit-merge time (see `process_commit`) — an MLS commit
+/// is signed, so the committer's credential is checked against the policy.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct TailnetPolicy {
+    /// npub bytes of the tailnet's owner.
+    pub owner: Vec<u8>,
+}
+
+impl TailnetPolicy {
+    /// The policy extension for a tailnet owned by `owner` (npub bytes).
+    fn extension(owner: &[u8]) -> Result<Extension, TailnetError> {
+        let policy = TailnetPolicy {
+            owner: owner.to_vec(),
+        };
+        Ok(Extension::Unknown(
+            POLICY_EXTENSION_TYPE,
+            UnknownExtension(serde_json::to_vec(&policy)?),
+        ))
+    }
+
+    /// Read the policy out of a group context (the one a commit or Welcome
+    /// carries — MlsGroup keeps its current context private).
+    fn from_context(context: &GroupContext) -> Result<Self, TailnetError> {
+        for ext in context.extensions().iter() {
+            if let Extension::Unknown(POLICY_EXTENSION_TYPE, UnknownExtension(bytes)) = ext {
+                return Ok(serde_json::from_slice(bytes)?);
+            }
+        }
+        Err(TailnetError::Mls("tailnet policy extension missing".into()))
+    }
+
+    /// Is `identity` (credential bytes) allowed to add/remove members?
+    fn authorizes(&self, identity: &[u8]) -> bool {
+        identity == self.owner
+    }
+}
+
+/// The tailnet's current membership: npub + MLS leaf index per device.
+pub struct MemberInfo {
+    /// x-only npub hex, for display and CLI round-trips.
+    pub npub: String,
+    pub epoch: u64,
+    pub is_owner: bool,
+}
+
+fn group_config(policy: &TailnetPolicy) -> Result<MlsGroupCreateConfig, TailnetError> {
+    let owner_ext = TailnetPolicy::extension(&policy.owner)?;
+    let extensions = Extensions::single(owner_ext)
+        .map_err(|e| TailnetError::Mls(e.to_string()))?;
+    // The owner's leaf must advertise the policy extension too: its commits
+    // carry an update path that has to support every group-context extension.
+    let capabilities = Capabilities::builder()
+        .extensions(vec![ExtensionType::Unknown(POLICY_EXTENSION_TYPE)])
+        .build();
+    Ok(MlsGroupCreateConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .capabilities(capabilities)
+        .with_group_context_extensions(extensions)
+        .build())
+}
+
+/// Join-side half of the config (the policy extension arrives with the group
+/// context; a joiner only needs the framing parameters).
+fn join_config() -> MlsGroupJoinConfig {
     MlsGroupCreateConfig::builder()
         .use_ratchet_tree_extension(true)
         .build()
+        .join_config()
+        .clone()
 }
 
 /// The device's MLS Ed25519 signing key, derived from its nostr secret — one
@@ -426,10 +704,13 @@ mod tests {
 
         // Owner creates the tailnet.
         let group_id = GroupId::from_slice(&owner.public_key().to_bytes());
+        let policy = TailnetPolicy {
+            owner: owner.public_key().to_bytes().to_vec(),
+        };
         let mut group = MlsGroup::new_with_group_id(
             &owner_provider,
             &owner_signer,
-            &group_config(),
+            &group_config(&policy)?,
             group_id,
             CredentialWithKey {
                 credential: Credential::new(
@@ -450,9 +731,11 @@ mod tests {
             ),
             signature_key: invitee_signer.public().into(),
         };
-        let invitee_bundle = KeyPackage::builder()
-            .build(CIPHERSUITE, &invitee_provider, &invitee_signer, invitee_credential)
-            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let invitee_bundle = key_package_with_policy_capability(
+            &invitee_provider,
+            &invitee_signer,
+            invitee_credential,
+        )?;
 
         // Owner commits the Add and produces the Welcome.
         let (commit, welcome_msg, _info) = group
@@ -465,15 +748,17 @@ mod tests {
             return Err(TailnetError::Mls("expected a Welcome from add_members".into()));
         };
         let welcome = welcome.clone();
+        let _ = commit;
 
         // Invitee joins from the Welcome.
         let staged = StagedWelcome::new_from_welcome(
             &invitee_provider,
-            &group_config().join_config().clone(),
+            &join_config(),
             welcome,
             None,
         )
         .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let joined_staged_context = staged.group_context().clone();
         let joined = staged
             .into_group(&invitee_provider)
             .map_err(|e| TailnetError::Mls(e.to_string()))?;
@@ -487,6 +772,12 @@ mod tests {
             .map_err(|e| TailnetError::Mls(e.to_string()))?;
         assert_eq!(psk_owner, psk_invitee, "members must derive the same PSK");
         assert_eq!(psk_owner.len(), 32);
+
+        // The policy extension made it into the joiner's group context.
+        let read_policy = TailnetPolicy::from_context(&joined_staged_context)?;
+        assert_eq!(read_policy.owner, owner.public_key().to_bytes());
+        assert!(read_policy.authorizes(&owner.public_key().to_bytes()));
+        assert!(!read_policy.authorizes(&invitee.public_key().to_bytes()));
         Ok(())
     }
 
@@ -516,4 +807,266 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
+
+    /// Build an owner + two members, all in the same epoch: the second Add's
+    /// commit is processed by the first member through `process_message` (the
+    /// `sync_tailnet` path, minus the transport).
+    struct TailnetFixture {
+        owner_provider: Provider,
+        owner_signer: SignatureKeyPair,
+        owner_group: MlsGroup,
+        a: Identity,
+        b: Identity,
+        a_group: MlsGroup,
+        a_provider: Provider,
+        a_signer: SignatureKeyPair,
+        b_group: MlsGroup,
+        b_provider: Provider,
+    }
+
+    fn cred(id: &Identity, signer: &SignatureKeyPair) -> CredentialWithKey {
+        CredentialWithKey {
+            credential: Credential::new(CredentialType::Basic, id.public_key().to_bytes().to_vec()),
+            signature_key: signer.public().into(),
+        }
+    }
+
+    fn fixture_two_members() -> Result<TailnetFixture, TailnetError> {
+        let owner = Identity::generate();
+        let a = Identity::generate();
+        let b = Identity::generate();
+        let owner_provider = Provider::default();
+        let a_provider = Provider::default();
+        let b_provider = Provider::default();
+        let owner_signer = mls_signer(&owner)?;
+        let a_signer = mls_signer(&a)?;
+        let b_signer = mls_signer(&b)?;
+        let policy = TailnetPolicy {
+            owner: owner.public_key().to_bytes().to_vec(),
+        };
+
+        let mut owner_group = MlsGroup::new_with_group_id(
+            &owner_provider,
+            &owner_signer,
+            &group_config(&policy)?,
+            GroupId::from_slice(&owner.public_key().to_bytes()),
+            cred(&owner, &owner_signer),
+        )
+        .map_err(|e| TailnetError::Mls(e.to_string()))?;
+
+        let bundle_for = |provider: &Provider, signer: &SignatureKeyPair, id: &Identity| {
+            key_package_with_policy_capability(
+                provider,
+                signer,
+                cred(id, signer),
+            )
+        };
+
+        // Owner adds A, which joins from the Welcome (already in the new
+        // epoch — it must not merge its own Add commit).
+        let kp_a = bundle_for(&a_provider, &a_signer, &a)?;
+        let (_commit_a, welcome_a, _) = owner_group
+            .add_members(&owner_provider, &owner_signer, &[kp_a.key_package().clone()])
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        owner_group
+            .merge_pending_commit(&owner_provider)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let a_group = join_from_welcome(&a_provider, &welcome_a, &a_signer)?;
+
+        // Owner adds B; A follows via the commit (the `sync_tailnet` path).
+        let kp_b = bundle_for(&b_provider, &b_signer, &b)?;
+        let (commit_b, welcome_b, _) = owner_group
+            .add_members(&owner_provider, &owner_signer, &[kp_b.key_package().clone()])
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        owner_group
+            .merge_pending_commit(&owner_provider)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let mut a_group = a_group;
+        let staged = stage_commit(&mut a_group, &a_provider, &commit_b)?;
+        a_group
+            .merge_staged_commit(&a_provider, *staged)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let b_group = join_from_welcome(&b_provider, &welcome_b, &b_signer)?;
+
+        Ok(TailnetFixture {
+            owner_provider,
+            owner_signer,
+            owner_group,
+            a,
+            b,
+            a_group,
+            a_provider,
+            a_signer,
+            b_group,
+            b_provider,
+        })
+    }
+
+    /// All three members derive the same PSK, and a removal ratchets the
+    /// epoch so the removed device's PSK stops matching.
+    #[test]
+    fn removal_ratchets_epoch_and_locks_out_device() -> Result<(), TailnetError> {
+        let mut fx = fixture_two_members()?;
+
+        let psk_of = |group: &MlsGroup, provider: &Provider| -> Result<Vec<u8>, TailnetError> {
+            group
+                .export_secret(provider.crypto(), EXPORTER_LABEL, &[], 32)
+                .map_err(|e| TailnetError::Mls(e.to_string()))
+        };
+        let psk_before = psk_of(&fx.owner_group, &fx.owner_provider)?;
+        assert_eq!(psk_before, psk_of(&fx.a_group, &fx.a_provider)?);
+        assert_eq!(psk_before, psk_of(&fx.b_group, &fx.b_provider)?);
+
+        // Owner removes A; the commit is fanned out to the remaining members.
+        let leaf = fx
+            .owner_group
+            .members()
+            .find(|m| m.credential.serialized_content() == fx.a.public_key().to_bytes())
+            .map(|m| m.index)
+            .ok_or_else(|| TailnetError::Mls("member A missing".into()))?;
+        let (commit, _w, _) = fx
+            .owner_group
+            .remove_members(&fx.owner_provider, &fx.owner_signer, &[leaf])
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        fx.owner_group
+            .merge_pending_commit(&fx.owner_provider)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+
+        // The removed device never sees the commit: its PSK is now stale.
+        assert_ne!(psk_before, psk_of(&fx.owner_group, &fx.owner_provider)?);
+
+        // A remaining member (B) merges the commit and ratchets to the new
+        // epoch — locked out together with A is nobody but A.
+        let mut b_group = fx.b_group;
+        let staged = stage_commit(&mut b_group, &fx.b_provider, &commit)?;
+        b_group
+            .merge_staged_commit(&fx.b_provider, *staged)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        assert_eq!(
+            psk_of(&fx.owner_group, &fx.owner_provider)?,
+            psk_of(&b_group, &fx.b_provider)?,
+            "a synced member must follow the ratchet"
+        );
+        Ok(())
+    }
+
+    /// The policy is the law: a commit from a non-owner member (even a valid,
+    /// correctly signed one) must be rejected by the receiving member.
+    #[test]
+    fn acl_rejects_non_owner_commit() -> Result<(), TailnetError> {
+        let mut fx = fixture_two_members()?;
+
+        // Member A (not the owner) commits the removal of B — legal MLS, but
+        // the tailnet's policy says only the owner may change membership.
+        let leaf_b = fx
+            .a_group
+            .members()
+            .find(|m| m.credential.serialized_content() == fx.b.public_key().to_bytes())
+            .map(|m| m.index)
+            .ok_or_else(|| TailnetError::Mls("member B missing".into()))?;
+        let (commit, _w, _) = fx
+            .a_group
+            .remove_members(&fx.a_provider, &fx.a_signer, &[leaf_b])
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+
+        // The receiver (playing the owner's tailnet device) stages it fine —
+        // MLS authenticates A — but the policy forbids the merge.
+        let mut owner_group = fx.owner_group;
+        let message = commit_a_into_in(&commit)?;
+        let protocol: ProtocolMessage = match message.try_into() {
+            Ok(p) => p,
+            Err(_) => return Err(TailnetError::Mls("not a public MLS message".into())),
+        };
+        let processed = owner_group
+            .process_message(&fx.owner_provider, protocol)
+            .map_err(|e| TailnetError::Mls(e.to_string()))?;
+        let policy = match processed.content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                TailnetPolicy::from_context(staged.group_context())?
+            }
+            _ => return Err(TailnetError::Mls("expected a commit".into())),
+        };
+        assert!(
+            !policy.authorizes(processed.credential().serialized_content()),
+            "fixture broken: committer should not be the owner"
+        );
+        assert!(matches!(
+            processed.content(),
+            ProcessedMessageContent::StagedCommitMessage(_)
+        ));
+        // Refusing to merge leaves the epoch unchanged: the ratchet moves
+        // only when `merge_staged_commit` runs.
+        assert_eq!(owner_group.epoch(), fx.a_group.epoch());
+        Ok(())
+    }
+}
+
+/// Deserialize an owner's serialized commit into a message a member can
+/// process.
+#[cfg(test)]
+fn commit_a_into_in(commit: &MlsMessageOut) -> Result<MlsMessageIn, TailnetError> {
+    let bytes = commit.tls_serialize_detached()?;
+    Ok(MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
+        .map_err(|e| TailnetError::Mls(e.to_string()))?)
+}
+
+/// A test key package that advertises the policy extension, matching what
+/// `publish_key_package` puts on the relays.
+#[cfg(test)]
+fn key_package_with_policy_capability(
+    provider: &Provider,
+    signer: &SignatureKeyPair,
+    credential: CredentialWithKey,
+) -> Result<KeyPackageBundle, TailnetError> {
+    let capabilities = Capabilities::builder()
+        .extensions(vec![ExtensionType::Unknown(POLICY_EXTENSION_TYPE)])
+        .build();
+    KeyPackage::builder()
+        .leaf_node_capabilities(capabilities)
+        .build(CIPHERSUITE, provider, signer, credential)
+        .map_err(|e| TailnetError::Mls(e.to_string()))
+}
+
+/// Process a serialized commit into a staged commit for authorization checks.
+#[cfg(test)]
+fn stage_commit(
+    group: &mut MlsGroup,
+    provider: &Provider,
+    commit: &MlsMessageOut,
+) -> Result<Box<StagedCommit>, TailnetError> {
+    let message = commit_a_into_in(commit)?;
+    let protocol: ProtocolMessage = match message.try_into() {
+        Ok(p) => p,
+        Err(_) => return Err(TailnetError::Mls("not a public MLS message".into())),
+    };
+    match group
+        .process_message(provider, protocol)
+        .map_err(|e| TailnetError::Mls(e.to_string()))?
+        .into_content()
+    {
+        ProcessedMessageContent::StagedCommitMessage(staged) => Ok(staged),
+        _ => Err(TailnetError::Mls("expected a commit".into())),
+    }
+}
+
+/// Join a fresh member from a Welcome (the `join_tailnet` path).
+#[cfg(test)]
+fn join_from_welcome(
+    provider: &Provider,
+    welcome: &MlsMessageOut,
+    _signer: &SignatureKeyPair,
+) -> Result<MlsGroup, TailnetError> {
+    let MlsMessageBodyOut::Welcome(welcome) = welcome.body() else {
+        return Err(TailnetError::Mls("expected a Welcome".into()));
+    };
+    let staged = StagedWelcome::new_from_welcome(
+        provider,
+        &join_config(),
+        welcome.clone(),
+        None,
+    )
+    .map_err(|e| TailnetError::Mls(e.to_string()))?;
+    staged
+        .into_group(provider)
+        .map_err(|e| TailnetError::Mls(e.to_string()))
 }

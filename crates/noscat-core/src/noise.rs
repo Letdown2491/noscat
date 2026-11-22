@@ -147,7 +147,7 @@ mod tests {
 
         // -> s, se
         let n = hs_c.write_message(b"hello", &mut buf_c).expect("msg3");
-        let (n, payload) = {
+        let (_n, payload) = {
             let n = hs_s.read_message(&buf_c[..n], &mut buf_s).expect("read3");
             (n, &buf_s[..n])
         };

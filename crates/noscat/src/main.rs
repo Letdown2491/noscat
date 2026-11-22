@@ -191,6 +191,36 @@ enum TailnetCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
+    /// List the tailnet's members and epoch.
+    Members {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+    },
+    /// Remove a device (by npub) from this tailnet (owner only).
+    Remove {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// The npub of the device to remove.
+        device: String,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Merge pending tailnet commits addressed to this device (run after an
+    /// owner invited or removed someone).
+    Sync {
+        /// Device directory holding the identity and MLS state.
+        #[arg(long, default_value = "./noscat-device")]
+        dir: std::path::PathBuf,
+        /// How long to listen for commits (seconds).
+        #[arg(long, default_value_t = 10)]
+        for_secs: u64,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
     /// Print the tailnet's current epoch tunnel PSK (hex).
     Psk {
         /// Device directory holding the identity and MLS state.
@@ -435,6 +465,32 @@ fn main() -> anyhow::Result<()> {
                 TailnetCommand::Join { dir, relays } => {
                     let mut device = noscat_core::tailnet::Device::open(&dir)?;
                     rt.block_on(device.join_tailnet(&relays_or_default(relays)))?;
+                }
+                TailnetCommand::Members { dir } => {
+                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                    for m in device.list_members()? {
+                        println!(
+                            "{} epoch={} {}",
+                            if m.is_owner { "owner " } else { "member" },
+                            m.epoch,
+                            m.npub
+                        );
+                    }
+                }
+                TailnetCommand::Remove { dir, device: npub, relays } => {
+                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                    let removed = nostr::prelude::PublicKey::parse(&npub)
+                        .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
+                    rt.block_on(device.remove_member(removed, &relays_or_default(relays)))?;
+                    eprintln!("# ✅ removed {npub} from the tailnet (epoch ratcheted)");
+                }
+                TailnetCommand::Sync { dir, for_secs, relays } => {
+                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                    let merged = rt.block_on(device.sync_tailnet(
+                        &relays_or_default(relays),
+                        std::time::Duration::from_secs(for_secs),
+                    ))?;
+                    eprintln!("# ✅ synced: {merged} commit(s) merged");
                 }
                 TailnetCommand::Psk { dir } => {
                     let device = noscat_core::tailnet::Device::open(&dir)?;
