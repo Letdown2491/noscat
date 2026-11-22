@@ -47,6 +47,8 @@ const BUF: usize = 65535;
 /// Poly1305 tag. A full 64 KiB TCP read would blow both snow's message cap
 /// and the kernel's, so the pump reads at most this much per turn.
 const MAX_PAYLOAD: usize = 65_507 - 16;
+/// Between-advert poll cadence in `dial_session`'s budget loop.
+const ADVERT_RETRY: Duration = Duration::from_secs(5);
 /// File-transfer chunk: MTU-sized so a frame never fragments into multiple
 /// IP packets — one datagram, one loss unit. Throughput comes from the
 /// sliding window (many small in-flight frames), not from huge datagrams.
@@ -394,17 +396,24 @@ async fn dial_session(
             .join(", ")
     );
 
-    // The advert carries the server's static candidates. Each fetch waits its
-    // own budget, so two misses exhaust ADVERT_WAIT.
-    let advert = loop {
-        if let Some(a) = crate::relay::fetch_advert_for(relays, None, Some(target_pubkey)).await? {
-            break a;
+    // The advert carries the server's static candidates. Poll the relays
+    // within one ADVERT_WAIT budget: a fresh advert (the peer just started
+    // serving) can take a few seconds to propagate, but a missing one fails
+    // fast instead of burning minutes — each poll costs a relay subscribe
+    // wait, so the worst case is two misses before the budget trips.
+    let advert = {
+        let deadline = tokio::time::Instant::now() + ADVERT_WAIT;
+        loop {
+            match crate::relay::fetch_advert_for(relays, None, Some(target_pubkey)).await? {
+                Some(a) => break a,
+                None => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(TunnelError::AdvertTimeout(target.to_string(), ADVERT_WAIT));
+                    }
+                    sleep(ADVERT_RETRY).await;
+                }
+            }
         }
-        sleep(ADVERT_WAIT).await; // relays may have been slow; try once more
-        if let Some(a) = crate::relay::fetch_advert_for(relays, None, Some(target_pubkey)).await? {
-            break a;
-        }
-        return Err(TunnelError::AdvertTimeout(target.to_string(), ADVERT_WAIT));
     };
     let mut candidates: Vec<SocketAddr> = parse_endpoints(&advert.endpoints);
     tracing::info!(?candidates, "advert candidates");
@@ -960,18 +969,22 @@ impl TunnelListener {
 }
 
 /// Forward a local TCP port over tunnels to `target`: every connection to
-/// `127.0.0.1:<port>` dials `target` (a fresh tunnel per connection) and
+/// the local listener dials `target` (a fresh tunnel per connection) and
 /// splices the traffic through, encrypted. With a `psk`, only tailnet
 /// members of the same group can be dialed.
+///
+/// The listener binds `bind` — loopback unless the caller says otherwise:
+/// anyone who can reach the port can make this process dial `target`, so
+/// exposing it beyond the local machine should be a deliberate choice.
 pub async fn forward_tcp(
     identity: &Identity,
     target: &str,
-    port: u16,
+    bind: SocketAddr,
     relays: &[String],
     psk: Option<&[u8; 32]>,
 ) -> Result<(), TunnelError> {
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    eprintln!("# 🐈 forwarding tcp/0.0.0.0:{port} over tunnels to {target}");
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    eprintln!("# 🐈 forwarding tcp/{bind} over tunnels to {target}");
     let psk = psk.copied();
     loop {
         let (conn, client) = listener.accept().await?;

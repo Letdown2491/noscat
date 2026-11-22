@@ -127,7 +127,9 @@ ssh -p 2222 localhost
 Sessions are concurrent: the exposed side serves every peer from one shared
 UDP port (datagrams are demuxed by source address), and each `forward`
 connection dials its own tunnel — parallel `ssh`/`scp`/browser connections
-just work.
+just work. The `forward` listener binds loopback by default (pass
+`--bind 0.0.0.0` to expose it on your LAN); anyone who can reach it can make
+the device dial the target.
 
 ### File transfer
 

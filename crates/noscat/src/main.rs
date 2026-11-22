@@ -136,6 +136,10 @@ enum Command {
         /// Local TCP port to listen on.
         #[arg(long)]
         port: u16,
+        /// Local address for the listener. Loopback by default — anyone who
+        /// can reach the port can make this process dial the target.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
@@ -422,7 +426,7 @@ fn main() -> anyhow::Result<()> {
                 psk.as_ref(),
             ))?;
         }
-        Command::Forward { target, port, relays, identity, tailnet } => {
+        Command::Forward { target, port, bind, relays, identity, tailnet } => {
             let id = match &identity {
                 Some(secret) => noscat_core::Identity::from_secret(secret)
                     .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
@@ -433,7 +437,7 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(noscat_core::tunnel::forward_tcp(
                 &id,
                 &target,
-                port,
+                std::net::SocketAddr::new(bind, port),
                 &relays_or_default(relays),
                 psk.as_ref(),
             ))?;
