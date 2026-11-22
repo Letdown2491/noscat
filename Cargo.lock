@@ -1508,6 +1508,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hkdf",
+ "libc",
  "nostr",
  "nostr-sdk",
  "openmls",

@@ -13,13 +13,15 @@
 //! because blasting back-to-back datagrams overflows kernel socket buffers;
 //! without it the tail of every large transfer would be silently lost.
 
+use std::collections::VecDeque;
+use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nostr::prelude::*;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, timeout_at};
@@ -36,8 +38,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUND: Duration = Duration::from_secs(4);
 /// UDP read buffer: Noise caps messages well below the 65535 IP limit.
 const BUF: usize = 65535;
-/// File-transfer chunk: comfortably inside one Noise message + UDP datagram.
-const CHUNK: usize = 16 * 1024;
+/// File-transfer chunk: MTU-sized so a frame never fragments into multiple
+/// IP packets — one datagram, one loss unit. Throughput comes from the
+/// sliding window (many small in-flight frames), not from huge datagrams.
+const CHUNK: usize = 1200;
 /// Punch marker: junk to the peer, ignorable noise to us.
 const PUNCH: &[u8] = b"noscat/punch/v1";
 
@@ -80,6 +84,39 @@ pub fn noise_keypair(identity: &Identity) -> Result<([u8; 32], [u8; 32]), Tunnel
         .map_err(|_| NoiseError::KeyLen)?;
     let privkey = noise::noise_static_from_identity(&secret)?;
     Ok((noise::noise_public(&privkey), privkey))
+}
+
+/// Fat kernel buffers for a UDP socket: defaults (~212 KB) are smaller than
+/// one window burst (32 × 16 KiB), so bursts would overflow the peer's
+/// receive queue and every burst would need replay rounds to land.
+#[cfg(unix)]
+fn tune_buffers(sock: &std::net::UdpSocket) {
+    use std::os::fd::AsRawFd;
+
+    // Best effort: if the sysctl caps these, we still work — just burstier.
+    let buf: libc::c_int = 4 * 1024 * 1024;
+    unsafe {
+        for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                opt,
+                &buf as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of_val(&buf) as libc::socklen_t,
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn tune_buffers(_sock: &std::net::UdpSocket) {}
+
+/// Bind a UDP socket with fat kernel buffers.
+fn bind_udp(addr: SocketAddr) -> Result<Arc<UdpSocket>, TunnelError> {
+    let sock = std::net::UdpSocket::bind(addr)?;
+    tune_buffers(&sock);
+    sock.set_nonblocking(true)?;
+    Ok(Arc::new(UdpSocket::from_std(sock)?))
 }
 
 /// Candidate endpoints for a socket: the concrete LAN/interface address plus
@@ -146,16 +183,29 @@ struct Session {
     peer: SocketAddr,
     session: snow::TransportState,
     who: String,
+    /// Background lookup of the peer's npub (relay round-trip). Display only —
+    /// the data path must never wait on it.
+    who_lookup: Option<tokio::task::JoinHandle<String>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Session {
-    /// Abort signaling tasks and deconstruct into the transport parts.
-    fn finish(mut self) -> (Arc<UdpSocket>, SocketAddr, snow::TransportState, String) {
+    /// Abort signaling tasks and deconstruct into the transport parts. The
+    /// peer name resolves to the advert lookup only if it already finished —
+    /// awaiting it here would stall the data path by up to FETCH_WAIT.
+    async fn finish(mut self) -> (Arc<UdpSocket>, SocketAddr, snow::TransportState, String) {
         for task in self.tasks.drain(..) {
             task.abort();
         }
-        (self.socket, self.peer, self.session, self.who)
+        let who = match self.who_lookup.take() {
+            Some(h) if h.is_finished() => h.await.unwrap_or_else(|_| self.who.clone()),
+            Some(h) => {
+                h.abort();
+                self.who
+            }
+            None => self.who,
+        };
+        (self.socket, self.peer, self.session, who)
     }
 }
 
@@ -181,17 +231,23 @@ async fn accept_handshake(
     let n = hs.write_message(b"", &mut wire)?;
     socket.send_to(&wire[..n], peer).await?;
 
-    // -> s, se
-    match timeout(HANDSHAKE_TIMEOUT, socket.recv_from(&mut wire)).await {
-        Ok(Ok((n, from))) if from == peer => {
-            hs.read_message(&wire[..n], &mut plain)?;
+    // -> s, se. A punch marker can land in this slot (the initiator's punch
+    // loop is still running) — snow restores its state on failed reads, so
+    // junk is skipped until the real msg3 arrives.
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    loop {
+        let (n, from) = match timeout_at(deadline, socket.recv_from(&mut wire)).await {
+            Err(_) => return Err(TunnelError::HandshakeTimeout),
+            Ok(r) => r?,
+        };
+        if from != peer {
+            continue;
         }
-        Ok(Ok((_, from))) => {
-            tracing::debug!(%from, "handshake finished with a different source address");
-            return Err(TunnelError::NoHandshake);
+        match hs.read_message(&wire[..n], &mut plain) {
+            Ok(_) => break,
+            Err(snow::Error::Decrypt) => continue,
+            Err(e) => return Err(e.into()),
         }
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => return Err(TunnelError::HandshakeTimeout),
     }
 
     let initiator_noise: [u8; 32] = hs
@@ -202,16 +258,24 @@ async fn accept_handshake(
     let session = noise::into_transport(hs)?;
 
     // The initiator's Noise key binds to its npub through its signed advert.
-    let who = match crate::relay::fetch_advert_for(relays, Some(initiator_noise), None).await? {
-        Some(advert) => advert.npub.to_string(),
-        None => format!("noise key {}", hex::encode(initiator_noise)),
-    };
+    // Resolve it in the background: a relay round-trip can burn the whole
+    // FETCH_WAIT, and the data path must never wait on a display name.
+    let who = format!("noise key {}", hex::encode(initiator_noise));
+    let lookup_relays: Vec<String> = relays.to_vec();
+    let fallback = who.clone();
+    let who_lookup = tokio::spawn(async move {
+        match crate::relay::fetch_advert_for(&lookup_relays, Some(initiator_noise), None).await {
+            Ok(Some(advert)) => advert.npub.to_string(),
+            _ => fallback,
+        }
+    });
 
     Ok(Session {
         socket: socket.clone(),
         peer,
         session,
         who,
+        who_lookup: Some(who_lookup),
         tasks: Vec::new(),
     })
 }
@@ -230,7 +294,7 @@ async fn serve_session(
 ) -> Result<Session, TunnelError> {
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
-    let socket = Arc::new(UdpSocket::bind(listen).await?);
+    let socket = bind_udp(listen)?;
     let local = socket.local_addr()?;
 
     let endpoints = discover_endpoints(&socket).await?;
@@ -295,7 +359,7 @@ async fn dial_session(
     let target_pubkey = PublicKey::parse(target).map_err(|_| TunnelError::BadAdvert)?;
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let socket = bind_udp("0.0.0.0:0".parse().unwrap())?;
     let my_endpoints = discover_endpoints(&socket).await?;
     eprintln!(
         "# 🐈 dialing {target} (my candidates: {})…",
@@ -387,6 +451,7 @@ async fn dial_session(
         peer,
         session,
         who: target.to_string(),
+        who_lookup: None,
         tasks: Vec::new(),
     })
 }
@@ -463,7 +528,7 @@ pub async fn serve(
     psk: Option<&[u8; 32]>,
 ) -> Result<String, TunnelError> {
     let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
-    let (socket, peer, hs, who) = session.finish();
+    let (socket, peer, hs, who) = session.finish().await;
     eprintln!("# 🔗 tunnel up with {who} — bridging stdio");
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs).await?;
     Ok(who)
@@ -477,7 +542,7 @@ pub async fn pipe(
     psk: Option<&[u8; 32]>,
 ) -> Result<(), TunnelError> {
     let session = dial_session(identity, target, relays, psk).await?;
-    let (socket, peer, hs, _) = session.finish();
+    let (socket, peer, hs, _) = session.finish().await;
     eprintln!("# 🔗 tunnel up with {target} at udp/{peer} — bridging stdio");
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs).await
 }
@@ -495,7 +560,7 @@ pub async fn expose_tcp(
 ) -> Result<(), TunnelError> {
     loop {
         let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
-        let (socket, peer, hs, who) = session.finish();
+        let (socket, peer, hs, who) = session.finish().await;
         eprintln!("# 🔗 tunnel up with {who} — forwarding to tcp/{to}");
         match tokio::net::TcpStream::connect(to).await {
             Ok(conn) => {
@@ -528,7 +593,7 @@ pub async fn forward_tcp(
         eprintln!("# 🔈 connection from {client} — dialing {target}…");
         match dial_session(identity, target, relays, psk).await {
             Ok(session) => {
-                let (socket, peer, hs, _) = session.finish();
+                let (socket, peer, hs, _) = session.finish().await;
                 let (rd, wr) = tokio::io::split(conn);
                 if let Err(e) = pump(rd, wr, socket, peer, hs).await {
                     tracing::warn!(%e, "tunnel session ended with error");
@@ -551,86 +616,355 @@ const TAG_HEADER: u8 = 1;
 const TAG_CHUNK: u8 = 2;
 const TAG_ACK: u8 = 3;
 const TAG_FIN: u8 = 4;
+/// Smallest authenticated frame (a 5-byte payload + the 16-byte Poly1305
+/// tag). Anything decrypt-failing below this is a punch marker, not a replay.
+const MIN_FRAME: usize = 5 + 16;
 /// Per-chunk ACK wait before retransmitting.
 const ACK_TIMEOUT: Duration = Duration::from_secs(1);
+/// Sliding window: chunks in flight before an ack is required. Kept small
+/// on purpose: the receiver can only ack in order, so under loss the sender
+/// replays the *whole* window each sweep — the burst must fit in the peer's
+/// socket queue or the same frames keep dropping every round (32 × 1232 B
+/// ≈ 39 KiB; comfortably inside even default kernel buffers).
+const WINDOW: u32 = 32;
+/// Ack history depth. The sender must consume every ack the receiver writes
+/// *in order* (snow nonces), so a lost ack makes every later one undecryptable
+/// until a replay reaches the missed nonce. The receiver only acks at window
+/// boundaries (see `receive_chunks`), so the total ack count — and therefore
+/// the worst-case nonce gap — stays far below this for any realistic file.
+const ACK_HISTORY: usize = 4 * WINDOW as usize;
+/// Retransmit an unacked chunk after this long without progress.
+const RTO: Duration = Duration::from_millis(400);
+/// After the file is on disk, the receiver answers the sender's replays with
+/// its FIN until the sender goes quiet for this long. Long enough to ride out
+/// a path flap during the final handshake.
+const FIN_LINGER: Duration = Duration::from_secs(30);
 /// Retransmission budget per chunk before declaring the path too lossy.
-const MAX_RETRIES: u32 = 60;
+const MAX_RETRIES: u32 = 120;
 /// Receiver-side inactivity bound: the sender stopped answering.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// One encrypted send + the ack round-trip for it. `payload` carries the tag
-/// and (for chunks) sequence number; `want_ack` is the ack we are waiting on
-/// (`None` for header/fin, which complete on *any* authenticated reply).
+/// One encrypted send + the ack round-trip for it (header and FIN frames).
+///
+/// Retransmission replays the *same ciphertext*: snow nonces are sequential
+/// and never on the wire, so a re-encrypted retry would carry a fresh nonce
+/// the peer cannot decrypt after missing the original. Replay is safe — the
+/// peer either consumes it (it never got it) or fails Decrypt and skips it
+/// (it already did).
+///
+/// `want_seq` completes the wait on a cumulative ack reaching that many
+/// chunks (the FIN handshake — the receiver must have *everything*), or on a
+/// TAG_FIN from the peer. `None` completes on any authenticated reply (the
+/// header wait — any ack proves the receiver is listening).
+///
+/// `retries` bounds the replay budget; the header passes a small one because
+/// a lost header ack self-heals (chunk acks replay the whole ack history).
 async fn send_and_ack(
     socket: &UdpSocket,
     peer: SocketAddr,
     hs: &mut snow::TransportState,
     payload: &[u8],
-    want_ack: Option<u32>,
+    want_seq: Option<u32>,
+    retries: u32,
     plain: &mut [u8],
     wire: &mut [u8],
 ) -> Result<(), TunnelError> {
-    for _ in 0..MAX_RETRIES {
-        let n = hs.write_message(payload, wire)?;
-        socket.send_to(&wire[..n], peer).await?;
+    let n = hs.write_message(payload, wire)?;
+    let ct = wire[..n].to_vec();
+    socket.send_to(&ct, peer).await?;
+    for _ in 0..retries {
         let wait = tokio::time::Instant::now() + ACK_TIMEOUT;
         loop {
-            let recv = timeout_at(wait, socket.recv_from(wire)).await;
-            match recv {
-                Err(_) => break, // ack timeout -> retransmit
+            match timeout_at(wait, socket.recv_from(wire)).await {
+                Err(_) => break, // ack timeout -> replay
                 Ok(Err(e)) => return Err(e.into()),
                 Ok(Ok((n, from))) => {
                     if from != peer {
                         continue;
                     }
                     match hs.read_message(&wire[..n], plain) {
-                        // Any authenticated reply completes header/fin waits;
-                        // a chunk ack completes only on a matching seq; a FIN
-                        // means the receiver is already done — complete too.
                         Ok(m) if m >= 5 && plain[0] == TAG_ACK => {
                             let seq = u32::from_be_bytes(plain[1..5].try_into().unwrap());
-                            match want_ack {
+                            match want_seq {
                                 Some(w) if seq >= w => return Ok(()),
-                                Some(_) => continue, // older ack: keep waiting
+                                Some(_) => {} // stale replayed ack; keep waiting
                                 None => return Ok(()),
                             }
                         }
                         Ok(m) if m >= 1 && plain[0] == TAG_FIN => return Ok(()),
-                        Ok(_) => {} // unexpected payload; keep waiting
-                        Err(snow::Error::Decrypt) => {}
+                        Ok(_) => {}
+                        Err(snow::Error::Decrypt) => {} // already-consumed replay
                         Err(e) => return Err(e.into()),
                     }
                 }
             }
         }
+        socket.send_to(&ct, peer).await?;
     }
     Err(TunnelError::TransferStalled)
 }
 
-/// Receive one authenticated datagram into `plain`, skipping strangers,
-/// undecryptables, and empties. `Err` maps straight through.
-async fn recv_plain(
+/// Emit one encrypted chunk frame (tag + seq + data) and hand back the
+/// ciphertext — retransmissions must replay these exact bytes, because a
+/// re-encrypted retry would carry a new snow nonce the receiver can't decrypt.
+async fn emit_chunk(
     socket: &UdpSocket,
     peer: SocketAddr,
     hs: &mut snow::TransportState,
-    plain: &mut [u8],
+    seq: u32,
+    data: &[u8],
     wire: &mut [u8],
-) -> Result<usize, TunnelError> {
-    let deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+) -> Result<Vec<u8>, TunnelError> {
+    let mut msg = Vec::with_capacity(5 + data.len());
+    msg.push(TAG_CHUNK);
+    msg.extend_from_slice(&seq.to_be_bytes());
+    msg.extend_from_slice(data);
+    let n = hs.write_message(&msg, wire)?;
+    socket.send_to(&wire[..n], peer).await?;
+    Ok(wire[..n].to_vec())
+}
+
+/// Fold one datagram into the ack state: consume the ack nonce stream
+/// sequentially (replays of already-consumed acks fail Decrypt and are
+/// skipped), advancing `base` by the newest cumulative value heard.
+fn fold_ack(
+    hs: &mut snow::TransportState,
+    frames: &mut VecDeque<(Vec<u8>, Instant, u32)>,
+    base: &mut u32,
+    datagram: &[u8],
+    plain: &mut [u8],
+) -> Result<(), TunnelError> {
+    match hs.read_message(datagram, plain) {
+        Ok(m) if m >= 5 && plain[0] == TAG_ACK => {
+            let ack = u32::from_be_bytes(plain[1..5].try_into().unwrap());
+            tracing::debug!(ack, base = *base, "ack decrypted");
+            let advance = (ack.saturating_sub(*base) as usize).min(frames.len());
+            for _ in 0..advance {
+                frames.pop_front();
+            }
+            *base += advance as u32;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(snow::Error::Decrypt) => {
+            tracing::trace!(len = datagram.len(), "ack replay skipped (already consumed)");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Stream `total` chunks of `file` (`len` bytes) through a sliding window:
+/// up to [`WINDOW`] frames in flight, each retransmitted on [`RTO`] until the
+/// receiver's cumulative ack ("next expected seq") covers it. Because snow
+/// nonces are strictly sequential, retransmission *replays* cached
+/// ciphertexts — a replay burst lets the receiver catch up across every gap
+/// at once, and lost acks resync the same way (the receiver replays its ack
+/// history; see `ack_and_replay`). Acks are drained in batches — the
+/// receiver's replays make them arrive many-at-once.
+async fn stream_chunks(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    hs: &mut snow::TransportState,
+    total: u32,
+    len: u64,
+    file: &mut tokio::fs::File,
+) -> Result<(), TunnelError> {
+    let mut wire = [0u8; BUF];
+    let mut plain = [0u8; BUF];
+    let mut buf = [0u8; CHUNK];
+
+    // In-flight frames (seqs base..next): cached ciphertext, last-sent time,
+    // retransmission count.
+    let mut frames: VecDeque<(Vec<u8>, Instant, u32)> = VecDeque::new();
+    let mut base: u32 = 0; // next seq the receiver wants
+    let mut next: u32 = 0; // next unsent chunk
+    let mut sweep_round: usize = 0;
+
+    async fn read_chunk_at(
+        file: &mut tokio::fs::File,
+        seq: u32,
+        len: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, TunnelError> {
+        let offset = seq as u64 * CHUNK as u64;
+        let want = CHUNK.min((len - offset) as usize);
+        file.seek(SeekFrom::Start(offset)).await?;
+        Ok(file.read(&mut buf[..want]).await?)
+    }
+
     loop {
-        let (n, from) = timeout_at(deadline, socket.recv_from(wire))
-            .await
-            .map_err(|_| TunnelError::TransferStalled)??;
+        if base >= total {
+            return Ok(());
+        }
+        // Fill the window with fresh frames.
+        while next < total && next - base < WINDOW {
+            let m = read_chunk_at(file, next, len, &mut buf).await?;
+            let ct = emit_chunk(socket, peer, hs, next, &buf[..m], &mut wire).await?;
+            frames.push_back((ct, Instant::now(), 0));
+            next += 1;
+        }
+        // Replay anything whose ack is late — starting the sweep at a
+        // rotating offset each round: a burst whose tail always lands past
+        // the peer's receive queue would otherwise drop the *same* frames
+        // every round and never recover them.
+        let mut replayed = 0usize;
+        let start = sweep_round % frames.len().max(1);
+        let len = frames.len();
+        for offset in 0..len {
+            let (ct, at, retries) = &mut frames[(start + offset) % len];
+            if at.elapsed() >= RTO {
+                *retries += 1;
+                if *retries > MAX_RETRIES {
+                    return Err(TunnelError::TransferStalled);
+                }
+                socket.send_to(ct, peer).await?;
+                replayed += 1;
+                *at = Instant::now();
+            }
+        }
+        sweep_round = sweep_round.wrapping_add(1);
+        if replayed > 0 {
+            tracing::debug!(%replayed, base, next, "replay sweep");
+        }
+        // Wait for the next ack, then drain the queue dry (the receiver's
+        // replays arrive many-at-once; per-datagram loop overhead would
+        // throttle throughput).
+        let deadline = tokio::time::Instant::now() + RTO;
+        let (n, from) = match timeout_at(deadline, socket.recv_from(&mut wire)).await {
+            Err(_) => continue, // no acks in time -> replay sweep runs again
+            Ok(r) => r?,
+        };
+        tracing::debug!(%from, n, "sender got datagram");
+        if from == peer {
+            fold_ack(hs, &mut frames, &mut base, &wire[..n], &mut plain)?;
+            tracing::trace!(base, next, "ack folded");
+        }
+        let mut drained = 0usize;
+        loop {
+            match socket.try_recv_from(&mut wire) {
+                Ok((n, from)) if from == peer => {
+                    drained += 1;
+                    fold_ack(hs, &mut frames, &mut base, &wire[..n], &mut plain)?;
+                }
+                Ok(_) => continue, // stranger; keep draining
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if drained > 0 {
+            tracing::debug!(drained, base, "drained queued acks");
+        }
+    }
+}
+
+/// Send one cumulative ack — "I expect `seq` next" — and, every
+/// [`ACK_REPLAY_EVERY`], replay recent ack ciphertexts. The replay is the
+/// resync mechanism: the sender's nonce stream only advances when it hears
+/// *an* ack it can decrypt, so if acks were lost, the replays (old nonces
+/// fail Decrypt and are skipped; un-consumed ones decrypt in order) walk it
+/// forward to the newest cumulative value. Replaying on *every* chunk would
+/// flood the sender with quadratic ack traffic, so it is time-budgeted.
+async fn ack_and_replay(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    hs: &mut snow::TransportState,
+    seq: u32,
+    history: &mut VecDeque<Vec<u8>>,
+    wire: &mut [u8],
+    full: bool,
+) -> Result<(), TunnelError> {
+    let mut msg = vec![TAG_ACK];
+    msg.extend_from_slice(&seq.to_be_bytes());
+    let n = hs.write_message(&msg, wire)?;
+    let ct = wire[..n].to_vec();
+    history.push_back(ct.clone());
+    if history.len() > ACK_HISTORY {
+        history.pop_front();
+    }
+    tracing::debug!(seq, full, history = history.len(), %peer, "acking");
+    if full {
+        for old in history.iter() {
+            socket.send_to(old, peer).await?;
+        }
+    } else {
+        socket.send_to(&ct, peer).await?;
+    }
+    Ok(())
+}
+
+/// The receive side of [`stream_chunks`]: write chunks in order and ack
+/// cumulatively with history replay. Snow only decrypts frames in nonce
+/// order, and the sender emits seqs in nonce order — so every frame that
+/// decrypts IS the next one (frames behind a gap are undecryptable and
+/// skipped; the sender's replay bursts refill the gap). Returns bytes
+/// written; stops once `len` have been, or the sender FINs.
+async fn receive_chunks<W>(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    hs: &mut snow::TransportState,
+    len: u64,
+    file: &mut W,
+    history: &mut VecDeque<Vec<u8>>,
+) -> Result<u64, TunnelError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut wire = [0u8; BUF];
+    let mut plain = [0u8; BUF];
+    let mut received = 0u64;
+    loop {
+        let (n, from) = timeout_at(
+            tokio::time::Instant::now() + IDLE_TIMEOUT,
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .map_err(|_| TunnelError::TransferStalled)??;
         if from != peer {
             continue;
         }
-        match hs.read_message(&wire[..n], plain) {
-            Ok(0) => continue,
-            Ok(m) => return Ok(m),
-            Err(snow::Error::Decrypt) => {}
+        let m = match hs.read_message(&wire[..n], &mut plain) {
+            Ok(m) => m,
+            Err(snow::Error::Decrypt) => {
+                // A failed decrypt on a noise-sized datagram is an old chunk
+                // (or header) replay: the sender is retransmitting *because
+                // it missed our acks*. Its nonces can never move backward, so
+                // the only way it advances is hearing our already-written ack
+                // history — replay it all, right now. Smaller junk is punch
+                // markers; ignore those.
+                if n >= MIN_FRAME {
+                    for ct in history.iter() {
+                        socket.send_to(ct, peer).await?;
+                    }
+                    tracing::debug!(n, history = history.len(), "stuck sender; replayed acks");
+                }
+                continue;
+            }
             Err(e) => return Err(e.into()),
+        };
+        match plain[0] {
+            TAG_CHUNK if m >= 5 => {
+                let seq = u32::from_be_bytes(plain[1..5].try_into().unwrap());
+                file.write_all(&plain[5..m]).await?;
+                received += (m - 5) as u64;
+                // Delayed-ack style: ack only at window boundaries (and the
+                // final chunk). Every ack is a fresh snow nonce the sender
+                // must consume *in order*, so a burst of per-chunk acks would
+                // let the ack stream outrun the sender's consumption under
+                // timing skew and the nonce gap would outgrow the replay
+                // history — one ack per window keeps the gap trivially small.
+                if (seq + 1) % WINDOW == 0 || (len > 0 && received >= len) {
+                    ack_and_replay(socket, peer, hs, seq + 1, history, &mut wire, false).await?;
+                }
+                if len > 0 && received >= len {
+                    break;
+                }
+            }
+            TAG_FIN => break,
+            _ => {}
         }
     }
+    Ok(received)
 }
 
 /// Strip any path components from a peer-supplied filename.
@@ -648,9 +982,10 @@ fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {
 /// Send a file over a tunnel to `target`.
 ///
 /// Protocol (every message Noise-encrypted): TAG_HEADER (JSON name+len) ->
-/// TAG_CHUNK (seq + data), each retransmitted until ACKed -> TAG_FIN, held
-/// until the receiver confirms the file is on disk. A clean return means the
-/// receiving side wrote and flushed the entire file.
+/// TAG_CHUNK (seq + 16 KiB data) through a sliding window with cumulative
+/// acks and RTO retransmits -> TAG_FIN, held until the receiver confirms the
+/// file is on disk. A clean return means the receiving side wrote and
+/// flushed the entire file.
 pub async fn send_file(
     identity: &Identity,
     target: &str,
@@ -668,7 +1003,7 @@ pub async fn send_file(
     )?;
 
     let session = dial_session(identity, target, relays, psk).await?;
-    let (socket, peer, mut hs, _) = session.finish();
+    let (socket, peer, mut hs, _) = session.finish().await;
     eprintln!(
         "# 🔗 tunnel up with {target} at udp/{peer} — sending {} ({len} bytes)",
         name.display()
@@ -677,31 +1012,42 @@ pub async fn send_file(
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
 
-    // -> header; the receiver acks it, so we know it is listening.
+    // -> header; a small ack budget: a lost header ack self-heals once the
+    // chunks flow (their acks replay the header ack too).
     let mut msg = vec![TAG_HEADER];
     msg.extend(serde_json::to_string(&TransferHeader {
         name: name.to_string_lossy().to_string(),
         len,
     })?.into_bytes());
-    send_and_ack(&socket, peer, &mut hs, &msg, None, &mut plain, &mut wire).await?;
-
-    // -> chunks, each held until its ack (or a later ack) arrives.
-    let total_chunks = len.div_ceil(CHUNK as u64) as u32;
-    let mut buf = [0u8; CHUNK];
-    for seq in 0..total_chunks {
-        let offset = (seq as u64) * (CHUNK as u64);
-        let want = CHUNK.min((len - offset) as usize);
-        let m = file.read(&mut buf[..want]).await?;
-        let mut msg = Vec::with_capacity(5 + m);
-        msg.push(TAG_CHUNK);
-        msg.extend_from_slice(&seq.to_be_bytes());
-        msg.extend_from_slice(&buf[..m]);
-        send_and_ack(&socket, peer, &mut hs, &msg, Some(seq), &mut plain, &mut wire).await?;
+    if let Err(e) = send_and_ack(&socket, peer, &mut hs, &msg, None, 3, &mut plain, &mut wire).await
+    {
+        tracing::debug!("header ack not heard ({e}); streaming anyway");
     }
 
-    // -> FIN; the receiver's reply means the whole file is on disk.
-    send_and_ack(&socket, peer, &mut hs, &[TAG_FIN], None, &mut plain, &mut wire).await?;
-    eprintln!("# ✅ {} received by peer ({len} bytes sent)", name.display());
+    // -> chunks through the sliding window.
+    let started = Instant::now();
+    let total_chunks = len.div_ceil(CHUNK as u64) as u32;
+    stream_chunks(&socket, peer, &mut hs, total_chunks, len, &mut file).await?;
+
+    // -> FIN; completes when the receiver's cumulative ack reaches the
+    // transfer total, or it FINs — either way the whole file is on disk.
+    send_and_ack(
+        &socket,
+        peer,
+        &mut hs,
+        &[TAG_FIN],
+        Some(total_chunks),
+        MAX_RETRIES,
+        &mut plain,
+        &mut wire,
+    )
+    .await?;
+    let dt = started.elapsed().as_secs_f64();
+    eprintln!(
+        "# ✅ {} received by peer ({len} bytes in {dt:.1}s, {:.1} MB/s)",
+        name.display(),
+        len as f64 / dt / (1024.0 * 1024.0)
+    );
     Ok(())
 }
 
@@ -718,74 +1064,73 @@ pub async fn receive_file(
     psk: Option<&[u8; 32]>,
 ) -> Result<(String, PathBuf), TunnelError> {
     let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
-    let (socket, peer, mut hs, who) = session.finish();
+    let (socket, peer, mut hs, who) = session.finish().await;
 
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
+    let mut history: VecDeque<Vec<u8>> = VecDeque::new();
 
-    async fn send_ack(
-        socket: &UdpSocket,
-        peer: SocketAddr,
-        hs: &mut snow::TransportState,
-        seq: u32,
-        wire: &mut [u8],
-    ) -> Result<(), TunnelError> {
-        let mut msg = vec![TAG_ACK];
-        msg.extend_from_slice(&seq.to_be_bytes());
-        let n = hs.write_message(&msg, wire)?;
-        socket.send_to(&wire[..n], peer).await?;
-        Ok(())
-    }
-
-    // <- header; ack it so the sender can start streaming.
-    let m = recv_plain(&socket, peer, &mut hs, &mut plain, &mut wire).await?;
-    if m < 1 || plain[0] != TAG_HEADER {
-        return Err(TunnelError::BadAdvert);
-    }
+    // <- header; ack it (seeding the ack history) so the sender can stream.
+    // A decrypt failure here is the sender replaying the header — it missed
+    // our ack — so answer with the whole history immediately.
+    let m = loop {
+        let (n, from) = timeout_at(
+            tokio::time::Instant::now() + IDLE_TIMEOUT,
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .map_err(|_| TunnelError::TransferStalled)??;
+        if from != peer {
+            continue;
+        }
+        match hs.read_message(&wire[..n], &mut plain) {
+            Ok(m) if m >= 1 && plain[0] == TAG_HEADER => break m,
+            Ok(0) => continue,
+            Ok(_) => continue,
+            Err(snow::Error::Decrypt) if n >= MIN_FRAME => {
+                for ct in history.iter() {
+                    socket.send_to(ct, peer).await?;
+                }
+            }
+            Err(snow::Error::Decrypt) => {} // punch marker
+            Err(e) => return Err(e.into()),
+        }
+    };
     let header: TransferHeader = serde_json::from_slice(&plain[1..m])?;
     let name = sanitize_name(&header.name)?;
     let out_path = out_dir.join(&name);
     eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
-    send_ack(&socket, peer, &mut hs, u32::MAX, &mut wire).await?;
+    ack_and_replay(&socket, peer, &mut hs, 0, &mut history, &mut wire, true).await?;
 
-    let mut file = tokio::fs::File::create(&out_path).await?;
-    let mut expected: u32 = 0;
-    let mut received = 0u64;
-    'receive: loop {
-        let m = recv_plain(&socket, peer, &mut hs, &mut plain, &mut wire).await?;
-        match plain[0] {
-            TAG_CHUNK if m >= 5 => {
-                let seq = u32::from_be_bytes(plain[1..5].try_into().unwrap());
-                if seq == expected {
-                    file.write_all(&plain[5..m]).await?;
-                    received += (m - 5) as u64;
-                    expected += 1;
-                }
-                send_ack(&socket, peer, &mut hs, seq, &mut wire).await?;
-                if header.len > 0 && received >= header.len {
-                    break 'receive;
-                }
-            }
-            TAG_FIN => break 'receive,
-            _ => {}
-        }
-    }
+    // Cumulative acks with history replay keep the sender's nonce stream
+    // moving across lost acks; see receive_chunks.
+    let mut file = tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(&out_path).await?);
+    let received = receive_chunks(&socket, peer, &mut hs, header.len, &mut file, &mut history).await?;
     file.flush().await?;
     drop(file);
 
-    // -> FIN, then linger for the sender's FIN (it retransmits until it hears
-    // from us), so the sender returns only after the file is truly on disk.
+    // -> FIN, then linger: answer every datagram the sender replays with
+    // (ack history + FIN) until it goes quiet, so its FIN wait always
+    // resyncs and returns only after the file is truly on disk.
     let n = hs.write_message(&[TAG_FIN], &mut wire)?;
-    socket.send_to(&wire[..n], peer).await?;
+    let fin = wire[..n].to_vec();
+    socket.send_to(&fin, peer).await?;
+    tracing::debug!("file complete; FIN sent, lingering for the sender");
+    let mut quiet = tokio::time::Instant::now() + FIN_LINGER;
     loop {
-        match recv_plain(&socket, peer, &mut hs, &mut plain, &mut wire).await {
-            Ok(m) if m >= 1 && plain[0] == TAG_FIN => break,
-            Ok(_) => {
-                let n = hs.write_message(&[TAG_FIN], &mut wire)?;
-                socket.send_to(&wire[..n], peer).await?;
+        match timeout_at(quiet, socket.recv_from(&mut wire)).await {
+            Err(_) => break, // sender gone quiet: it has our confirmation
+            Ok(r) => {
+                let (_, from) = r?;
+                if from != peer {
+                    continue;
+                }
+                socket.send_to(&fin, peer).await?;
+                for ct in history.iter() {
+                    socket.send_to(ct, peer).await?;
+                }
+                quiet = tokio::time::Instant::now() + FIN_LINGER;
             }
-            Err(TunnelError::TransferStalled) => break, // sender gone; we are done
-            Err(e) => return Err(e),
         }
     }
 
@@ -800,3 +1145,115 @@ pub async fn receive_file(
     Ok((who, out_path))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full transfer roundtrip over real UDP loopback — through a proxy that
+    /// drops every 7th data-plane frame (~14% loss). Proves the sliding
+    /// window + cumulative acks recover loss: stop-and-wait would still pass
+    /// this, but only at 1 RTT per chunk; the window finishes in a handful.
+    #[tokio::test]
+    async fn transfer_survives_heavy_frame_loss() {
+        use crate::noise;
+
+        let mut wi = [0u8; BUF];
+        let mut pi = [0u8; BUF];
+
+        // Two parties, real UDP sockets (with production kernel buffers —
+        // defaults would overflow mid-burst and turn the loss test into a
+        // buffer-overflow test), and a lossy middlebox between them.
+        let send_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let recv_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let proxy_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for s in [&send_sock, &recv_sock, &proxy_sock] {
+            tune_buffers(s);
+            s.set_nonblocking(true).unwrap();
+        }
+        let send_sock = UdpSocket::from_std(send_sock).unwrap();
+        let recv_sock = UdpSocket::from_std(recv_sock).unwrap();
+        let proxy_sock = UdpSocket::from_std(proxy_sock).unwrap();
+        let (sender_addr, recv_addr, proxy_addr) = (
+            send_sock.local_addr().unwrap(),
+            recv_sock.local_addr().unwrap(),
+            proxy_sock.local_addr().unwrap(),
+        );
+        let proxy = tokio::spawn(async move {
+            let mut buf = [0u8; BUF];
+            let mut from_sender = 0u32;
+            loop {
+                let (n, from) = proxy_sock.recv_from(&mut buf).await.unwrap();
+                let target = if from == sender_addr {
+                    from_sender += 1;
+                    // The first two sender datagrams are the XK initiator's
+                    // handshake messages — let them through; drop every 7th
+                    // data-plane frame after that.
+                    if from_sender > 2 && (from_sender - 2) % 7 == 0 {
+                        continue;
+                    }
+                    recv_addr
+                } else {
+                    sender_addr
+                };
+                proxy_sock.send_to(&buf[..n], target).await.unwrap();
+            }
+        });
+
+        // Noise XK handshake (both peers see the proxy as their counterpart).
+        let ipriv = [7u8; 32];
+        let rpriv = [9u8; 32];
+        let rpub = noise::noise_public(&rpriv);
+        let mut hi = noise::initiator(&ipriv, &rpub, None).unwrap();
+        let mut hr = noise::responder(&rpriv, None).unwrap();
+        // -> e
+        let n = hi.write_message(b"", &mut wi).unwrap();
+        send_sock.send_to(&wi[..n], proxy_addr).await.unwrap();
+        let (n, _) = recv_sock.recv_from(&mut wi).await.unwrap();
+        hr.read_message(&wi[..n], &mut pi).unwrap();
+        // <- e, ee, s, er
+        let n = hr.write_message(b"", &mut wi).unwrap();
+        recv_sock.send_to(&wi[..n], proxy_addr).await.unwrap();
+        let (n, _) = send_sock.recv_from(&mut wi).await.unwrap();
+        hi.read_message(&wi[..n], &mut pi).unwrap();
+        // -> s, se
+        let n = hi.write_message(b"", &mut wi).unwrap();
+        send_sock.send_to(&wi[..n], proxy_addr).await.unwrap();
+        let (n, _) = recv_sock.recv_from(&mut wi).await.unwrap();
+        hr.read_message(&wi[..n], &mut pi).unwrap();
+        let mut ti = noise::into_transport(hi).unwrap();
+        let mut tr = noise::into_transport(hr).unwrap();
+
+        // 1 MiB + tail: 65 chunks — one window and a bit, with an odd tail.
+        let mut data = vec![0u8; 1024 * 1024 + 123];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let dir = std::env::temp_dir();
+        let src_path = dir.join("noscat-xfer-src.bin");
+        let dst_path = dir.join("noscat-xfer-dst.bin");
+        tokio::fs::write(&src_path, &data).await.unwrap();
+        let len = data.len() as u64;
+        let total = len.div_ceil(CHUNK as u64) as u32;
+
+        let mut src = tokio::fs::File::open(&src_path).await.unwrap();
+        let mut dst = tokio::fs::File::create(&dst_path).await.unwrap();
+        let sender = tokio::spawn(async move {
+            stream_chunks(&send_sock, proxy_addr, &mut ti, total, len, &mut src)
+                .await
+                .unwrap();
+        });
+        let mut history: VecDeque<Vec<u8>> = VecDeque::new();
+        let got = receive_chunks(&recv_sock, proxy_addr, &mut tr, len, &mut dst, &mut history)
+            .await
+            .unwrap();
+        sender.await.unwrap();
+        proxy.abort();
+
+        assert_eq!(got, len);
+        let written = tokio::fs::read(&dst_path).await.unwrap();
+        assert_eq!(written, data);
+        let _ = tokio::fs::remove_file(&src_path).await;
+        let _ = tokio::fs::remove_file(&dst_path).await;
+    }
+}
