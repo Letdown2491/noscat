@@ -93,6 +93,20 @@ noscat serve --tailnet ./device-a
 echo hi | noscat pipe <A's npub> --tailnet ./device-b
 ```
 
+### Port forwarding
+
+Expose any TCP service on one device; dial it by npub from another — like
+`ssh -L`, but the tunnel is Nostr-native and (with `--tailnet`) members-only:
+
+```
+# On the device with the service (A) — expose an SSH server, web app, anything:
+noscat expose --to 127.0.0.1:22 --tailnet ./device-a
+
+# On another device (B) — localhost:2222 now *is* A's port 22:
+noscat forward <A's npub> --port 2222 --tailnet ./device-b
+ssh -p 2222 localhost
+```
+
 ### File transfer
 
 ```
@@ -105,7 +119,6 @@ noscat send ./report.pdf <A's npub> --tailnet ./device-b
 
 ### Roadmap
 
-- `port-forward`/`serve` modes (arbitrary TCP services, not just stdio).
 - Transfer throughput (sliding-window ACKs) and resume.
 - Multi-member tailnets with ACL policy as Marmot GroupContext components.
 - Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.

@@ -434,7 +434,12 @@ where
                 }
                 match session.read_message(&wire[..n], &mut plain) {
                     Ok(0) if !stdin_open => return Ok(()), // mutual close
-                    Ok(0) => {}                            // peer FIN; keep draining
+                    Ok(0) => {
+                        // Peer FIN: propagate the half-close downstream so
+                        // TCP-backed transports see EOF properly.
+                        stdin_open = false;
+                        let _ = writer.shutdown().await;
+                    }
                     Ok(m) => {
                         writer.write_all(&plain[..m]).await?;
                         writer.flush().await?;
@@ -475,6 +480,63 @@ pub async fn pipe(
     let (socket, peer, hs, _) = session.finish();
     eprintln!("# 🔗 tunnel up with {target} at udp/{peer} — bridging stdio");
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs).await
+}
+
+/// Expose a local TCP service to tailnet peers: each tunnel is spliced to a
+/// fresh connection to `to`. Runs forever, re-advertising between sessions;
+/// with a `psk`, only tailnet members can connect at all.
+pub async fn expose_tcp(
+    identity: &Identity,
+    listen: SocketAddr,
+    to: SocketAddr,
+    relays: &[String],
+    ttl_secs: u64,
+    psk: Option<&[u8; 32]>,
+) -> Result<(), TunnelError> {
+    loop {
+        let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
+        let (socket, peer, hs, who) = session.finish();
+        eprintln!("# 🔗 tunnel up with {who} — forwarding to tcp/{to}");
+        match tokio::net::TcpStream::connect(to).await {
+            Ok(conn) => {
+                let (rd, wr) = tokio::io::split(conn);
+                if let Err(e) = pump(rd, wr, socket, peer, hs).await {
+                    tracing::warn!(%e, "tunnel session ended with error");
+                }
+            }
+            Err(e) => tracing::warn!("cannot reach local service tcp/{to}: {e}"),
+        }
+        eprintln!("# 🔁 session closed — advertising again…");
+    }
+}
+
+/// Forward a local TCP port over tunnels to `target`: every connection to
+/// `127.0.0.1:<port>` dials `target` (a fresh tunnel per connection) and
+/// splices the traffic through, encrypted. With a `psk`, only tailnet
+/// members of the same group can be dialed.
+pub async fn forward_tcp(
+    identity: &Identity,
+    target: &str,
+    port: u16,
+    relays: &[String],
+    psk: Option<&[u8; 32]>,
+) -> Result<(), TunnelError> {
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    eprintln!("# 🐈 forwarding tcp/0.0.0.0:{port} over tunnels to {target}");
+    loop {
+        let (conn, client) = listener.accept().await?;
+        eprintln!("# 🔈 connection from {client} — dialing {target}…");
+        match dial_session(identity, target, relays, psk).await {
+            Ok(session) => {
+                let (socket, peer, hs, _) = session.finish();
+                let (rd, wr) = tokio::io::split(conn);
+                if let Err(e) = pump(rd, wr, socket, peer, hs).await {
+                    tracing::warn!(%e, "tunnel session ended with error");
+                }
+            }
+            Err(e) => eprintln!("# ⚠️  cannot establish tunnel for {client}: {e}"),
+        }
+    }
 }
 
 /// Wire format of a transfer: a JSON header naming the file, then raw chunks.
