@@ -7,3 +7,6 @@
 
 # local demo artifacts
 /.demo-*
+
+# nix build output
+/result*

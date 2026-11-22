@@ -1,6 +1,7 @@
 [package]
 name = "noscat"
 description = "like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
+repository.workspace = true
 version.workspace = true
 edition.workspace = true
 license.workspace = true

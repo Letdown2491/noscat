@@ -203,11 +203,126 @@ jobs:
           name: formula
           path: dist/noscat.rb
           retention-days: 1
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not set; skipping crates.io."
+            exit 0
+          fi
+          VERSION="${{ steps.ver.outputs.version }}"
+          # The workspace version must equal the tag version: crates.io is
+          # immutable, a mismatched publish would be a lie forever. Bump
+          # Cargo.toml as part of tagging.
+          if ! grep -q "^version = \"$VERSION\"" Cargo.toml; then
+            echo "Cargo.toml version != tag version ($VERSION); bump it before tagging."
+            exit 1
+          fi
+          cargo publish --locked -p noscat-core
+          sleep 15 # let crates.io index noscat-core before noscat lands
+          cargo publish --locked -p noscat
+
       - name: Attach everything to the release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Update the Scoop bucket (Windows users): push the manifest with the
+  # release's real zip sha256. Uses the same fine-grained PAT as the tap -
+  # the token's repository access must include scoop-bucket too.
+  update-scoop:
+    name: update scoop bucket
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Push the manifest to Letdown2491/scoop-bucket
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping the bucket update."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/Letdown2491/noscat/releases/download/$GITHUB_REF_NAME/noscat-$GITHUB_REF_NAME-windows-amd64.zip"
+          SHA=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
+          git clone "https://x-access-token:$GH_TOKEN@github.com/Letdown2491/scoop-bucket.git" bucket
+          mkdir -p bucket/bucket
+          cat > bucket/bucket/noscat.json <<EOF
+          {
+              "version": "$VERSION",
+              "description": "Like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts. Identity-addressed encrypted tunnels over UDP with NAT hole punching; Nostr relays are only the discovery channel.",
+              "homepage": "https://github.com/Letdown2491/noscat",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "$URL",
+                      "hash": "$SHA"
+                  }
+              },
+              "bin": "noscat.exe",
+              "checkver": {
+                  "github": "https://github.com/Letdown2491/noscat"
+              }
+          }
+          EOF
+          git -C bucket config user.name "noscat-release-bot"
+          git -C bucket config user.email "noreply@github.com"
+          git -C bucket add bucket/noscat.json
+          if git -C bucket diff --cached --quiet; then
+            echo "manifest unchanged; nothing to push"
+          else
+            git -C bucket commit -m "noscat $VERSION"
+            git -C bucket push origin main
+          fi
+
+  # Rebuild the pacman repository on the gh-pages branch with the release's
+  # prebuilt arch packages: users add one Server line to pacman.conf and get
+  # pacman -S noscat + normal -Syu upgrades (unsigned repo; SigLevel = Never).
+  # The AUR package is separate: packaging/PKGBUILD builds from source when
+  # AUR registration reopens.
+  pacman-repo:
+    name: pacman repo (github pages)
+    needs: release
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install git (repo-add ships with pacman)
+        run: pacman -Sy --noconfirm git
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+      - name: Rebuild the repo database with the release packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p pages/x86_64 pages/aarch64
+          # keep only the current release's packages
+          rm -f pages/x86_64/noscat-*.pkg.tar.zst pages/aarch64/noscat-*.pkg.tar.zst
+          cp dist/*x86_64.pkg.tar.zst pages/x86_64/
+          cp dist/*aarch64.pkg.tar.zst pages/aarch64/
+          (cd pages/x86_64 && repo-add -n -R noscat.db.tar.zst noscat-*.pkg.tar.zst)
+          (cd pages/aarch64 && repo-add -n -R noscat.db.tar.zst noscat-*.pkg.tar.zst)
+      - name: Commit and push
+        run: |
+          git -C pages config user.name "noscat-release-bot"
+          git -C pages config user.email "noreply@github.com"
+          git -C pages add -A
+          if git -C pages diff --cached --quiet; then
+            echo "repo unchanged; nothing to push"
+          else
+            git -C pages commit -m "pacman repo: ${GITHUB_REF_NAME#v}"
+            git -C pages push origin gh-pages
+          fi
 
   # Push the filled formula to the public tap so brew install works the
   # moment a release is out. Needs a classic PAT with repo scope (the

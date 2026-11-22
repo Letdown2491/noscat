@@ -7,9 +7,13 @@ version = "0.1.1"
 edition = "2024"
 license = "MIT"
 authors = ["noscat contributors"]
+repository = "https://github.com/Letdown2491/noscat"
 
 [workspace.dependencies]
-noscat-core = { path = "crates/noscat-core" }
+# The version on this workspace dependency must stay in lockstep with the
+# workspace version: crates.io rejects path-only dependencies, so the
+# published `noscat` crate pins `noscat-core` by this version.
+noscat-core = { path = "crates/noscat-core", version = "0.1.1" }
 nostr = { version = "0.45", features = ["nip44", "nip59"] }
 nostr-sdk = { version = "0.45" }
 snow = "0.10"
