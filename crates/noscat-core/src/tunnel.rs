@@ -19,11 +19,13 @@ use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use nostr::prelude::*;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, timeout_at};
@@ -194,7 +196,10 @@ async fn punch_loop(socket: Arc<UdpSocket>, candidates: Arc<Mutex<Vec<SocketAddr
 /// An established, tailnet-scoped (when a PSK was used) session with a peer,
 /// from either side of the handshake. `finish` aborts the signaling tasks and
 /// hands back the transport parts for whichever pump consumes them.
-struct Session {
+/// An established tunnel: the transport parts for one Noise session over one
+/// UDP flow. Produced by [`serve_session`] or [`dial_session`]; turn it into
+/// a byte stream with [`TunnelStream::single`] (usually via [`Session::finish`]).
+pub struct Session {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     session: snow::TransportState,
@@ -209,7 +214,7 @@ impl Session {
     /// Abort signaling tasks and deconstruct into the transport parts. The
     /// peer name resolves to the advert lookup only if it already finished -
     /// awaiting it here would stall the data path by up to FETCH_WAIT.
-    async fn finish(mut self) -> (Arc<UdpSocket>, SocketAddr, snow::TransportState, String) {
+    pub async fn finish(mut self) -> (Arc<UdpSocket>, SocketAddr, snow::TransportState, String) {
         for task in self.tasks.drain(..) {
             task.abort();
         }
@@ -222,6 +227,12 @@ impl Session {
             None => self.who,
         };
         (self.socket, self.peer, self.session, who)
+    }
+
+    /// The local UDP address the session flows through (the dialed socket's
+    /// ephemeral port on the dial side, the advert port on the serve side).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.socket.local_addr().expect("bound socket")
     }
 }
 
@@ -301,7 +312,11 @@ async fn accept_handshake(
 ///
 /// With a `psk` (the tailnet's epoch secret), the handshake is bound to the
 /// group: only members of the same tailnet can complete it.
-async fn serve_session(
+/// Serve one tunnel on `listen`: bind UDP, publish the advert, watch for the
+/// peer's traversal signals, punch, and await the first handshake opener.
+/// This is the session-level primitive under [`serve`] - callers who want the
+/// established tunnel as bytes rather than a stdio bridge use it directly.
+pub async fn serve_session(
     identity: &Identity,
     listen: SocketAddr,
     relays: &[String],
@@ -315,14 +330,11 @@ async fn serve_session(
 
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
-    eprintln!(
-        "# 🐈 serving as {} on udp/{local} (candidates: {}) - waiting for a peer… (Ctrl-C to quit)",
-        identity.npub(),
-        endpoints
-            .iter()
-            .map(|e| e.addr.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+    tracing::info!(
+        npub = %identity.npub(),
+        %local,
+        endpoints = ?endpoints,
+        "serving; waiting for a peer"
     );
 
     // Traversal signaling: when the peer gift-wraps us its live candidates,
@@ -376,7 +388,11 @@ async fn serve_session(
 /// Dial a peer by npub: gather candidates (advert + gift-wrapped traversal
 /// exchange), punch UDP holes, and complete the handshake. With a `psk` (the
 /// tailnet's epoch secret), only members of the same tailnet can connect.
-async fn dial_session(
+/// Dial a peer by npub: gather candidates (advert + gift-wrapped traversal
+/// exchange), punch UDP holes, and complete the handshake. With a `psk` (the
+/// tailnet's epoch secret), only members of the same tailnet can connect.
+/// Session-level primitive under [`pipe`]; see [`serve_session`].
+pub async fn dial_session(
     identity: &Identity,
     target: &str,
     relays: &[String],
@@ -387,14 +403,7 @@ async fn dial_session(
 
     let socket = bind_udp("0.0.0.0:0".parse().unwrap())?;
     let my_endpoints = discover_endpoints(&socket).await?;
-    eprintln!(
-        "# 🐈 dialing {target} (my candidates: {})…",
-        my_endpoints
-            .iter()
-            .map(|e| e.addr.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    tracing::info!(%target, endpoints = ?my_endpoints, "dialing");
 
     // The advert carries the server's static candidates. Poll the relays
     // within one ADVERT_WAIT budget: a fresh advert (the peer just started
@@ -544,18 +553,27 @@ where
     let mut plain = [0u8; BUF];
     let mut wire = [0u8; BUF];
 
-    let mut stdin_open = true;
+    // Half-close bookkeeping: either direction can end independently, and
+    // the session ends when both have. Sending our FIN on local EOF is
+    // unconditional (netcat semantics), and a peer FIN must not stop us
+    // from ever sending ours - the old single-flag version deadlocked two
+    // pumps that both half-closed before seeing the other's FIN.
+    let mut local_eof = false;
+    let mut peer_fin = false;
     loop {
         tokio::select! {
             // Cap the read at the largest payload a Noise message can carry:
             // a fast local writer can fill the whole buffer, and an oversized
             // write_message would kill the session with a snow Input error.
-            n = reader.read(&mut plain[..MAX_PAYLOAD]), if stdin_open => {
+            n = reader.read(&mut plain[..MAX_PAYLOAD]), if !local_eof => {
                 match n {
                     Ok(0) => {
                         let n = session.write_message(b"", &mut wire)?;
                         socket.send_to(&wire[..n], peer).await?;
-                        stdin_open = false;
+                        local_eof = true;
+                        if peer_fin {
+                            return Ok(()); // mutual close
+                        }
                     }
                     Ok(n) => {
                         let n = session.write_message(&plain[..n], &mut wire)?;
@@ -570,12 +588,14 @@ where
                     Some(n) => n,
                 };
                 match session.read_message(&wire[..n], &mut plain) {
-                    Ok(0) if !stdin_open => return Ok(()), // mutual close
                     Ok(0) => {
                         // Peer FIN: propagate the half-close downstream so
                         // TCP-backed transports see EOF properly.
-                        stdin_open = false;
+                        peer_fin = true;
                         let _ = writer.shutdown().await;
+                        if local_eof {
+                            return Ok(()); // mutual close
+                        }
                     }
                     Ok(m) => {
                         writer.write_all(&plain[..m]).await?;
@@ -588,6 +608,104 @@ where
                 }
             }
         }
+    }
+}
+
+/// Where an established tunnel's ingress datagrams come from: the session's
+/// exclusive UDP socket (dial side, single-session paths) or the per-session
+/// channel a router demuxes into (shared-socket listener paths).
+pub enum TunnelInlet {
+    /// Read ingress off this socket, filtering for this one peer.
+    Exclusive,
+    /// Read ingress (already demuxed to this session) off this channel.
+    Routed(mpsc::Receiver<Vec<u8>>),
+}
+
+/// An established tunnel as a plain byte stream: `AsyncRead` + `AsyncWrite`
+/// over the encrypted UDP flow, with netcat-style half-close semantics (a
+/// local shutdown sends a FIN - an authenticated empty Noise payload; a peer
+/// FIN surfaces as EOF on read).
+///
+/// This is the shape UIs consume: no Noise, no UDP, no frames - just bytes.
+/// Built on the same internal [`pump`] every transport in this crate uses,
+/// so the crypto loop exists exactly once.
+pub struct TunnelStream {
+    inner: tokio::io::DuplexStream,
+    peer: SocketAddr,
+    who: String,
+}
+
+impl TunnelStream {
+    /// Wrap an established session (the parts from [`Session::finish`] or
+    /// [`ListenerSession::finish`]) into a byte stream. The crypto pump runs
+    /// on a background task for the lifetime of the stream.
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        peer: SocketAddr,
+        session: snow::TransportState,
+        inlet: TunnelInlet,
+        who: impl Into<String>,
+    ) -> Self {
+        let (this_side, pump_side) = tokio::io::duplex(BUF);
+        let who = who.into();
+        tokio::spawn(async move {
+            let (rd, wr) = tokio::io::split(pump_side);
+            // Split the inlet out first: a match arm cannot own and borrow
+            // `rx` in one expression, and the borrow must outlive the arm.
+            let mut routed = match inlet {
+                TunnelInlet::Routed(rx) => Some(rx),
+                TunnelInlet::Exclusive => None,
+            };
+            let mut src = match routed.as_mut() {
+                Some(rx) => Datagrams::Channel(rx),
+                None => Datagrams::Socket(socket.clone(), peer),
+            };
+            if let Err(e) = pump(rd, wr, socket, peer, session, &mut src).await {
+                tracing::debug!(%e, "tunnel stream pump ended with error");
+            }
+        });
+        Self { inner: this_side, peer, who }
+    }
+
+    /// The peer's remote UDP address (the punched flow).
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer
+    }
+
+    /// The peer's display name: its npub when the advert lookup finished in
+    /// time, otherwise its Noise static key.
+    pub fn who(&self) -> &str {
+        &self.who
+    }
+}
+
+impl AsyncRead for TunnelStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TunnelStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        // Drives the pump's local-FIN path: the pump sees EOF on its read
+        // half and sends the authenticated empty payload.
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -668,7 +786,7 @@ pub async fn expose_tcp(
 /// WireGuard uses too - per-session sockets on a shared port cannot work,
 /// because the kernel's flow hash would pin a dialer's datagrams to one
 /// arbitrary session socket forever.
-struct TunnelListener {
+pub struct TunnelListener {
     socket: Arc<UdpSocket>,
     noise_priv: [u8; 32],
     psk: Option<[u8; 32]>,
@@ -680,9 +798,17 @@ struct TunnelListener {
     handshakes: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
 }
 
+impl TunnelListener {
+    /// The advertised UDP address the shared socket is bound on.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.socket.local_addr().expect("bound socket")
+    }
+}
+
 /// Bind the shared listen socket, publish one advert, and start the router,
-/// the shared traversal watcher, and the punch loop.
-async fn bind_listener(
+/// the shared traversal watcher, and the punch loop. Session-level primitive
+/// under [`expose_tcp`]; pair with [`TunnelListener::accept`].
+pub async fn bind_listener(
     identity: &Identity,
     listen: SocketAddr,
     relays: &[String],
@@ -695,14 +821,11 @@ async fn bind_listener(
 
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
-    eprintln!(
-        "# 🐈 serving as {} on udp/{local} (candidates: {}) - concurrent sessions welcome (Ctrl-C to quit)",
-        identity.npub(),
-        endpoints
-            .iter()
-            .map(|e| e.addr.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+    tracing::info!(
+        npub = %identity.npub(),
+        %local,
+        endpoints = ?endpoints,
+        "serving; concurrent sessions welcome"
     );
 
     let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
@@ -849,7 +972,7 @@ fn route_datagram(
 /// One accepted tunnel: the shared socket for egress, a dedicated channel
 /// for ingress, and its own Noise transport. The channel is dropped when the
 /// session's pump ends; the listener's session map entry goes with it.
-struct ListenerSession {
+pub struct ListenerSession {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     session: snow::TransportState,
@@ -863,7 +986,7 @@ struct ListenerSession {
 impl ListenerSession {
     /// Abort the display-name lookup and deconstruct into the transport
     /// parts for the pump.
-    async fn finish(
+    pub async fn finish(
         mut self,
     ) -> (
         Arc<UdpSocket>,
@@ -889,7 +1012,7 @@ impl TunnelListener {
     /// the accept queue, answer msg2, and wait for msg3 - all routed through
     /// the shared socket's demux. Returns with the session registered in the
     /// router's map, so its pump starts receiving flows immediately.
-    async fn accept(&mut self) -> Result<ListenerSession, TunnelError> {
+    pub async fn accept(&mut self) -> Result<ListenerSession, TunnelError> {
         let mut plain = [0u8; BUF];
         let mut wire = [0u8; BUF];
         loop {

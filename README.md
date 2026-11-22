@@ -19,16 +19,27 @@ The wire protocol is specified in the draft NIP: [`docs/nip-noscat.md`](docs/nip
 
 ## Install
 
-Quick install (Linux and macOS, into `~/.local/bin`):
+noscat is a single static binary with no dependencies, packaged for every
+major platform: Linux (x86_64 and aarch64 - deb, rpm, apk, and a live pacman
+repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
+bottles), and Windows (Scoop and winget, winget in community review). Nix
+and cargo cover everything else, including the BSDs from source.
+
+**All installation options: [`INSTALL.md`](INSTALL.md)**
+
+The two most people want:
+
+Linux and macOS, into `~/.local/bin`:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh
 ```
 
-Homebrew: `brew install Letdown2491/tap/noscat` - and there is more (pacman
-repo, Scoop, winget, Nix, cargo, deb/rpm/apk, the BSD story):
+or Homebrew, on macOS and Linux:
 
-**Full installation options: [`INSTALL.md`](INSTALL.md)**
+```
+brew install Letdown2491/tap/noscat
+```
 
 Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell>`)
 and a man page.
@@ -60,9 +71,15 @@ and a man page.
   - `stun` - hand-rolled RFC 5389 Binding requests (no extra dependency).
   - `traversal` - gift-wrapped candidate exchange and tailnet message watching.
   - `tailnet` - MLS group management; `export_secret` derives the epoch tunnel PSK.
-  - `tunnel` - the data plane: one UDP datagram = one Noise message; stdio bridging
-    with netcat-style half-close semantics; reliable file transfer on top.
-- `crates/noscat` - the CLI.
+  - `tunnel` - the data plane: one UDP datagram = one Noise message; session
+    primitives (`dial_session`/`serve_session`/`bind_listener`) plus
+    `TunnelStream` (the tunnel as a plain byte stream) for API consumers;
+    stdio bridging with netcat-style half-close semantics; reliable file
+    transfer on top.
+- `crates/noscat-client` - the UI-facing layer: an owned runtime, config, and
+  an event stream (`connect`/`listen` primitives, stdio/TCP/file composites).
+  This is what graphical clients embed.
+- `crates/noscat` - the CLI: a terminal skin over `noscat-client`.
 
 ### Try it
 

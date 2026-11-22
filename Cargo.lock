@@ -1603,11 +1603,22 @@ dependencies = [
  "clap",
  "clap_complete",
  "hex",
+ "noscat-client",
  "noscat-core",
  "nostr",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "noscat-client"
+version = "0.1.2"
+dependencies = [
+ "noscat-core",
+ "snow",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

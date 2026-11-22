@@ -1,0 +1,19 @@
+[package]
+name = "noscat-client"
+description = "Client layer for noscat: event-driven tunnel sessions on top of noscat-core, for UIs"
+repository.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noscat-core = { path = "../noscat-core", version = "0.1.2" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+snow = { workspace = true }
+
+[lints]
+workspace = true

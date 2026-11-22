@@ -4,8 +4,11 @@
 //! - `identity` - one secp256k1 keypair is the Nostr identity, the mesh identity,
 //!   and the Noise static key (the FIPS pattern).
 //! - `advert` - signed, expiring endpoint advertisements on Nostr (FIPS kind-37195 pattern).
-//! - later: data plane (Noise XK over UDP), traversal signaling (kind-21059 pattern),
-//!   tailnet control plane (MLS group per tailnet, Marmot component model).
+//! - `tunnel` - the data plane (Noise XK over UDP): session primitives
+//!   (`dial_session`/`serve_session`/`bind_listener`) for API consumers, plus
+//!   [`TunnelStream`] for the tunnel as a plain byte stream, and the
+//!   netcat/file-transfer operations on top.
+//! - `tailnet` - MLS group control plane per tailnet (Marmot component model).
 
 pub mod advert;
 pub mod identity;

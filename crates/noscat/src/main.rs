@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use noscat_client::{Client, ClientConfig, Event, IdentitySource};
 
 #[derive(Parser)]
 #[command(
@@ -263,6 +264,66 @@ fn main() -> anyhow::Result<()> {
         Ok(psk)
     }
 
+    // Build the shared client for the data-plane commands: identity, relays,
+    // tailnet scope, and listen address are resolved once, up front.
+    fn make_client(
+        identity: IdentitySource,
+        relays: Vec<String>,
+        tailnet: Option<std::path::PathBuf>,
+        listen: Option<std::net::SocketAddr>,
+        ttl: u64,
+    ) -> anyhow::Result<(Client, std::sync::mpsc::Receiver<Event>)> {
+        if let Some(dir) = &tailnet {
+            tailnet_psk(dir)?;
+        }
+        let mut client = Client::start(ClientConfig {
+            identity,
+            relays: Some(relays_or_default(relays)),
+            listen,
+            tailnet_dir: tailnet,
+            advert_ttl_secs: ttl,
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let rx = client.events().expect("fresh client");
+        Ok((client, rx))
+    }
+
+    // Narrate one client event on stderr - the same shape the core's
+    // run-to-completion operations used to print.
+    fn print_event(ev: Event) {
+        match ev {
+            Event::Listening { npub, addr } => {
+                eprintln!("# 🐈 serving as {npub} on udp/{addr} - waiting for a peer… (Ctrl-C to quit)")
+            }
+            Event::TunnelUp { peer, addr } => {
+                eprintln!("# 🔗 tunnel up with {peer} (udp/{addr})")
+            }
+            Event::TunnelClosed { peer, error } => match error {
+                Some(e) => eprintln!("# ⚠️  session with {peer} failed: {e}"),
+                None => eprintln!("# 🔁 session with {peer} closed"),
+            },
+            Event::Stopped { what, error } => match error {
+                Some(e) => eprintln!("# ⚠️  {what} stopped: {e}"),
+                None => eprintln!("# {what} stopped"),
+            },
+            Event::Incoming { .. } => {}
+            Event::TransferDone { .. } => {}
+            Event::TransferFailed { error, .. } => {
+                eprintln!("# ⚠️  transfer failed: {error}")
+            }
+        }
+    }
+
+    // Print events in the background while the main thread runs a blocking
+    // session (serve/pipe bridge stdio and cannot drain themselves).
+    fn spawn_printer(rx: std::sync::mpsc::Receiver<Event>) {
+        std::thread::spawn(move || {
+            for ev in rx {
+                print_event(ev);
+            }
+        });
+    }
+
     match cli.command {
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "noscat", &mut std::io::stdout());
@@ -321,30 +382,16 @@ fn main() -> anyhow::Result<()> {
             identity,
             tailnet,
         } => {
-            let id = match &identity {
-                Some(path) => {
-                    let secret = std::fs::read_to_string(path)
-                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-                    let secret = secret.trim();
-                    noscat_core::Identity::from_secret(secret).map_err(|e| {
-                        anyhow::anyhow!("bad identity in {}: {e}", path.display())
-                    })?
-                }
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(path) => IdentitySource::File(path),
+                None => IdentitySource::Ephemeral,
             };
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let rt = tokio::runtime::Runtime::new()?;
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            let who = rt.block_on(noscat_core::tunnel::serve(
-                &id,
-                listen,
-                &relays_or_default(relays),
-                ttl,
-                psk.as_ref(),
-            ))?;
-            eprintln!("# session with {who} closed");
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            spawn_printer(rx);
+            client.serve_stdio()?;
         }
         Command::Pipe {
             target,
@@ -352,73 +399,58 @@ fn main() -> anyhow::Result<()> {
             identity,
             tailnet,
         } => {
-            let id = match &identity {
-                Some(secret) => noscat_core::Identity::from_secret(secret)
-                    .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(secret) => IdentitySource::Secret(secret),
+                None => IdentitySource::Ephemeral,
             };
-            let rt = tokio::runtime::Runtime::new()?;
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            rt.block_on(noscat_core::tunnel::pipe(
-                &id,
-                &target,
-                &relays_or_default(relays),
-                psk.as_ref(),
-            ))?;
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            spawn_printer(rx);
+            client.pipe_stdio(&target)?;
         }
         Command::Send { path, target, relays, identity, tailnet } => {
-            let id = match &identity {
-                Some(secret) => noscat_core::Identity::from_secret(secret)
-                    .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(secret) => IdentitySource::Secret(secret),
+                None => IdentitySource::Ephemeral,
             };
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(noscat_core::tunnel::send_file(
-                &id,
-                &target,
-                &path,
-                &relays_or_default(relays),
-                psk.as_ref(),
-            ))?;
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            client.send_file(path, &target);
+            // wait for the transfer's terminal event
+            for ev in rx {
+                match &ev {
+                    Event::TransferDone { .. } => break,
+                    Event::TransferFailed { error, .. } => {
+                        anyhow::bail!("transfer failed: {error}")
+                    }
+                    _ => {}
+                }
+                print_event(ev);
+            }
         }
         Command::Receive { out, listen, relays, identity, tailnet, ttl } => {
-            let id = match &identity {
-                Some(path) => {
-                    let secret = std::fs::read_to_string(path)
-                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-                    noscat_core::Identity::from_secret(secret.trim()).map_err(|e| {
-                        anyhow::anyhow!("bad identity in {}: {e}", path.display())
-                    })?
-                }
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(path) => IdentitySource::File(path),
+                None => IdentitySource::Ephemeral,
             };
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            let rt = tokio::runtime::Runtime::new()?;
-            let (who, path) = rt.block_on(noscat_core::tunnel::receive_file(
-                &id,
-                listen,
-                &relays_or_default(relays),
-                ttl,
-                &out,
-                psk.as_ref(),
-            ))?;
-            eprintln!("# session with {who} closed");
-            println!("{}", path.display());
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            client.receive_file(out);
+            for ev in rx {
+                match &ev {
+                    Event::TransferDone { .. } => break,
+                    Event::TransferFailed { error, .. } => {
+                        anyhow::bail!("transfer failed: {error}")
+                    }
+                    _ => {}
+                }
+                print_event(ev);
+            }
         }
         Command::Expose { to, listen, relays, identity, tailnet, ttl } => {
-            let id = match &identity {
-                Some(path) => {
-                    let secret = std::fs::read_to_string(path)
-                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-                    noscat_core::Identity::from_secret(secret.trim()).map_err(|e| {
-                        anyhow::anyhow!("bad identity in {}: {e}", path.display())
-                    })?
-                }
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(path) => IdentitySource::File(path),
+                None => IdentitySource::Ephemeral,
             };
             let listen: std::net::SocketAddr = listen
                 .parse()
@@ -426,32 +458,33 @@ fn main() -> anyhow::Result<()> {
             let to: std::net::SocketAddr = to
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --to address: {e}"))?;
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(noscat_core::tunnel::expose_tcp(
-                &id,
-                listen,
-                to,
-                &relays_or_default(relays),
-                ttl,
-                psk.as_ref(),
-            ))?;
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            client.expose(to)?;
+            eprintln!("# 🔗 exposing tcp/{to} over tunnels");
+            for ev in rx {
+                match &ev {
+                    Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
+                    _ => {}
+                }
+                print_event(ev);
+            }
         }
         Command::Forward { target, port, bind, relays, identity, tailnet } => {
-            let id = match &identity {
-                Some(secret) => noscat_core::Identity::from_secret(secret)
-                    .map_err(|e| anyhow::anyhow!("bad --identity: {e}"))?,
-                None => noscat_core::Identity::generate(),
+            let identity = match identity {
+                Some(secret) => IdentitySource::Secret(secret),
+                None => IdentitySource::Ephemeral,
             };
-            let psk = tailnet.as_ref().map(|d| tailnet_psk(d.as_path())).transpose()?;
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(noscat_core::tunnel::forward_tcp(
-                &id,
-                &target,
-                std::net::SocketAddr::new(bind, port),
-                &relays_or_default(relays),
-                psk.as_ref(),
-            ))?;
+            let local = std::net::SocketAddr::new(bind, port);
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            client.forward(&target, local)?;
+            eprintln!("# 🐈 forwarding tcp/{local} over tunnels to {target}");
+            for ev in rx {
+                match &ev {
+                    Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
+                    _ => {}
+                }
+                print_event(ev);
+            }
         }
         Command::Tailnet(cmd) => {
             let rt = tokio::runtime::Runtime::new()?;

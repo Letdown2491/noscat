@@ -221,7 +221,9 @@ jobs:
             exit 1
           fi
           cargo publish --locked -p noscat-core
-          sleep 15 # let crates.io index noscat-core before noscat lands
+          sleep 15 # let crates.io index noscat-core before dependents land
+          cargo publish --locked -p noscat-client
+          sleep 15 # let crates.io index noscat-client before noscat lands
           cargo publish --locked -p noscat
 
       - name: Attach everything to the release
