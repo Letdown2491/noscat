@@ -1,18 +1,18 @@
 # Maintainer: Letdown2491 <https://github.com/Letdown2491>
 # AUR source package: builds noscat from the release tag with cargo.
-# Submit as `noscat` (or copy as `noscat-bin` pointing at the release
-# tarball). Bump pkgrel on PKGBUILD-only changes, pkgver on new tags.
+# Published to ssh://aur@aur.archlinux.org/noscat.git; bump pkgrel on
+# PKGBUILD-only changes, pkgver on new tags (regenerate .SRCINFO).
 pkgname=noscat
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
-arch=(x86_64)
+arch=(x86_64 aarch64)
 url="https://github.com/Letdown2491/noscat"
 license=(MIT)
 depends=(glibc)
 makedepends=(cargo)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-b2sums=(SKIP) # replace with the tag's b2sum from the release page
+b2sums=('bf8e7fe856b339925d94007bedba701a54a21e4c727a7edb4b6fcb9fd2634f1a69d95150a289813a4462541fcfdd84b2302b7bfd9ff0300f7ad59aeeb1914aa1')
 
 build() {
     cd "$pkgname-$pkgver"
