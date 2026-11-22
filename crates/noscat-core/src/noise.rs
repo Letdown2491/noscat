@@ -47,7 +47,7 @@ pub fn noise_static_from_identity(secret: &[u8; 32]) -> Result<[u8; 32], NoiseEr
 
 /// Derive the curve25519 public half of a Noise static private key.
 /// Same primitive (and crate version) snow uses for its "25519" DH, with the
-/// same RFC 7748 clamping snow applies — private key and published public key
+/// same RFC 7748 clamping snow applies - private key and published public key
 /// must agree byte-for-byte or the XK transcript diverges.
 pub fn noise_public(privkey: &[u8; 32]) -> [u8; 32] {
     use curve25519_dalek::montgomery::MontgomeryPoint;

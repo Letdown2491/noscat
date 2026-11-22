@@ -4,3 +4,6 @@
 
 # local working notes
 /research/
+
+# local demo artifacts
+/.demo-*

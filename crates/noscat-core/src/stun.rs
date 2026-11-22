@@ -1,5 +1,5 @@
 //! Minimal STUN client (RFC 5389 Binding request only) for server-reflexive
-//! discovery — just enough to learn "what does the internet see as my
+//! discovery - just enough to learn "what does the internet see as my
 //! address on this socket", which is what NAT hole punching needs.
 //!
 //! Runs on the tunnel's own UDP socket so the discovered mapping is the one a

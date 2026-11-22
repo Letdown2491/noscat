@@ -136,7 +136,7 @@ enum Command {
         /// Local TCP port to listen on.
         #[arg(long)]
         port: u16,
-        /// Local address for the listener. Loopback by default — anyone who
+        /// Local address for the listener. Loopback by default - anyone who
         /// can reach the port can make this process dial the target.
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,

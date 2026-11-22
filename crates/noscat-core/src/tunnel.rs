@@ -8,7 +8,7 @@
 //! and pipes its stdio into the tunnel. One datagram = one Noise message.
 //!
 //! File transfer (`send_file`/`receive_file`) rides the same tunnels: a tiny
-//! tagged protocol — JSON header, ACK'd MTU-sized chunks, FIN — so a clean
+//! tagged protocol - JSON header, ACK'd MTU-sized chunks, FIN - so a clean
 //! return means the whole file was received, flushed, and sha256-verified.
 //! The ACK layer exists because blasting back-to-back datagrams overflows
 //! kernel socket buffers; without it the tail of every large transfer would
@@ -50,7 +50,7 @@ const MAX_PAYLOAD: usize = 65_507 - 16;
 /// Between-advert poll cadence in `dial_session`'s budget loop.
 const ADVERT_RETRY: Duration = Duration::from_secs(5);
 /// File-transfer chunk: MTU-sized so a frame never fragments into multiple
-/// IP packets — one datagram, one loss unit. Throughput comes from the
+/// IP packets - one datagram, one loss unit. Throughput comes from the
 /// sliding window (many small in-flight frames), not from huge datagrams.
 const CHUNK: usize = 1200;
 /// Punch marker: junk to the peer, ignorable noise to us.
@@ -86,7 +86,7 @@ pub enum TunnelError {
     TransferTooLarge(u64),
 }
 
-/// The identity's Noise keypair (public, private), derived from its secret —
+/// The identity's Noise keypair (public, private), derived from its secret -
 /// see [`crate::noise`] for why this is a derivation, not the raw key.
 pub fn noise_keypair(identity: &Identity) -> Result<([u8; 32], [u8; 32]), TunnelError> {
     let secret: [u8; 32] = identity
@@ -108,7 +108,7 @@ pub fn noise_keypair(identity: &Identity) -> Result<([u8; 32], [u8; 32]), Tunnel
 fn tune_buffers(sock: &std::net::UdpSocket) {
     use std::os::fd::AsRawFd;
 
-    // Best effort: if the sysctl caps these, we still work — just burstier.
+    // Best effort: if the sysctl caps these, we still work - just burstier.
     let buf: libc::c_int = 4 * 1024 * 1024;
     unsafe {
         for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
@@ -136,7 +136,7 @@ fn bind_udp(addr: SocketAddr) -> Result<Arc<UdpSocket>, TunnelError> {
 }
 
 /// Candidate endpoints for a socket: the concrete LAN/interface address plus
-/// the STUN server-reflexive mapping, deduplicated (LAN first — it is usually
+/// the STUN server-reflexive mapping, deduplicated (LAN first - it is usually
 /// the better path when both peers share a network).
 async fn discover_endpoints(socket: &UdpSocket) -> Result<Vec<Endpoint>, TunnelError> {
     let local = socket.local_addr()?;
@@ -199,7 +199,7 @@ struct Session {
     peer: SocketAddr,
     session: snow::TransportState,
     who: String,
-    /// Background lookup of the peer's npub (relay round-trip). Display only —
+    /// Background lookup of the peer's npub (relay round-trip). Display only -
     /// the data path must never wait on it.
     who_lookup: Option<tokio::task::JoinHandle<String>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -207,7 +207,7 @@ struct Session {
 
 impl Session {
     /// Abort signaling tasks and deconstruct into the transport parts. The
-    /// peer name resolves to the advert lookup only if it already finished —
+    /// peer name resolves to the advert lookup only if it already finished -
     /// awaiting it here would stall the data path by up to FETCH_WAIT.
     async fn finish(mut self) -> (Arc<UdpSocket>, SocketAddr, snow::TransportState, String) {
         for task in self.tasks.drain(..) {
@@ -248,7 +248,7 @@ async fn accept_handshake(
     socket.send_to(&wire[..n], peer).await?;
 
     // -> s, se. A punch marker can land in this slot (the initiator's punch
-    // loop is still running) — snow restores its state on failed reads, so
+    // loop is still running) - snow restores its state on failed reads, so
     // junk is skipped until the real msg3 arrives.
     let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     loop {
@@ -316,7 +316,7 @@ async fn serve_session(
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
     eprintln!(
-        "# 🐈 serving as {} on udp/{local} (candidates: {}) — waiting for a peer… (Ctrl-C to quit)",
+        "# 🐈 serving as {} on udp/{local} (candidates: {}) - waiting for a peer… (Ctrl-C to quit)",
         identity.npub(),
         endpoints
             .iter()
@@ -399,7 +399,7 @@ async fn dial_session(
     // The advert carries the server's static candidates. Poll the relays
     // within one ADVERT_WAIT budget: a fresh advert (the peer just started
     // serving) can take a few seconds to propagate, but a missing one fails
-    // fast instead of burning minutes — each poll costs a relay subscribe
+    // fast instead of burning minutes - each poll costs a relay subscribe
     // wait, so the worst case is two misses before the budget trips.
     let advert = {
         let deadline = tokio::time::Instant::now() + ADVERT_WAIT;
@@ -601,7 +601,7 @@ pub async fn serve(
 ) -> Result<String, TunnelError> {
     let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
     let (socket, peer, hs, who) = session.finish().await;
-    eprintln!("# 🔗 tunnel up with {who} — bridging stdio");
+    eprintln!("# 🔗 tunnel up with {who} - bridging stdio");
     let mut src = Datagrams::Socket(socket.clone(), peer);
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await?;
     Ok(who)
@@ -616,7 +616,7 @@ pub async fn pipe(
 ) -> Result<(), TunnelError> {
     let session = dial_session(identity, target, relays, psk).await?;
     let (socket, peer, hs, _) = session.finish().await;
-    eprintln!("# 🔗 tunnel up with {target} at udp/{peer} — bridging stdio");
+    eprintln!("# 🔗 tunnel up with {target} at udp/{peer} - bridging stdio");
     let mut src = Datagrams::Socket(socket.clone(), peer);
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await
 }
@@ -641,7 +641,7 @@ pub async fn expose_tcp(
     loop {
         let session = listener.accept().await?;
         let (socket, peer, hs, who, mut datagrams) = session.finish().await;
-        eprintln!("# 🔗 tunnel up with {who} — forwarding to tcp/{to}");
+        eprintln!("# 🔗 tunnel up with {who} - forwarding to tcp/{to}");
         let sessions = listener.sessions.clone();
         tokio::spawn(async move {
             let mut src = Datagrams::Channel(&mut datagrams);
@@ -665,7 +665,7 @@ pub async fn expose_tcp(
 /// side and demuxes every datagram by source address. Established sessions
 /// get their flows on dedicated channels; an unknown source (a new dialer's
 /// Noise msg1) surfaces from [`TunnelListener::accept`]. This is the shape
-/// WireGuard uses too — per-session sockets on a shared port cannot work,
+/// WireGuard uses too - per-session sockets on a shared port cannot work,
 /// because the kernel's flow hash would pin a dialer's datagrams to one
 /// arbitrary session socket forever.
 struct TunnelListener {
@@ -696,7 +696,7 @@ async fn bind_listener(
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
     eprintln!(
-        "# 🐈 serving as {} on udp/{local} (candidates: {}) — concurrent sessions welcome (Ctrl-C to quit)",
+        "# 🐈 serving as {} on udp/{local} (candidates: {}) - concurrent sessions welcome (Ctrl-C to quit)",
         identity.npub(),
         endpoints
             .iter()
@@ -712,7 +712,7 @@ async fn bind_listener(
     let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
 
     // Router: demux every datagram by source address. Punch markers and
-    // other sub-frame junk are dropped here — they carry no state.
+    // other sub-frame junk are dropped here - they carry no state.
     let r_socket = socket.clone();
     let r_sessions = sessions.clone();
     let r_handshakes = handshakes.clone();
@@ -812,12 +812,12 @@ async fn bind_listener(
 }
 
 /// Send one datagram to its session (by source address), to the handshake
-/// currently being accepted from that source, or — an unknown source — to
+/// currently being accepted from that source, or - an unknown source - to
 /// the accept queue as a candidate handshake opener.
 ///
 /// All three queues are bounded: datagrams are only ever dropped when a
 /// consumer stalls. A handshake replay recovers itself (the dialer re-sends
-/// msg1 every round); a session whose queue overflows is torn down — its
+/// msg1 every round); a session whose queue overflows is torn down - its
 /// pump has no retransmit layer, so silent drops would corrupt the bridged
 /// stream, and an unbounded queue would let one stalled peer balloon memory.
 fn route_datagram(
@@ -856,7 +856,7 @@ struct ListenerSession {
     who: String,
     data_rx: mpsc::Receiver<Vec<u8>>,
     /// Background lookup of the dialer's npub (relay round-trip). Display
-    /// only — the data path must never wait on it.
+    /// only - the data path must never wait on it.
     who_lookup: Option<tokio::task::JoinHandle<String>>,
 }
 
@@ -886,7 +886,7 @@ impl ListenerSession {
 
 impl TunnelListener {
     /// Serve the next dialer that completes the handshake: take its msg1 off
-    /// the accept queue, answer msg2, and wait for msg3 — all routed through
+    /// the accept queue, answer msg2, and wait for msg3 - all routed through
     /// the shared socket's demux. Returns with the session registered in the
     /// router's map, so its pump starts receiving flows immediately.
     async fn accept(&mut self) -> Result<ListenerSession, TunnelError> {
@@ -973,7 +973,7 @@ impl TunnelListener {
 /// splices the traffic through, encrypted. With a `psk`, only tailnet
 /// members of the same group can be dialed.
 ///
-/// The listener binds `bind` — loopback unless the caller says otherwise:
+/// The listener binds `bind` - loopback unless the caller says otherwise:
 /// anyone who can reach the port can make this process dial `target`, so
 /// exposing it beyond the local machine should be a deliberate choice.
 pub async fn forward_tcp(
@@ -988,7 +988,7 @@ pub async fn forward_tcp(
     let psk = psk.copied();
     loop {
         let (conn, client) = listener.accept().await?;
-        eprintln!("# 🔈 connection from {client} — dialing {target}…");
+        eprintln!("# 🔈 connection from {client} - dialing {target}…");
         // Each connection gets its own tunnel on its own task; the accept
         // loop is free for the next one.
         let identity = identity.clone();
@@ -1045,20 +1045,20 @@ const MIN_FRAME: usize = 5 + 16;
 const ACK_TIMEOUT: Duration = Duration::from_secs(1);
 /// Sliding window: chunks in flight before an ack is required. Kept small
 /// on purpose: the receiver can only ack in order, so under loss the sender
-/// replays the *whole* window each sweep — the burst must fit in the peer's
+/// replays the *whole* window each sweep - the burst must fit in the peer's
 /// socket queue or the same frames keep dropping every round (32 × 1232 B
 /// ≈ 39 KiB; comfortably inside even default kernel buffers).
 const WINDOW: u32 = 32;
 /// Ack history depth. The sender must consume every ack the receiver writes
 /// *in order* (snow nonces), so a lost ack makes every later one undecryptable
 /// until a replay reaches the missed nonce. The receiver only acks at window
-/// boundaries (see `receive_chunks`), so the total ack count — and therefore
-/// the worst-case nonce gap — stays far below this for any realistic file.
+/// boundaries (see `receive_chunks`), so the total ack count - and therefore
+/// the worst-case nonce gap - stays far below this for any realistic file.
 const ACK_HISTORY: usize = 4 * WINDOW as usize;
 /// Retransmit an unacked chunk after this long without progress.
 const RTO: Duration = Duration::from_millis(400);
 /// After the file is on disk, the receiver answers the sender's replays with
-/// its FIN until the sender goes quiet for this long — enough for the
+/// its FIN until the sender goes quiet for this long - enough for the
 /// sender's retransmit loop (1 s cadence) to hear the confirmation, with
 /// headroom for a short path flap.
 const FIN_LINGER: Duration = Duration::from_secs(10);
@@ -1072,7 +1072,7 @@ const HEADER_RETRIES: u32 = 10;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Per-session datagram queue depth in the listener's router. Pump sessions
 /// have no retransmit layer, so a full queue tears the session down instead
-/// of dropping frames (silent loss would corrupt the bridged stream) — a
+/// of dropping frames (silent loss would corrupt the bridged stream) - a
 /// bounded queue keeps one stalled or hostile peer from buffering the
 /// internet in memory. 64 × max frame ≈ 4 MiB worst case.
 const SESSION_QUEUE: usize = 64;
@@ -1089,14 +1089,14 @@ const MAX_CANDIDATE_PEERS: usize = 256;
 ///
 /// Retransmission replays the *same ciphertext*: snow nonces are sequential
 /// and never on the wire, so a re-encrypted retry would carry a fresh nonce
-/// the peer cannot decrypt after missing the original. Replay is safe — the
+/// the peer cannot decrypt after missing the original. Replay is safe - the
 /// peer either consumes it (it never got it) or fails Decrypt and skips it
 /// (it already did).
 ///
 /// `want_seq` completes the wait on a cumulative ack reaching that many
-/// chunks (the FIN handshake — the receiver must have *everything*), or on a
+/// chunks (the FIN handshake - the receiver must have *everything*), or on a
 /// TAG_FIN from the peer. `None` completes on any authenticated reply (the
-/// header wait — any ack proves the receiver is listening).
+/// header wait - any ack proves the receiver is listening).
 ///
 /// Returns the value carried by the completing frame: the ack's cumulative
 /// seq (or the header reply's resume point), or `u32::MAX` when a peer FIN
@@ -1150,7 +1150,7 @@ async fn send_and_ack(
 }
 
 /// Emit one encrypted chunk frame (tag + seq + data) and hand back the
-/// ciphertext — retransmissions must replay these exact bytes, because a
+/// ciphertext - retransmissions must replay these exact bytes, because a
 /// re-encrypted retry would carry a new snow nonce the receiver can't decrypt.
 async fn emit_chunk(
     socket: &UdpSocket,
@@ -1203,9 +1203,9 @@ fn fold_ack(
 /// up to [`WINDOW`] frames in flight, each retransmitted on [`RTO`] until the
 /// receiver's cumulative ack ("next expected seq") covers it. Because snow
 /// nonces are strictly sequential, retransmission *replays* cached
-/// ciphertexts — a replay burst lets the receiver catch up across every gap
+/// ciphertexts - a replay burst lets the receiver catch up across every gap
 /// at once, and lost acks resync the same way (the receiver replays its ack
-/// history; see `ack_and_replay`). Acks are drained in batches — the
+/// history; see `ack_and_replay`). Acks are drained in batches - the
 /// receiver's replays make them arrive many-at-once.
 async fn stream_chunks(
     socket: &UdpSocket,
@@ -1250,7 +1250,7 @@ async fn stream_chunks(
             frames.push_back((ct, Instant::now(), 0));
             next += 1;
         }
-        // Replay anything whose ack is late — starting the sweep at a
+        // Replay anything whose ack is late - starting the sweep at a
         // rotating offset each round: a burst whose tail always lands past
         // the peer's receive queue would otherwise drop the *same* frames
         // every round and never recover them.
@@ -1304,8 +1304,8 @@ async fn stream_chunks(
     }
 }
 
-/// Send one control frame — a cumulative ack (`TAG_ACK`, "I expect `seq`
-/// next") or a header reply (`TAG_RESUME`, the receiver's resume point) —
+/// Send one control frame - a cumulative ack (`TAG_ACK`, "I expect `seq`
+/// next") or a header reply (`TAG_RESUME`, the receiver's resume point) -
 /// and, on `full`, replay the whole recent ack history. The replay is the
 /// resync mechanism: the sender's nonce stream only advances when it hears
 /// *an* ack it can decrypt, so if acks were lost, the replays (old nonces
@@ -1343,15 +1343,15 @@ async fn ack_and_replay(
 
 /// The receive side of [`stream_chunks`]: write chunks in order and ack
 /// cumulatively with history replay. Snow only decrypts frames in nonce
-/// order, and the sender emits seqs in nonce order — so every frame that
+/// order, and the sender emits seqs in nonce order - so every frame that
 /// decrypts IS the next one (frames behind a gap are undecryptable and
 /// skipped; the sender's replay bursts refill the gap). Returns bytes on
 /// disk (including `already`, the prefix a resumed partial had); stops once
 /// `len` have been, or the sender FINs.
 ///
 /// `hasher` folds every written byte into the file's sha256 as it lands.
-/// When `meta` is given, each window-boundary ack — after a flush, so the
-/// acked prefix is in the OS — refreshes the resume sidecar with the acked
+/// When `meta` is given, each window-boundary ack - after a flush, so the
+/// acked prefix is in the OS - refreshes the resume sidecar with the acked
 /// chunk count: a crash right after leaves a part file + meta consistent
 /// with every ack the sender heard.
 async fn receive_chunks<W>(
@@ -1388,7 +1388,7 @@ where
                 // (or header) replay: the sender is retransmitting *because
                 // it missed our acks*. Its nonces can never move backward, so
                 // the only way it advances is hearing our already-written ack
-                // history — replay it all, right now. Smaller junk is punch
+                // history - replay it all, right now. Smaller junk is punch
                 // markers; ignore those.
                 if n >= MIN_FRAME {
                     for ct in history.iter() {
@@ -1412,7 +1412,7 @@ where
                 // must consume *in order*, so a burst of per-chunk acks would
                 // let the ack stream outrun the sender's consumption under
                 // timing skew and the nonce gap would outgrow the replay
-                // history — one ack per window keeps the gap trivially small.
+                // history - one ack per window keeps the gap trivially small.
                 if (seq + 1) % WINDOW == 0 || (len > 0 && received >= len) {
                     file.flush().await?;
                     if let Some((meta_path, meta)) = meta.as_mut() {
@@ -1487,7 +1487,7 @@ pub async fn send_file(
         Err(e) => return Err(TunnelError::Io(std::io::Error::other(e))),
     };
     eprintln!(
-        "# 🔗 tunnel up with {target} at udp/{peer} — sending {}",
+        "# 🔗 tunnel up with {target} at udp/{peer} - sending {}",
         name.display()
     );
 
@@ -1511,7 +1511,7 @@ async fn send_stream(
 
     // -> header; a modest retry budget: without an ack we cannot know the
     // receiver's resume point, and guessing "start from zero" would corrupt
-    // a resumed transfer (duplicated bytes, then a sha mismatch) — so a dead
+    // a resumed transfer (duplicated bytes, then a sha mismatch) - so a dead
     // path here aborts the attempt instead. Retrying is cheap: the receiver
     // keeps its partial, and the next attempt resumes from it. The reply
     // carries the receiver's resume point (chunks already on disk from an
@@ -1545,7 +1545,7 @@ async fn send_stream(
     }
 
     // -> FIN; completes when the receiver's cumulative ack reaches the
-    // transfer total, or it FINs — either way the whole file is on disk.
+    // transfer total, or it FINs - either way the whole file is on disk.
     send_and_ack(socket, peer, hs, &[TAG_FIN], Some(total_chunks), MAX_RETRIES, &mut plain, &mut wire)
         .await?;
     let dt = started.elapsed().as_secs_f64();
@@ -1589,8 +1589,8 @@ async fn receive_stream(
     let mut history: VecDeque<Vec<u8>> = VecDeque::new();
 
     // <- header; ack it (seeding the ack history) so the sender can stream.
-    // A decrypt failure here is the sender replaying the header — it missed
-    // our ack — so answer with the whole history immediately.
+    // A decrypt failure here is the sender replaying the header - it missed
+    // our ack - so answer with the whole history immediately.
     let m = loop {
         let (n, from) = timeout_at(
             tokio::time::Instant::now() + IDLE_TIMEOUT,
@@ -1629,8 +1629,8 @@ async fn receive_stream(
     eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
 
     // Resume decision: a partial file from an interrupted attempt continues
-    // only when its recorded identity — len and whole-file sha256, both from
-    // the previous header — matches this transfer's header.
+    // only when its recorded identity - len and whole-file sha256, both from
+    // the previous header - matches this transfer's header.
     use sha2::Digest as _;
     let mut resume_chunks = 0u32;
     let mut hasher = sha2::Sha256::new();
@@ -1658,7 +1658,7 @@ async fn receive_stream(
     ack_and_replay(socket, peer, hs, TAG_RESUME, resume_chunks, &mut history, &mut wire, true).await?;
     if resume_chunks > 0 {
         eprintln!(
-            "# ↩️  resuming {name:?} at chunk {resume_chunks}/{total_chunks} — asking the sender to skip ahead"
+            "# ↩️  resuming {name:?} at chunk {resume_chunks}/{total_chunks} - asking the sender to skip ahead"
         );
     }
 
@@ -1815,7 +1815,7 @@ mod tests {
         assert!(rx.recv().await.is_none(), "channel must be closed");
     }
 
-    /// Full transfer roundtrip over real UDP loopback — through a proxy that
+    /// Full transfer roundtrip over real UDP loopback - through a proxy that
     /// drops every 7th data-plane frame (~14% loss). Proves the sliding
     /// window + cumulative acks recover loss: stop-and-wait would still pass
     /// this, but only at 1 RTT per chunk; the window finishes in a handful.
@@ -1826,7 +1826,7 @@ mod tests {
         let mut wi = [0u8; BUF];
         let mut pi = [0u8; BUF];
 
-        // Two parties, real UDP sockets (with production kernel buffers —
+        // Two parties, real UDP sockets (with production kernel buffers -
         // defaults would overflow mid-burst and turn the loss test into a
         // buffer-overflow test), and a lossy middlebox between them.
         let send_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1852,7 +1852,7 @@ mod tests {
                 let target = if from == sender_addr {
                     from_sender += 1;
                     // The first two sender datagrams are the XK initiator's
-                    // handshake messages — let them through; drop every 7th
+                    // handshake messages - let them through; drop every 7th
                     // data-plane frame after that.
                     if from_sender > 2 && (from_sender - 2) % 7 == 0 {
                         continue;
@@ -1889,7 +1889,7 @@ mod tests {
         let mut ti = noise::into_transport(hi).unwrap();
         let mut tr = noise::into_transport(hr).unwrap();
 
-        // 1 MiB + tail: 65 chunks — one window and a bit, with an odd tail.
+        // 1 MiB + tail: 65 chunks - one window and a bit, with an odd tail.
         let mut data = vec![0u8; 1024 * 1024 + 123];
         for (i, b) in data.iter_mut().enumerate() {
             *b = (i % 251) as u8;
@@ -1989,9 +1989,9 @@ mod tests {
         hex::encode(sha2::Sha256::digest(data))
     }
 
-    /// An interrupted transfer's receiver state — a partial file plus a
+    /// An interrupted transfer's receiver state - a partial file plus a
     /// sidecar naming the transfer identity (len + sha256) and the acked
-    /// chunk count — makes the next attempt start where the last one
+    /// chunk count - makes the next attempt start where the last one
     /// stopped: the sender is told to skip the acked chunks, the prefix is
     /// folded into the hash, and the finished file is byte-identical. A
     /// sidecar from a *different* file must not be resumed onto.
@@ -2057,7 +2057,7 @@ mod tests {
         let _ = total;
     }
 
-    /// A sidecar recording a *different* file (stale sha256 — e.g. the source
+    /// A sidecar recording a *different* file (stale sha256 - e.g. the source
     /// changed between attempts) must be discarded, not resumed onto: the
     /// transfer starts from scratch and still produces the correct file.
     #[tokio::test]

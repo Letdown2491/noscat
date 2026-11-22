@@ -1,4 +1,4 @@
-# NIP-draft: noscat — Nostr-native userspace mesh tunnels
+# NIP-draft: noscat - Nostr-native userspace mesh tunnels
 
 `draft` `optional` `relay` `encryption`
 
@@ -59,7 +59,7 @@ Everything runs in userspace; no root, no coordinator, no account.
 | Endpoint advert | `37195` | public (parameterized replaceable) |
 | MLS key package | `30443` | public (parameterized replaceable) |
 | Tailnet message (Welcome / commit) | `30444` | inside a NIP-59 gift wrap |
-| Tunnel data | — | Noise XK over UDP, direct |
+| Tunnel data | - | Noise XK over UDP, direct |
 
 ## Endpoint adverts (kind 37195)
 
@@ -122,7 +122,7 @@ group context extensions.
 A device publishes a parameterized replaceable event, kind `30443`, with `d`
 tag `"noscat-tailnet-kp-v1"` and content being the **hex-encoded
 TLS-serialized MLS KeyPackage** (the bundle's private init keys stay in the
-publisher's local storage — only the publisher can decrypt the Welcome later).
+publisher's local storage - only the publisher can decrypt the Welcome later).
 
 The event is public but reveals only the publisher's intent to join *some*
 tailnet. The owner fetches it, commits an Add, and sends the Welcome.
@@ -184,8 +184,8 @@ device: it is locked out by the ratchet itself.
 
 ## File transfer framing
 
-File transfer (`send`/`receive`) rides any established session — tailnet-
-scoped or not — as a small tagged protocol on top of the Noise transport.
+File transfer (`send`/`receive`) rides any established session - tailnet-
+scoped or not - as a small tagged protocol on top of the Noise transport.
 One Noise message = one UDP datagram, and the session's Noise nonces advance
 strictly sequentially and never appear on the wire; every reliability
 mechanism below is built on replaying *previously transmitted ciphertexts*
@@ -243,20 +243,20 @@ confirming), in which case the sender proceeds directly to the FIN exchange.
 ### CHUNK phase
 
 The file is split into `total = ceil(len / 1200)` chunks of at most 1200
-bytes (MTU-sized: one datagram is one loss unit, and a full window burst —
-about 39 KiB — fits inside default kernel socket buffers). Chunk `i` covers
+bytes (MTU-sized: one datagram is one loss unit, and a full window burst -
+about 39 KiB - fits inside default kernel socket buffers). Chunk `i` covers
 bytes `[i·1200, min(len, (i+1)·1200))`, and its frame payload is
 `u32 seq` + the raw bytes. Sequences start at the resume point.
 
 The sender keeps up to 32 chunks in flight. A chunk unacked after 400 ms is
-retransmitted — by replaying the *same ciphertext*, never re-encrypting —
+retransmitted - by replaying the *same ciphertext*, never re-encrypting -
 and after 120 failed retries per chunk the transfer is abandoned. The
 receiver writes chunks strictly in order: because snow only decrypts frames
 in nonce order and the sender emits seqs in nonce order, every frame that
 decrypts *is* the next expected chunk; frames beyond a gap are undecryptable
 and skipped.
 
-The receiver ACKs cumulatively — "I expect seq *n* next" — only at window
+The receiver ACKs cumulatively - "I expect seq *n* next" - only at window
 boundaries and at the final chunk. Every ack is a fresh Noise message the
 sender must consume in order, so a lost ack makes later acks undecryptable
 until a replay fills the nonce gap; the receiver therefore keeps a bounded
@@ -332,7 +332,7 @@ Senders SHOULD refuse transfers whose chunk count would exceed
   replaceable kind makes the latest one authoritative.
 - **Transfer authenticity and integrity.** The transfer header travels
   inside the Noise channel, so its `sha256` and `name` are authenticated
-  against the sender's static key — a man-in-the-middle cannot substitute a
+  against the sender's static key - a man-in-the-middle cannot substitute a
   file or name. The sha256 additionally catches corruption and partial
   writes below the Noise layer (crashes between write and finalize); a
   mismatched finished file is never renamed into place.
@@ -350,6 +350,6 @@ Senders SHOULD refuse transfers whose chunk count would exceed
 
 A complete userspace implementation in Rust lives at
 <https://github.com/Letdown2491/noscat> (crates `noscat-core`:
-`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`, `tunnel.rs` — the
+`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`, `tunnel.rs` - the
 last of which implements the transfer framing above). It builds on
 OpenMLS 0.8 and nostr-tools-compatible kinds (Marmot's key-package slot).

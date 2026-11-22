@@ -2,7 +2,7 @@
 //! the FIPS design's kind-21059 pattern.
 //!
 //! The public advert carries a node's *stationary* addresses. The ephemeral
-//! half — the port mappings each side just opened for this specific session —
+//! half - the port mappings each side just opened for this specific session -
 //! travels through sealed (kind 21059 rumor) gift wraps addressed to the
 //! peer's npub, so relays see only opaque envelopes and nobody else learns
 //! where either node is reachable.
@@ -37,7 +37,7 @@ pub enum TraversalError {
 }
 
 /// Payload sealed inside the gift wrap: "here is who I am on the data plane
-/// and where I am (currently) reachable — punch me".
+/// and where I am (currently) reachable - punch me".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraversalPayload {
     /// Sender's Noise static public key, hex.

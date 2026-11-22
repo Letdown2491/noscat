@@ -9,7 +9,7 @@
 //!   MLS Add, and gift-wrapping (NIP-59) the Welcome to the device.
 //! - Membership is authorization: `export_secret` derives the tunnel PSK, so
 //!   the Noise handshake in `crate::tunnel` only completes for group members
-//!   of the same epoch. Removing a device ratchets the epoch — it is out.
+//!   of the same epoch. Removing a device ratchets the epoch - it is out.
 //!
 //! Storage: OpenMLS state (key packages, trees, secrets) lives in a SQLite
 //! storage profile (`openmls_sqlite_storage`, serde-JSON codec) at
@@ -587,7 +587,7 @@ impl Device {
         watch.abort();
 
         let msg: TailnetMessage = serde_json::from_str(&payload)?;
-        eprintln!("# ✉️  invitation received from {sender} — joining…");
+        eprintln!("# ✉️  invitation received from {sender} - joining…");
 
         let welcome_bytes = hex::decode(&msg.welcome.ok_or_else(|| {
             TailnetError::Mls("invitation carries no Welcome".into())
@@ -628,7 +628,7 @@ struct TailnetMessage {
 /// authenticated by the group itself and inherited by every joiner.
 ///
 /// Single-owner tailnets: only the owner may add or remove devices. Members
-/// enforce this at commit-merge time (see `process_commit`) — an MLS commit
+/// enforce this at commit-merge time (see `process_commit`) - an MLS commit
 /// is signed, so the committer's credential is checked against the policy.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TailnetPolicy {
@@ -649,7 +649,7 @@ impl TailnetPolicy {
     }
 
     /// Read the policy out of a group context (the one a commit or Welcome
-    /// carries — MlsGroup keeps its current context private).
+    /// carries - MlsGroup keeps its current context private).
     fn from_context(context: &GroupContext) -> Result<Self, TailnetError> {
         for ext in context.extensions().iter() {
             if let Extension::Unknown(POLICY_EXTENSION_TYPE, UnknownExtension(bytes)) = ext {
@@ -699,7 +699,7 @@ fn join_config() -> MlsGroupJoinConfig {
         .clone()
 }
 
-/// The device's MLS Ed25519 signing key, derived from its nostr secret — one
+/// The device's MLS Ed25519 signing key, derived from its nostr secret - one
 /// secret governs the whole device, same pattern as the Noise key.
 fn mls_signer(identity: &Identity) -> Result<SignatureKeyPair, TailnetError> {
     use hkdf::Hkdf;
@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// A device directory is the unit of persistence: same directory, same
-    /// identity, same group, same PSK — across processes.
+    /// identity, same group, same PSK - across processes.
     #[test]
     fn device_state_survives_reopen() -> Result<(), TailnetError> {
         let dir = std::env::temp_dir().join(format!(
@@ -901,7 +901,7 @@ mod tests {
         };
 
         // Owner adds A, which joins from the Welcome (already in the new
-        // epoch — it must not merge its own Add commit).
+        // epoch - it must not merge its own Add commit).
         let kp_a = bundle_for(&a_provider, &a_signer, &a)?;
         let (_commit_a, welcome_a, _) = owner_group
             .add_members(&owner_provider, &owner_signer, &[kp_a.key_package().clone()])
@@ -974,7 +974,7 @@ mod tests {
         assert_ne!(psk_before, psk_of(&fx.owner_group, &fx.owner_provider)?);
 
         // A remaining member (B) merges the commit and ratchets to the new
-        // epoch — locked out together with A is nobody but A.
+        // epoch - locked out together with A is nobody but A.
         let mut b_group = fx.b_group;
         let staged = stage_commit(&mut b_group, &fx.b_provider, &commit)?;
         b_group
@@ -994,7 +994,7 @@ mod tests {
     fn acl_rejects_non_owner_commit() -> Result<(), TailnetError> {
         let mut fx = fixture_two_members()?;
 
-        // Member A (not the owner) commits the removal of B — legal MLS, but
+        // Member A (not the owner) commits the removal of B - legal MLS, but
         // the tailnet's policy says only the owner may change membership.
         let leaf_b = fx
             .a_group
@@ -1007,8 +1007,8 @@ mod tests {
             .remove_members(&fx.a_provider, &fx.a_signer, &[leaf_b])
             .map_err(|e| TailnetError::Mls(e.to_string()))?;
 
-        // The receiver (playing the owner's tailnet device) stages it fine —
-        // MLS authenticates A — but the policy forbids the merge.
+        // The receiver (playing the owner's tailnet device) stages it fine -
+        // MLS authenticates A - but the policy forbids the merge.
         let mut owner_group = fx.owner_group;
         let message = commit_a_into_in(&commit)?;
         let protocol: ProtocolMessage = match message.try_into() {

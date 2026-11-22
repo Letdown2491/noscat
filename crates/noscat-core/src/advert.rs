@@ -3,7 +3,7 @@
 //!
 //! This mirrors the FIPS design's kind-37195 overlay advert: a
 //! parameterized replaceable event with a fixed `d` tag, JSON payload, and a
-//! NIP-40 expiration. Relays see *that* a node advertises, not who talks to it —
+//! NIP-40 expiration. Relays see *that* a node advertises, not who talks to it -
 //! traversal signaling (the sensitive part) is a separate, gift-wrapped channel.
 
 use nostr::prelude::*;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::Identity;
 
-/// Kind for noscat overlay adverts: parameterized replaceable (30000–39999),
+/// Kind for noscat overlay adverts: parameterized replaceable (30000-39999),
 /// following the FIPS advert convention (kind 37195).
 pub const ADVERT_KIND: u16 = 37195;
 
@@ -36,7 +36,7 @@ pub struct Endpoint {
 /// JSON payload carried in the advert event content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvertPayload {
-    /// The node's curve25519 Noise static public key, hex — bound to the npub
+    /// The node's curve25519 Noise static public key, hex - bound to the npub
     /// by this event's signature (see `crate::noise` for the derivation note).
     pub noise_pub: String,
     pub endpoints: Vec<Endpoint>,

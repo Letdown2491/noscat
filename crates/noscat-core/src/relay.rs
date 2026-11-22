@@ -1,6 +1,6 @@
 //! Relay plumbing: publish and watch overlay adverts over real Nostr relays.
 //!
-//! Relays are the discovery channel only — they carry signed, public advert
+//! Relays are the discovery channel only - they carry signed, public advert
 //! events (kind 37195 pattern). Tunnel traffic never touches them.
 
 use std::time::Duration;
@@ -23,7 +23,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for a matching advert before giving up.
 const FETCH_WAIT: Duration = Duration::from_secs(15);
 
-/// A connected client over `relays` — the one place relay plumbing is set
+/// A connected client over `relays` - the one place relay plumbing is set
 /// up. Callers that publish/fetch shut the client down when done; the
 /// long-lived `watch_*` streams just drop it.
 pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayError> {
@@ -132,7 +132,7 @@ pub async fn fetch_advert_for(
 
 /// Fetch a device's published MLS key package (tailnet kind 30443) by author.
 ///
-/// `None` means "nothing arrived in time" — usually the device has not run
+/// `None` means "nothing arrived in time" - usually the device has not run
 /// `noscat tailnet publish` yet.
 pub async fn fetch_key_package(
     relays: &[String],
