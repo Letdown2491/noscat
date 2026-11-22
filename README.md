@@ -30,10 +30,14 @@ curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/i
 Linux packages (`.deb`, `.rpm`, `.apk`, `.pkg.tar.zst` for arch) attach to
 every release, built from static musl binaries - no dependencies. On Arch,
 a source `PKGBUILD` lives in [`packaging/PKGBUILD`](packaging/PKGBUILD) for
-the AUR. On macOS, a Homebrew formula (`noscat.rb` in the release assets,
-generated per release with checksums) is ready to drop into the
-`Letdown2491/homebrew-tap` tap. On Windows, grab the zip from the release
-(a winget manifest is in [`packaging/winget/`](packaging/winget/)).
+the AUR. On macOS and Linux Homebrew:
+
+```
+brew install Letdown2491/tap/noscat
+```
+
+On Windows, grab the zip from the release (a winget manifest is in
+[`packaging/winget/`](packaging/winget/)).
 
 From source (any platform with a Rust toolchain):
 
