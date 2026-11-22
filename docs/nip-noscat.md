@@ -1,0 +1,226 @@
+# NIP-draft: noscat — Nostr-native userspace mesh tunnels
+
+`draft` `optional` `relay` `encryption`
+
+---
+
+## Abstract
+
+This NIP specifies **noscat**, a protocol for establishing peer-to-peer data
+tunnels between a user's own devices, using Nostr purely as the control
+plane. Two devices discover each other through relay-stored adverts,
+establish a direct Noise-protected UDP transport out-of-band, and scope
+membership to a user's device set ("tailnet") with an MLS (RFC 9420) group
+whose epoch secret doubles as the tunnel handshake PSK.
+
+Nostr relays carry only discovery metadata and MLS control messages. Data
+plane traffic never touches a relay.
+
+## Motivation
+
+Mesh VPNs (Tailscale, WireGuard-based overlays) require an account, a
+coordinating daemon, and root privileges. Every Nostr user already holds a
+cryptographic identity that follows them across devices and relays. This NIP
+reuses that identity to:
+
+1. advertise reachable endpoints for direct connections,
+2. form an MLS group over a user's devices so membership *is* authorization,
+3. derive a shared epoch PSK so tunnel handshakes fail cryptographically for
+   removed devices.
+
+Everything runs in userspace; no root, no coordinator, no account.
+
+## Conventions
+
+- The key words SHALL, SHOULD, and MAY are to be interpreted as described in
+  RFC 2119.
+- All JSON is minified, all hex is lowercase.
+- "MLS" refers to RFC 9420. The reference ciphersuite is
+  `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`; clients MUST support it and
+  MAY support others.
+- "Identity" means a secp256k1 keypair in the standard Nostr sense (npub/nsec).
+
+## Overview
+
+```
+                    ┌────────────┐
+                    │   relays   │   control plane only:
+                    └─────┬──────┘   adverts, key packages,
+              kind 37195 /│30443/30444 (gift-wrapped)
+        ┌─────────────────┴─────────────────┐
+        │                                   │
+   ┌────▼─────┐   Noise XK / XKpsk0, UDP  ┌─▼────────┐
+   │ device A │◄──────────────────────────►│ device B │
+   └──────────┘     data plane             └──────────┘
+```
+
+| Purpose | Kind | Scope |
+|---|---|---|
+| Endpoint advert | `37195` | public (parameterized replaceable) |
+| MLS key package | `30443` | public (parameterized replaceable) |
+| Tailnet message (Welcome / commit) | `30444` | inside a NIP-59 gift wrap |
+| Tunnel data | — | Noise XK over UDP, direct |
+
+## Endpoint adverts (kind 37195)
+
+A device that wants to accept connections publishes a **parameterized
+replaceable** event, kind `37195`, with a `d` tag naming the advert slot
+(`"noscat-overlay-v1"` in the reference implementation) and an `expiration`
+tag. The content is JSON:
+
+```json
+{
+  "noise_pub": "<hex curve25519 static public key>",
+  "endpoints": [
+    { "transport": "udp", "addr": "203.0.113.7:51820" },
+    { "transport": "tcp", "addr": "203.0.113.7:443" }
+  ]
+}
+```
+
+The `noise_pub` field MUST be the Noise static public key derived from the
+author's identity secret as follows: the static private key is
+`HKDF-SHA256(salt = "noscat", ikm = identity-secret-bytes, info =
+"noscat/noise-static-v1", L = 32)`, and the public half is the RFC 7748
+X25519 base-point scalar multiplication of the standard-clamped private
+key. This binds the Noise static key to the npub through the event
+signature; peers MUST verify the derivation and reject adverts that do not
+match.
+
+Endpoints are candidates only: peers race them with a STUN-like
+transaction-id handshake and keep the first that authenticates, falling back
+to relay-reflected candidates for NAT traversal (out of scope here).
+
+## Tailnets
+
+A **tailnet** is one MLS group whose GroupId is the owner's npub (32 raw
+bytes). It is the unit of membership and authorization for the tunnels
+between a user's devices.
+
+### Policy extension (0xffa0)
+
+The group context of a tailnet SHALL carry exactly one custom extension of
+type `0xffa0` (private-use range, RFC 9420 §13.6). Its extension data is
+JSON:
+
+```json
+{ "owner": "<hex npub bytes of the owner>" }
+```
+
+Every member SHALL enforce this policy at commit-merge time: a commit whose
+sender credential identity is not the `owner` MUST NOT be merged, even
+though it is validly signed and MLS-legal. This makes the owner the only
+principal able to add or remove devices, without extending MLS itself.
+
+Clients advertising membership in such a group MUST include extension type
+`0xffa0` in the capabilities of their leaf nodes (key packages and update
+paths), because add proposals and commit paths are validated against the
+group context extensions.
+
+### Key packages (kind 30443)
+
+A device publishes a parameterized replaceable event, kind `30443`, with `d`
+tag `"noscat-tailnet-kp-v1"` and content being the **hex-encoded
+TLS-serialized MLS KeyPackage** (the bundle's private init keys stay in the
+publisher's local storage — only the publisher can decrypt the Welcome later).
+
+The event is public but reveals only the publisher's intent to join *some*
+tailnet. The owner fetches it, commits an Add, and sends the Welcome.
+
+### Tailnet messages (kind 30444, gift-wrapped)
+
+All group-control messages travel as NIP-59 gift wraps. The gift-wrapped
+**rumor** is an unsigned event of kind `30444`, authored by the sender's real
+key, with JSON content:
+
+```json
+{
+  "commit": "<hex TLS-serialized MlsMessageOut carrying the commit>",
+  "welcome": "<hex TLS-serialized MlsMessageOut carrying the Welcome>",
+}
+```
+
+- `welcome` is present only in the message addressed to the newly invited
+  device.
+- `commit` alone is fanned out to every other member so the whole group
+  ratchets into the same epoch.
+
+Receivers:
+
+1. Unwrap the gift wrap (NIP-59), then decrypt/verify the MLS message
+   locally.
+2. If the message contains a Welcome and the receiver is not yet in a
+   tailnet, it joins from the Welcome and merges the accompanying commit.
+3. If the message contains only a commit, the receiver processes it: the
+   sender credential MUST pass the policy extension check, then the commit
+   is merged.
+4. A commit whose epoch does not match the receiver's current epoch (e.g. a
+   relay replay of an older commit) MUST be skipped, not merged.
+
+The gift wrap SHOULD carry an `expiration` tag of at most 7 days: commits
+are only meaningful for a short window, and stale Welcomes would let a
+device join a group it may have since been removed from.
+
+### Epoch PSK and tunnel binding
+
+Every member derives the tailnet's current tunnel key with the MLS exporter:
+
+```
+psk = MLS-Exporter("noscat/tunnel-psk-v1", "", 32)
+```
+
+Tunnel handshakes are Noise pattern `Noise_XKpsk0_25519_ChaChaPoly_SHA256`
+(where the base pattern is `Noise_XK_25519_ChaChaPoly_SHA256`) with `psk` as
+psk0. Consequences:
+
+- Only group members of the same epoch can complete a handshake.
+- **Removal ratchets the epoch**: when the owner commits a Remove and the
+  remaining members merge it, a new exporter secret is derived. The removed
+  device's PSK is stale immediately; its handshakes fail cryptographically
+  even though it still holds old group state.
+
+Removal of a device therefore requires no notification to the removed
+device: it is locked out by the ratchet itself.
+
+## Client behavior summary
+
+1. `advert`: publish/refresh kind `37195` with endpoints and `noise_pub`.
+2. `key-package`: publish/refresh kind `30443`.
+3. `create`: create the MLS group with the `0xffa0` policy extension.
+4. `invite`: fetch the invitee's kind-30443 event, commit the Add, send the
+   Welcome gift-wrapped to the invitee and the bare commit to all other
+   members.
+5. `join` / `sync`: subscribe to gift wraps addressed to the device's npub;
+   process per the receiver rules above.
+6. `serve`/`pipe`/`connect`: resolve the peer's advert, establish the Noise
+   session (XKpsk0 when a tailnet is in scope), and pump bytes.
+
+## Security Considerations
+
+- **Relay visibility.** Adverts and key packages are public but contain no
+  secrets: a Noise static public key and an MLS key package. Tailnet
+  messages are double-wrapped (NIP-59): relays see only an ephemeral sender
+  and the receiver npub.
+- **Policy enforcement is cooperative.** The `0xffa0` check runs at
+  merge time on honest members. A malicious member could technically merge a
+  non-owner commit locally, but it gains nothing: the attacker cannot
+  produce the removed device's ratchet and can only lock itself out. Future
+  work may add `RequiredCapabilities`-style enforcement or an
+  external-commit path so even this is impossible.
+- **Single-owner tailnets.** This draft specifies owner-only administration.
+  Multi-owner or quorum policies can extend the `0xffa0` JSON with a rule
+  list; the extension format is versioned by the `d`-tag slot name.
+- **Replay.** Old commits replayed from relays are rejected by the epoch
+  check (rule 4). Old Welcomes are bounded by the gift-wrap expiration and
+  by the ratchet: joining from a stale Welcome yields a stale PSK that
+  fails every handshake.
+- **Key package hygiene.** Publishers SHOULD use fresh key packages with a
+  bounded lifetime and republish on a schedule; the parameterized
+  replaceable kind makes the latest one authoritative.
+
+## Reference implementation
+
+A complete userspace implementation in Rust lives at
+<https://github.com/Letdown2491/noscat> (crates `noscat-core`:
+`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`). It builds on
+OpenMLS 0.8 and nostr-tools-compatible kinds (Marmot's key-package slot).

@@ -15,6 +15,8 @@ Think `tailcat` (Tailscale's data plane without its control plane), but:
 - node identity *is* a Nostr identity, so addresses are people and agents, not blobs,
 - it is written in Rust.
 
+The wire protocol is specified in the draft NIP: [`docs/nip-noscat.md`](docs/nip-noscat.md).
+
 ## Status
 
 **Working** — three layers, each verified live across containers over public relays
@@ -137,7 +139,7 @@ noscat send ./report.pdf <A's npub> --tailnet ./device-b
 - Transfer throughput (sliding-window ACKs) and resume.
 - ~~Multi-member tailnets with ACL policy as Marmot GroupContext components.~~ (done)
 - ~~Real MLS storage profile (SQLite) to replace the spike-grade memory serialization.~~ (done)
-- NIP draft.
+- ~~NIP draft.~~ (drafted: `docs/nip-noscat.md`)
 
 ## Development
 
