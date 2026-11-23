@@ -417,19 +417,23 @@ pub async fn serve_session(
     let reply_endpoints = endpoints.clone();
     let reply_relays: Vec<String> = relays.to_vec();
     let replier = tokio::spawn(async move {
-        // One reply per sender per cadence: a sender we cannot authenticate
-        // yet (the handshake does that) must not be able to keep us
-        // answering at invite rate.
-        let mut last_replied: Option<(PublicKey, std::time::Instant)> = None;
+        // One reply per sender per cadence, tracked PER SENDER: a
+        // single-slot throttle was bypassable by alternating two
+        // keypairs in gift wraps, getting punch-plus-reply service at
+        // full message rate.
+        let mut last_replied: HashMap<PublicKey, std::time::Instant> = HashMap::new();
         while let Some((sender, payload)) = rx.recv().await {
             tracing::info!(%sender, ?payload.endpoints, "traversal request received");
             if last_replied
-                .as_ref()
-                .is_some_and(|(s, at)| *s == sender && at.elapsed() < TRAVERSAL_REPLY_EVERY)
+                .get(&sender)
+                .is_some_and(|at| at.elapsed() < TRAVERSAL_REPLY_EVERY)
             {
                 continue;
             }
-            last_replied = Some((sender, std::time::Instant::now()));
+            // Bound the map: entries expire with the cadence, so a flood
+            // of distinct keypairs cannot grow it without end.
+            last_replied.retain(|_, at| at.elapsed() < TRAVERSAL_REPLY_EVERY);
+            last_replied.insert(sender, std::time::Instant::now());
             *reply_candidates.lock().expect("candidates lock") =
                 parse_endpoints(&payload.endpoints);
             // Punch toward the new candidates immediately: behind a
@@ -560,6 +564,13 @@ pub async fn dial_session(
             }
             for addr in parse_endpoints(&payload.endpoints) {
                 if !candidates.contains(&addr) {
+                    // Cap: the peer's stored 7-day gift wraps all replay
+                    // into this loop each round; a candidate list must
+                    // not grow with them without end.
+                    if candidates.len() >= MAX_CANDIDATE_PEERS {
+                        tracing::warn!("candidate list full; ignoring further traversal signals");
+                        break;
+                    }
                     tracing::info!(%addr, "learned candidate via traversal");
                     candidates.push(addr);
                 }
@@ -980,6 +991,9 @@ pub async fn bind_listener(
                 {
                     continue;
                 }
+                // Bound the map: a long-running node must not grow it per
+                // distinct keypair a flood sends from.
+                replied.retain(|_, at| at.elapsed() < TRAVERSAL_REPLY_EVERY);
                 replied.insert(sender, std::time::Instant::now());
             }
             {
@@ -1684,6 +1698,39 @@ where
     Ok(received)
 }
 
+/// The final destination for a completed transfer: never an existing
+/// file. The name is peer-supplied (`sanitize_name` blocks traversal,
+/// not collision), and a collision must not silently clobber the
+/// receiver's data - so a repeat send lands beside the first copy,
+/// using the browser scheme `name (k).ext`.
+async fn unique_final_path(final_path: PathBuf) -> PathBuf {
+    if !final_path.exists() {
+        return final_path;
+    }
+    let dir = final_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let file = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("received")
+        .to_string();
+    let (stem, ext) = match file.rfind('.') {
+        Some(dot) if dot > 0 => (file[..dot].to_string(), file[dot..].to_string()),
+        _ => (file.clone(), String::new()),
+    };
+    for k in 1..100u32 {
+        let candidate = dir.join(format!("{stem} ({k}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // 99 copies of this name already exist: let the rename below fail
+    // loudly rather than loop forever.
+    final_path
+}
+
 /// Strip any path components from a peer-supplied filename.
 fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {
     let name = Path::new(name)
@@ -2003,6 +2050,7 @@ async fn receive_stream(
         eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
         return Ok((who.to_string(), part_path));
     }
+    let final_path = unique_final_path(final_path).await;
     tokio::fs::rename(&part_path, &final_path).await?;
     tokio::fs::remove_file(&meta_path).await.ok();
     eprintln!("# ✅ {who} -> {final_path:?} ({received} bytes)");
@@ -2015,6 +2063,10 @@ async fn receive_stream(
     socket.send_to(&fin, peer).await?;
     tracing::debug!("file complete; FIN sent, lingering for the sender");
     let mut quiet = tokio::time::Instant::now() + FIN_LINGER;
+    // Total ceiling on the linger: an in-spec sender may replay to get
+    // its lost acks, but a peer that keeps talking forever must not pin
+    // this task and socket indefinitely.
+    let linger_hard_stop = quiet + 4 * FIN_LINGER;
     loop {
         match timeout_at(quiet, socket.recv_from(&mut wire)).await {
             Err(_) => break, // sender gone quiet: it has our confirmation
@@ -2028,6 +2080,9 @@ async fn receive_stream(
                     socket.send_to(ct, peer).await?;
                 }
                 quiet = tokio::time::Instant::now() + FIN_LINGER;
+                if quiet > linger_hard_stop {
+                    quiet = linger_hard_stop;
+                }
             }
         }
     }
@@ -2260,6 +2315,7 @@ where
         eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
         return Ok((who.to_string(), part_path));
     }
+    let final_path = unique_final_path(final_path).await;
     tokio::fs::rename(&part_path, &final_path).await?;
     tokio::fs::remove_file(&meta_path).await.ok();
     eprintln!("# ✅ {who} -> {final_path:?} ({received} bytes)");

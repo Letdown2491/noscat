@@ -1100,6 +1100,17 @@ fn spawn_printer(
             wait_transfer(rx)?;
         }
         Command::Receive { out, listen, relays, identity, mesh, ttl } => {
+            // Disk-write exposure without authorization: `up` hard-requires
+            // --mesh for the same surface. Receive keeps unmeshed netcat
+            // mode (scripted transfers over an explicit key), but it says
+            // so loudly - anyone who has the public advert can dial.
+            if mesh.is_none() {
+                eprintln!(
+                    "# ⚠️  no --mesh: ANY peer who learns this node's npub can connect and\n\
+                     #    write files into {}. For owner-only inbound, run --mesh (or `up --mesh`).",
+                    out.display()
+                );
+            }
             let identity = identity
                 .map(IdentitySource::File)
                 .or_else(default_identity)

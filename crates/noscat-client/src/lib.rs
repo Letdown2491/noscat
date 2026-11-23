@@ -71,6 +71,15 @@ impl std::fmt::Debug for IdentitySource {
     }
 }
 
+/// One-shot text payloads (chat, clipboard share) read into memory by
+/// the node dispatcher: this caps them. A mesh peer streaming more is a
+/// malformed sender, not a message to buffer.
+const MAX_TEXT_BYTES: usize = 1 << 20;
+
+/// Concurrent tunnel dials allowed per forward: each is a full handshake,
+/// and a loopback client can open connections faster than they complete.
+static FORWARD_DIAL_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
 /// Everything a client session needs, resolved once at [`Client::start`].
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -695,9 +704,14 @@ impl Client {
                         // One-shot chat: the rest of the stream is the
                         // message, read to the sender's FIN. Echo a FIN so
                         // the sender's read-to-EOF confirms delivery.
-                        use tokio::io::AsyncWriteExt as _;
+                        // Capped: a mesh peer (or a bug) streaming
+                        // gigabytes must not OOM the long-running node.
+                        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                         let mut text = Vec::new();
-                        let ok = stream.read_to_end(&mut text).await.is_ok()
+                        let mut limited = tokio::io::AsyncReadExt::take(&mut stream, (MAX_TEXT_BYTES + 1) as u64);
+                        let read_ok = limited.read_to_end(&mut text).await.is_ok();
+                        let ok = read_ok
+                            && text.len() <= MAX_TEXT_BYTES
                             && std::str::from_utf8(&text)
                                 .map(|t| {
                                     inner.emit(Event::ChatMessage { peer: who.clone(), text: t.to_string() });
@@ -705,18 +719,27 @@ impl Client {
                                 })
                                 .unwrap_or(false);
                         if !ok {
+                            let error = if read_ok && text.len() > MAX_TEXT_BYTES {
+                                format!("chat message exceeds {MAX_TEXT_BYTES} bytes")
+                            } else {
+                                "malformed chat message".into()
+                            };
                             inner.emit(Event::ChatFailed {
                                 peer: who,
-                                error: "malformed chat message".into(),
+                                error,
                             });
                         }
+                        drop(limited); // release the &mut stream borrow
                         let _ = stream.shutdown().await;
                     } else if tag[0] == tunnel::TAG_CLIP {
                         // One-shot clipboard share: same wire shape as chat
                         // (text to the sender's FIN, FIN echo confirms).
                         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                         let mut text = Vec::new();
-                        let ok = stream.read_to_end(&mut text).await.is_ok()
+                        let mut limited = tokio::io::AsyncReadExt::take(&mut stream, (MAX_TEXT_BYTES + 1) as u64);
+                        let read_ok = limited.read_to_end(&mut text).await.is_ok();
+                        let ok = read_ok
+                            && text.len() <= MAX_TEXT_BYTES
                             && std::str::from_utf8(&text)
                                 .map(|t| {
                                     inner.emit(Event::Clipboard { peer: who.clone(), text: t.to_string() });
@@ -729,11 +752,17 @@ impl Client {
                             // generic stop keeps the receiver's UI out of
                             // it (a remote cannot fabricate local
                             // "message failed" bubbles).
+                            let error = if read_ok && text.len() > MAX_TEXT_BYTES {
+                                format!("clipboard share exceeds {MAX_TEXT_BYTES} bytes")
+                            } else {
+                                format!("malformed clipboard share from {who}")
+                            };
                             inner.emit(Event::Stopped {
                                 what: "clipboard",
-                                error: Some(format!("malformed clipboard share from {who}")),
+                                error: Some(error),
                             });
                         }
+                        drop(limited); // release the &mut stream borrow
                         let _ = stream.shutdown().await;
                     } else if let Some(to) = bridge_to {
                         let mut prefixed = PrefixedStream::new(tag[0], stream);
@@ -968,6 +997,13 @@ impl Client {
                 let inner = inner.clone();
                 let target = target.clone();
                 tokio::spawn(async move {
+                    // Bound concurrent dials per forward: a loopback
+                    // client piling up connections must not exhaust the
+                    // dial path (each dial is a whole tunnel handshake).
+                    let _dial_slot = match FORWARD_DIAL_PERMITS.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
                     let (stream, peer) = match inner.dial(&target).await {
                         Ok(s) => s,
                         Err(e) => {

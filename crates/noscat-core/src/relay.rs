@@ -87,6 +87,10 @@ pub enum RelayError {
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
 const BACKOFF_CAP: u32 = 5;
 
+/// Ceiling on the node's presence map (distinct npubs tracked): adversarial
+/// advert floods must not grow it without end on a long-running `up`.
+const PRESENCE_CAP: usize = 4096;
+
 /// A relay's health: consecutive failures and the cool-down that started
 /// at the last one. Global state: relays are process-wide endpoints, and
 /// every call path (fetch, publish, the watchers) should agree on who is
@@ -400,12 +404,27 @@ impl Presence {
         }
     }
 
-    /// Record an advert arrival for `npub` (hex) as of `at`.
+    /// Record an advert arrival for `npub` (hex) as of `at`. Bounded: the
+    /// node feeds every valid advert on the relays, so a flood of
+    /// distinct npubs must not grow the map without end on a long-running
+    /// process. Entries older than the advert TTL already read as
+    /// offline - expired ones are dropped; past that, the oldest evicts.
     pub fn note_at(&self, npub: &str, at: std::time::Instant) {
-        self.last_seen
-            .lock()
-            .expect("presence map")
-            .insert(npub.to_string(), at);
+        let mut map = self.last_seen.lock().expect("presence map");
+        if !map.contains_key(npub) && map.len() >= PRESENCE_CAP {
+            let ttl = std::time::Duration::from_secs(crate::advert::ADVERT_TTL_SECS as u64);
+            map.retain(|_, t| t.elapsed() < ttl);
+            if map.len() >= PRESENCE_CAP {
+                let oldest = map
+                    .iter()
+                    .min_by_key(|(_, t)| *t)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    map.remove(&k);
+                }
+            }
+        }
+        map.insert(npub.to_string(), at);
     }
 
     /// Record an advert arrival for `npub` (hex) as of now.
