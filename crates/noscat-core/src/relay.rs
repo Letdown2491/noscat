@@ -13,8 +13,14 @@ use crate::advert::{Advert, AdvertError, Endpoint, ADVERT_IDENTIFIER, ADVERT_KIN
 use crate::identity::Identity;
 
 /// Relays used when the operator does not configure any. Overridable with
-/// `--relay`. Chosen for uptime.
-pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.primal.net", "wss://nostr.mom"];
+/// `--relay`. Chosen for uptime: three operators so no single relay is
+/// load-bearing, and a relay that rate-limits us is backed off (see
+/// [`note_relay_failure`]) rather than hammering.
+pub const DEFAULT_RELAYS: &[&str] = &[
+    "wss://relay.primal.net",
+    "wss://relay.damus.io",
+    "wss://nostr.mom",
+];
 
 /// How long to wait for relay connections before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,13 +35,24 @@ pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayErr
     if relays.is_empty() {
         return Err(RelayError::NoRelays);
     }
+    // Skip relays in a rate-limit cool-down; healthy_relays never returns
+    // an empty list, so this never takes the only relay out.
+    let relays = healthy_relays(relays);
     let client = Client::new();
-    for relay in relays {
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
         .await
-        .map_err(|_| RelayError::ConnectTimeout)?;
+        .map_err(|_| {
+            for relay in &relays {
+                note_relay_failure(relay, "connect timeout");
+            }
+            RelayError::ConnectTimeout
+        })?;
+    for relay in &relays {
+        note_relay_success(relay);
+    }
     Ok(client)
 }
 
@@ -51,6 +68,89 @@ pub enum RelayError {
     Advert(#[from] AdvertError),
     #[error(transparent)]
     Sign(#[from] nostr::error::Error),
+}
+
+/// The cool-down for a relay that failed once: doubled per consecutive
+/// failure, capped, so a persistently rate-limiting relay is retried
+/// rarely instead of being hammered.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+const BACKOFF_CAP: u32 = 5;
+
+/// A relay's health: consecutive failures and the cool-down that started
+/// at the last one. Global state: relays are process-wide endpoints, and
+/// every call path (fetch, publish, the watchers) should agree on who is
+/// currently worth dialing.
+#[derive(Default)]
+struct RelayHealth {
+    failures: u32,
+    cooling_until: Option<std::time::Instant>,
+}
+
+fn relay_health() -> &'static std::sync::Mutex<std::collections::HashMap<String, RelayHealth>> {
+    static HEALTH: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, RelayHealth>>,
+    > = std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// True when an error string is a relay rate-limiting us (HTTP 429 on the
+/// websocket, or a relay-protocol notice saying the same). Errors from
+/// different stacks arrive as flattened strings; the markers are stable.
+fn is_rate_limit(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("429") || t.contains("rate limit") || t.contains("too many requests")
+}
+
+/// Record a relay failure; rate limits start (or extend) that relay's
+/// cool-down: `BACKOFF_BASE` doubled per consecutive failure, capped.
+/// Non-rate-limit failures only count toward the consecutive streak.
+pub fn note_relay_failure(url: &str, err: &str) {
+    let mut health = relay_health().lock().expect("relay health");
+    let h = health.entry(url.to_string()).or_default();
+    h.failures = h.failures.saturating_add(1);
+    if is_rate_limit(err) {
+        let shift = h.failures.saturating_sub(1).min(BACKOFF_CAP);
+        h.cooling_until =
+            Some(std::time::Instant::now() + BACKOFF_BASE * 2u32.saturating_pow(shift));
+        tracing::info!(%url, failures = h.failures, "relay backing off: {err}");
+    }
+}
+
+/// Record a relay working again: clears the failure streak and any
+/// cool-down.
+pub fn note_relay_success(url: &str) {
+    let mut health = relay_health().lock().expect("relay health");
+    if let Some(h) = health.get_mut(url) {
+        h.failures = 0;
+        h.cooling_until = None;
+    }
+}
+
+/// The relays worth dialing right now: those not in a rate-limit
+/// cool-down. Never returns an empty list - if every relay is cooling
+/// down, all of them come back (a backed-off relay is still better than
+/// going dark; the worst it does is hit a 429 again).
+pub fn healthy_relays(relays: &[String]) -> Vec<String> {
+    let now = std::time::Instant::now();
+    let health = relay_health().lock().expect("relay health");
+    let usable: Vec<String> = relays
+        .iter()
+        .filter(|url| {
+            !matches!(
+                health.get(*url),
+                Some(RelayHealth {
+                    cooling_until: Some(until),
+                    ..
+                }) if *until > now
+            )
+        })
+        .cloned()
+        .collect();
+    if usable.is_empty() {
+        relays.to_vec()
+    } else {
+        usable
+    }
 }
 
 /// Sign and publish an advert event to the given relays.
@@ -75,6 +175,9 @@ pub async fn publish_advert(
     }
     for (url, err) in &output.failed {
         tracing::warn!(%url, %err, "relay rejected advert");
+        if is_rate_limit(err) {
+            note_relay_failure(&url.to_string(), err);
+        }
     }
     client.shutdown().await;
     Ok(())
@@ -337,12 +440,18 @@ pub async fn watch_adverts_presence(
             let client = match connect_client(&relays).await {
                 Ok(c) => c,
                 Err(e) => {
+                    for r in &relays {
+                        note_relay_failure(r, &e.to_string());
+                    }
                     tracing::warn!(%e, "presence: relays unreachable; retrying");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
             };
             if let Err(e) = client.subscribe(filter.clone()).await {
+                for r in &relays {
+                    note_relay_failure(r, &e.to_string());
+                }
                 tracing::warn!(%e, "presence: subscribe failed; retrying");
                 client.shutdown().await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -424,8 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_survives_reconnect_shaped_updates() {
-        // The watcher re-sends the same author after every resubscribe;
+    fn presence_survives_reconnect_shaped_updates() {        // The watcher re-sends the same author after every resubscribe;
         // recording it again must refresh, not corrupt, the entry.
         let p = Presence::new();
         p.note(A);
@@ -437,5 +545,41 @@ mod tests {
         p.note(A);
         assert_eq!(p.age_secs(A), Some(0));
         assert!(p.is_online(A));
+    }
+
+    /// A rate-limited relay cools down exponentially and healthy_relays
+    /// skips it while it cools; success resets everything; and the filter
+    /// never empties the list (going dark is worse than a re-hit 429).
+    #[test]
+    fn rate_limited_relays_back_off_and_recover() {
+        let r = "wss://backoff.test";
+        let ok = "wss://healthy.test".to_string();
+        let relays = vec![r.to_string(), ok.clone()];
+
+        assert_eq!(healthy_relays(&relays), relays, "no history: nothing filtered");
+
+        // One 429: 30s cool-down, the healthy relay is preferred.
+        note_relay_failure(r, "HTTP 429 Too Many Requests");
+        assert_eq!(healthy_relays(&relays), vec![ok.clone()]);
+
+        // Repeated 429s double the cool-down (30s, 60s, 120s...), capped.
+        note_relay_failure(r, "429");
+        note_relay_failure(r, "429");
+        assert_eq!(healthy_relays(&relays), vec![ok.clone()]);
+
+        // A rate-limit-free failure keeps the streak but starts no
+        // cool-down.
+        note_relay_success(r);
+        note_relay_failure(r, "connection reset");
+        assert_eq!(healthy_relays(&relays), relays);
+
+        // Success clears the streak: a later 429 backs off from base.
+        note_relay_success(r);
+        note_relay_failure(r, "429");
+        assert_eq!(healthy_relays(&relays), vec![ok.clone()]);
+
+        // All relays cooling down: never go dark, return them all.
+        note_relay_failure(&ok, "429");
+        assert_eq!(healthy_relays(&relays), relays);
     }
 }
