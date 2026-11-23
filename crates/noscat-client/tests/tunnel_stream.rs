@@ -48,7 +48,7 @@ async fn handshake(
 async fn tunnel_stream_echo_with_half_close() {
     let id_a = Identity::generate();
     let id_b = Identity::generate();
-    let (pub_a, priv_a) = noise_keypair(&id_a).unwrap();
+    let (_pub_a, priv_a) = noise_keypair(&id_a).unwrap();
     let (pub_b, priv_b) = noise_keypair(&id_b).unwrap();
 
     let a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());

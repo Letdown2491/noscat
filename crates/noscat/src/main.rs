@@ -750,7 +750,8 @@ fn main() -> anyhow::Result<()> {
                 let Ok(npub_hex) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
                     continue;
                 };
-                let Ok(npub) = npub_hex.to_bech32() else { continue };
+                // to_bech32's error type is the never type: unwrappable.
+                let npub = npub_hex.to_bech32().expect("bech32 of a parsed key");
                 let advert = rt.block_on(noscat_core::relay::fetch_advert_for(
                     &relays,
                     None,
@@ -1041,7 +1042,9 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev, None);
             }
         }
-        Command::Up { out, to, listen, relays, identity, mesh, ttl, name } => {
+        // --identity does not apply here: in mesh mode this command IS its
+        // mesh device, so the identity comes from the device directory.
+        Command::Up { out, to, listen, relays, identity: _, mesh, ttl, name } => {
             // Authorization comes from mesh membership; without it any npub
             // that scans the QR could push files to this machine.
             let Some(mesh) = mesh else {
