@@ -173,9 +173,17 @@ async fn discover_endpoints(socket: &UdpSocket) -> Result<Vec<Endpoint>, TunnelE
         .collect())
 }
 
+/// How often a long-lived node republishes its advert: half the advert
+/// TTL, with a floor so a tiny TTL cannot hot-loop the relays. Refreshing
+/// at half the TTL means a node stays discoverable (and reads as online
+/// to advert-based presence) even if one refresh fails entirely.
+pub(crate) fn advert_refresh_interval(ttl_secs: u64) -> Duration {
+    const MIN_REFRESH: u64 = 60;
+    Duration::from_secs((ttl_secs / 2).max(MIN_REFRESH))
+}
+
 /// Candidates as dialable addresses.
-fn parse_endpoints(endpoints: &[Endpoint]) -> Vec<SocketAddr> {
-    endpoints
+fn parse_endpoints(endpoints: &[Endpoint]) -> Vec<SocketAddr> {    endpoints
         .iter()
         .filter_map(|e| e.addr.parse().ok())
         .collect()
@@ -836,6 +844,52 @@ pub async fn bind_listener(
 
     let endpoints = discover_endpoints(&socket).await?;
     crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, name.map(str::to_string), ttl_secs, relays).await?;
+
+    // Re-advertise for the life of the node: the advert above expires at
+    // the TTL, and a node that outlives its network (Wi-Fi to cellular)
+    // must republish with its current endpoints or it goes invisible -
+    // to peers dialing it and to advert-based presence. Same identity,
+    // kind, and replaceable `d` slot, so every publish replaces the last.
+    // Discovery or publish failures log and wait for the next tick; they
+    // never take the node down. The presence watcher needs no changes: it
+    // was built to see exactly these refreshes.
+    let refresh_identity = identity.clone();
+    let refresh_socket = socket.clone();
+    let refresh_relays = relays.to_vec();
+    let refresh_name = name.map(str::to_string);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(advert_refresh_interval(ttl_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // first tick fires immediately; the initial advert above covers it
+        loop {
+            ticker.tick().await;
+            let endpoints = match discover_endpoints(&refresh_socket).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(%e, "advert refresh: endpoint discovery failed; retrying next tick");
+                    continue;
+                }
+            };
+            match crate::relay::publish_advert(
+                &refresh_identity,
+                endpoints.clone(),
+                noise_pub,
+                refresh_name.clone(),
+                ttl_secs,
+                &refresh_relays,
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!(endpoints = ?endpoints, "advert refreshed")
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "advert refresh publish failed; retrying next tick")
+                }
+            }
+        }
+    });
+
     tracing::info!(
         npub = %identity.npub(),
         %local,
@@ -2161,6 +2215,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The republish timer keeps a node discoverable past the advert TTL:
+    /// half the TTL, floored so small TTLs (tests, impatient operators)
+    /// cannot hammer the relays.
+    #[test]
+    fn advert_refresh_interval_is_half_the_ttl_with_a_floor() {
+        assert_eq!(advert_refresh_interval(3600), Duration::from_secs(1800));
+        assert_eq!(advert_refresh_interval(120), Duration::from_secs(60));
+        assert_eq!(advert_refresh_interval(60), Duration::from_secs(60));
+        assert_eq!(advert_refresh_interval(10), Duration::from_secs(60));
+        assert_eq!(advert_refresh_interval(0), Duration::from_secs(60));
+    }
 
     /// The listener's router demuxes datagrams strictly by source address:
     /// an established session's flow goes only to its channel, a handshake
