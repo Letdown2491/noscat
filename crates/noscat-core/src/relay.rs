@@ -197,3 +197,32 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
     }
     Ok(())
 }
+
+/// Subscribe to tailnet key packages (kind 30443) on the relays and forward
+/// each event's author to the returned channel; the stream lives until the
+/// receiver is dropped. This is how the tailnet owner notices a device asking
+/// to join: the device publishes its key package, the owner sees it here.
+pub async fn watch_key_packages(
+    relays: &[String],
+) -> Result<tokio::sync::mpsc::Receiver<PublicKey>, RelayError> {
+    use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
+
+    let client = connect_client(relays).await?;
+    let filter = Filter::new()
+        .kind(Kind::Custom(KEY_PACKAGE_KIND))
+        .identifier(KEY_PACKAGE_IDENTIFIER);
+    client.subscribe(filter).await?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        let mut notifications = client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                // Bounded channel: a slow confirmer drops duplicates rather
+                // than buffering unbounded; the phone republishes on retry.
+                let _ = tx.try_send(event.pubkey);
+            }
+        }
+    });
+    Ok(rx)
+}

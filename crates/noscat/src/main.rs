@@ -354,6 +354,123 @@ fn main() -> anyhow::Result<()> {
         Ok((client, rx))
     }
 
+    // Resolve a --tailnet value (empty string = default device directory).
+    fn tailnet_dir_path(value: &str) -> std::path::PathBuf {
+        if value.is_empty() {
+            default_device_dir()
+        } else {
+            std::path::PathBuf::from(value)
+        }
+    }
+
+    // Watch the relays for devices publishing key packages (asking to join
+    // this tailnet) and invite them once the operator confirms. Runs on its
+    // own thread + runtime for the life of the `up` process; every failure
+    // is non-fatal (the node keeps serving regardless).
+    fn spawn_pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
+        std::thread::Builder::new()
+            .name("tailnet-pairing".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("# pairing watcher disabled: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(pairing_watcher(device_dir, relays));
+            })
+            .ok();
+    }
+
+    async fn pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
+        use nostr::nips::nip19::ToBech32;
+
+        // Only the tailnet owner answers join requests; a member device's
+        // `up` just serves its tunnels.
+        let members = match noscat_core::tailnet::Device::open(&device_dir) {
+            Ok(device) => match device.list_members() {
+                Ok(members) => members,
+                Err(e) => {
+                    eprintln!("# pairing watcher disabled: cannot list members: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("# pairing watcher disabled: cannot open device dir: {e}");
+                return;
+            }
+        };
+        if !members.iter().any(|m| m.is_owner) {
+            eprintln!("# this device is not the tailnet owner; join requests are answered by the owner device");
+            return;
+        }
+
+        let mut rx = match noscat_core::relay::watch_key_packages(&relays).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                eprintln!("# pairing watcher disabled: {e}");
+                return;
+            }
+        };
+        eprintln!("# 🤝 watching for devices asking to join this tailnet");
+
+        while let Some(author) = rx.recv().await {
+            // Refresh membership per request: earlier confirmations added
+            // members, and the author may already be one of them.
+            let members =
+                match noscat_core::tailnet::Device::open(&device_dir).and_then(|d| d.list_members())
+                {
+                    Ok(members) => members,
+                    Err(e) => {
+                        eprintln!("# pairing: cannot list members: {e}");
+                        continue;
+                    }
+                };
+            if members.iter().any(|m| m.npub == author.to_hex()) {
+                continue;
+            }
+
+            eprintln!("# 🤝 device {author} wants to join this tailnet");
+            let npub = match author.to_bech32() {
+                Ok(npub) => npub,
+                Err(_) => continue,
+            };
+            if !confirm(&npub) {
+                eprintln!("# declined {npub}");
+                continue;
+            }
+
+            let mut device = match noscat_core::tailnet::Device::open(&device_dir) {
+                Ok(device) => device,
+                Err(e) => {
+                    eprintln!("# pairing: cannot open device dir: {e}");
+                    continue;
+                }
+            };
+            match device.invite(author, &relays).await {
+                Ok(()) => eprintln!("# ✅ invited {npub} into the tailnet"),
+                Err(e) => eprintln!("# pairing: invite failed: {e}"),
+            }
+        }
+    }
+
+    // Ask on stderr, read the answer from stdin. EOF or anything but y/yes
+    // declines: a backgrounded `up` (no tty) never lets anyone in.
+    fn confirm(npub: &str) -> bool {
+        use std::io::Write;
+        eprint!("# accept {npub} into this tailnet? [y/N] ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return false;
+        }
+        matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
+    }
+
     // Narrate one client event on stderr - the same shape the core's
     // run-to-completion operations used to print.
     fn print_event(ev: Event) {
@@ -549,8 +666,13 @@ fn main() -> anyhow::Result<()> {
                     .map(|h| std::path::PathBuf::from(h).join("Downloads"))
                     .unwrap_or_else(|_| std::path::PathBuf::from("."))
             });
-            let (client, rx) = make_client(identity, relays, Some(tailnet), Some(listen), ttl)?;
+            // Pairing: when this device owns the tailnet, it watches the
+            // relays for devices asking to join (their published key
+            // packages) and invites them on confirmation.
+            let device_dir = tailnet_dir_path(&tailnet);
+            let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl)?;
             spawn_printer(rx);
+            spawn_pairing_watcher(device_dir, relays);
             client.up(out_dir, to)?;
             // The node runs on the client's background tasks; park forever
             // (park can return spuriously, so loop) until Ctrl-C.
