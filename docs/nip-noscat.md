@@ -293,6 +293,41 @@ wire. On the next HEADER:
 Senders SHOULD refuse transfers whose chunk count would exceed
 `u32::MAX` (about 5 TiB at 1200-byte chunks).
 
+## Pairing QR codes
+
+Client UIs exchange peer addresses with QR codes. The QR payload is a URI
+in the `noscat` scheme:
+
+```
+noscat:<npub>
+```
+
+For example:
+
+```
+noscat:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6
+```
+
+Rules:
+
+- The only required payload is the peer's npub (bech32, per Nostr NIP-19).
+  Everything else a client needs to dial - relays, tailnet, endpoints -
+  comes from the scanner's own configuration and the peer's published
+  advert; the QR never carries endpoints or keys.
+- Producers MUST emit the scheme prefix in lowercase. Parsers MUST accept
+  a bare npub (no prefix) too, since users paste npubs as text, and MUST
+  ignore unknown parameters if any are ever added
+  (`noscat:<npub>?k=v` is reserved for future use).
+- Parsers SHOULD validate the bech32 charset but need not verify the
+  checksum; dialing validates the key against the relay-resolved advert
+  anyway, and a bad npub fails there with a clear error.
+- QR displays SHOULD let the peer show the payload as text as well, so
+  devices without cameras can still copy-paste it.
+
+The payload is public data: an npub is a public key, and scanning it only
+allows reaching the device through the Noise-XK handshake, which
+authenticates the scanner to the holder just as any other dial would.
+
 ## Client behavior summary
 
 1. `advert`: publish/refresh kind `37195` with endpoints and `noise_pub`.
