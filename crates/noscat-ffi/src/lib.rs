@@ -243,8 +243,8 @@ pub fn mesh_join(
     let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
     let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    let expected =
-        nostr::prelude::PublicKey::parse(&owner_npub).map_err(NoscatError::fail)?;
+    // Accept a bare npub or the full noscat: URI a QR scan hands over.
+    let expected = noscat_core::parse_pairing_target(&owner_npub).map_err(NoscatError::fail)?;
     rt.block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),

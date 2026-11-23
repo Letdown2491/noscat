@@ -446,7 +446,15 @@ impl Device {
         self.persist()?;
 
         let mut builder = EventBuilder::new(Kind::Custom(KEY_PACKAGE_KIND), hex::encode(bytes))
-            .tag(Tag::identifier(KEY_PACKAGE_IDENTIFIER));
+            .tag(Tag::identifier(KEY_PACKAGE_IDENTIFIER))
+            // Expire in a day: a key package holds one-time pre-keys for
+            // the Welcome's HPKE seeds, and a stale one invites replayed
+            // Welcomes against spent keys. Republished on every serve
+            // start, so a day is comfortably longer than any offline gap
+            // that matters (the invite fails loud and re-invites).
+            .tag(Tag::expiration(
+                Timestamp::now() + Duration::from_secs(24 * 3600),
+            ));
         if let Some(owner) = target {
             builder = builder.tag(Tag::public_key(owner));
         }
@@ -1122,7 +1130,11 @@ struct MeshMessage {
     /// MLS commit (needed by other members; the invitee ignores it).
     commit: String,
     /// MLS Welcome carrying the group secrets for the invitee. Absent in
-    /// commits fanned out to existing members (epoch propagation).
+    /// commits fanned out to existing members (epoch propagation). Skipped
+    /// when absent: a bare `null` on the wire invites receivers to
+    /// misread "field present but empty" as a real Welcome and then trip
+    /// over it, and the spec shows commit fan-out without the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
     welcome: Option<String>,
 }
 
@@ -1132,10 +1144,51 @@ struct MeshMessage {
 /// Single-owner meshs: only the owner may add or remove devices. Members
 /// enforce this at commit-merge time (see `accept_commit_on`) - an MLS
 /// commit is signed, so the committer's credential is checked against the policy.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// The owner is hex on the wire (the spec is the contract - see
+/// docs/nip-noscat.md "Policy extension (0xffa0)"), not a JSON byte array:
+/// other implementations parse the extension data directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshPolicy {
     /// npub bytes of the mesh's owner.
     pub owner: Vec<u8>,
+}
+
+impl serde::Serialize for MeshPolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire {
+            owner: String,
+        }
+        Wire {
+            owner: hex::encode(&self.owner),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MeshPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            owner: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        // Accept the 0x prefix the spec shows in its example; case- and
+        // prefix-insensitive hex is friendlier to other implementations
+        // and unambiguous to produce ourselves.
+        let hex_str = wire
+            .owner
+            .strip_prefix("0x")
+            .or_else(|| wire.owner.strip_prefix("0X"))
+            .unwrap_or(&wire.owner);
+        let owner = hex::decode(hex_str)
+            .map_err(|e| serde::de::Error::custom(format!("bad owner hex: {e}")))?;
+        if owner.is_empty() {
+            return Err(serde::de::Error::custom("mesh policy owner is empty"));
+        }
+        Ok(MeshPolicy { owner })
+    }
 }
 
 impl MeshPolicy {

@@ -1071,10 +1071,9 @@ fn spawn_printer(
             identity,
             mesh,
         } => {
-            let identity = identity
-                .map(IdentitySource::File)
-                .or_else(default_identity)
-                .unwrap_or(IdentitySource::Ephemeral);
+            // NOSCAT_IDENTITY too: a long-running node is exactly where a
+            // deployed identity matters most.
+            let identity = identity_from_arg_or_env(identity);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -1125,10 +1124,7 @@ fn spawn_printer(
                     out.display()
                 );
             }
-            let identity = identity
-                .map(IdentitySource::File)
-                .or_else(default_identity)
-                .unwrap_or(IdentitySource::Ephemeral);
+            let identity = identity_from_arg_or_env(identity);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -1179,10 +1175,7 @@ fn spawn_printer(
             }
         }
         Command::Expose { to, listen, relays, identity, mesh, ttl } => {
-            let identity = identity
-                .map(IdentitySource::File)
-                .or_else(default_identity)
-                .unwrap_or(IdentitySource::Ephemeral);
+            let identity = identity_from_arg_or_env(identity);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -1253,8 +1246,10 @@ fn spawn_printer(
                 }
                 MeshCommand::Join { dir, owner, relays } => {
                     let mut device = noscat_core::mesh::Device::open(&dir)?;
-                    let expected = nostr::prelude::PublicKey::parse(&owner)
-                        .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
+                    // Accept a bare npub or the full noscat: URI a QR scan
+                    // hands over.
+                    let expected = noscat_core::parse_pairing_target(&owner)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     rt.block_on(device.join_mesh(&relays_or_default(relays), expected))?;
                 }
                 MeshCommand::Members { dir } => {

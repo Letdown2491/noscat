@@ -23,9 +23,28 @@ pub mod tunnel;
 pub use advert::Advert;
 pub use identity::Identity;
 
-/// A sensible default friendly name for this device: the hostname on unix
-/// systems (Android reports "localhost" - apps should pass something better,
-/// e.g. the device model). Falls back to "noscat".
+/// Parse a pairing target into the peer's public key. Accepts a bare npub
+/// (hex or bech32) or a full pairing URI as shown in QR codes and deep
+/// links: `noscat:<npub>` optionally followed by query
+/// parameters (`noscat:<npub>?relay=...`). The `noscat:` prefix and any
+/// query string are stripped, then the remainder is validated as a key -
+/// so callers never hand a whole URI into the dial path and fail there
+/// with a confusing error.
+pub fn parse_pairing_target(target: &str) -> Result<nostr::prelude::PublicKey, String> {
+    let t = target.trim();
+    let t = t
+        .strip_prefix("noscat:")
+        .or_else(|| t.strip_prefix("NOSCAT:"))
+        .unwrap_or(t);
+    // Cut the query string, if any (?relay=... etc).
+    let t = t.split('?').next().unwrap_or(t);
+    let t = t.trim_end_matches('/');
+    if t.is_empty() {
+        return Err("empty pairing target".to_string());
+    }
+    nostr::prelude::PublicKey::parse(t).map_err(|e| format!("bad pairing target {target:?}: {e}"))
+}
+
 /// A sensible default friendly name for this device: the hostname on unix
 /// systems (Android reports "localhost" - apps should pass something better,
 /// e.g. the device model). Falls back to "noscat".

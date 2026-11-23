@@ -71,6 +71,7 @@ tag. The content is JSON:
 ```json
 {
   "noise_pub": "<hex curve25519 static public key>",
+  "name": "laptop",
   "endpoints": [
     { "transport": "udp", "addr": "203.0.113.7:51820" },
     { "transport": "tcp", "addr": "203.0.113.7:443" }
@@ -84,8 +85,14 @@ author's identity secret as follows: the static private key is
 "noscat/noise-static-v1", L = 32)`, and the public half is the RFC 7748
 X25519 base-point scalar multiplication of the standard-clamped private
 key. This binds the Noise static key to the npub through the event
-signature; peers MUST verify the derivation and reject adverts that do not
-match.
+signature: the identity secret can only produce a Noise key and an event
+signature together, so a signed advert from that npub whose `noise_pub`
+was generated any other way is not a valid pairing for it. A peer that
+verifies nothing beyond the signature has not weakened confidentiality
+(the Noise handshake still authenticates the static key against the
+advert's), but SHOULD treat a mismatching derivation as a malformed
+advert: the derivation is deterministic, so any mismatch means the
+publisher is broken or hostile.
 
 Endpoints are candidates only: peers race them with a STUN-like
 transaction-id handshake and keep the first that authenticates, falling back
@@ -124,6 +131,13 @@ tag `"noscat-mesh-kp-v1"` and content being the **hex-encoded
 TLS-serialized MLS KeyPackage** (the bundle's private init keys stay in the
 publisher's local storage - only the publisher can decrypt the Welcome later).
 
+The event SHOULD carry an `expiration` tag of at most 24 hours: a key
+package holds one-time pre-keys for the Welcome's HPKE seeds, and stale
+packages invite replayed Welcomes against spent keys. Devices republish on
+every serve start, so a day is comfortably longer than any useful offline
+gap; an expired-or-absent package just means re-advertise (the invite
+fails loud).
+
 The event is public but reveals only the publisher's intent to join *some*
 mesh. The owner fetches it, commits an Add, and sends the Welcome.
 
@@ -136,12 +150,12 @@ key, with JSON content:
 ```json
 {
   "commit": "<hex TLS-serialized MlsMessageOut carrying the commit>",
-  "welcome": "<hex TLS-serialized MlsMessageOut carrying the Welcome>",
+  "welcome": "<hex TLS-serialized MlsMessageOut carrying the Welcome>"
 }
 ```
 
 - `welcome` is present only in the message addressed to the newly invited
-  device.
+  device; it MUST be omitted (not `null`) when there is none.
 - `commit` alone is fanned out to every other member so the whole group
   ratchets into the same epoch.
 
@@ -154,8 +168,12 @@ Receivers:
 3. If the message contains only a commit, the receiver processes it: the
    sender credential MUST pass the policy extension check, then the commit
    is merged.
-4. A commit whose epoch does not match the receiver's current epoch (e.g. a
-   relay replay of an older commit) MUST be skipped, not merged.
+4. A commit whose epoch does not equal the receiver's current epoch + 1
+   (e.g. a relay replay of an older commit, or a further-ahead commit the
+   receiver has not caught up to) MUST NOT be merged: skip and keep the
+   receiver's state. Replay of an already-merged commit is expected and
+   benign; a receiver stranded at a stale epoch catches up when the owner
+   re-publishes its merged commits (see Client behavior summary, step 5a).
 
 The gift wrap SHOULD carry an `expiration` tag of at most 7 days: commits
 are only meaningful for a short window, and stale Welcomes would let a
@@ -323,6 +341,9 @@ in the `noscat` scheme:
 noscat:<npub>
 ```
 
+Optionally followed by query parameters (e.g. a suggested relay); parsers
+MUST accept both the bare form and the with-query form and ignore unknown
+parameters.
 For example:
 
 ```

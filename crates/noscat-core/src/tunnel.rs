@@ -481,7 +481,9 @@ pub async fn dial_session(
     relays: &[String],
     psk: Option<&[u8; 32]>,
 ) -> Result<Session, TunnelError> {
-    let target_pubkey = PublicKey::parse(target).map_err(|_| TunnelError::BadAdvert)?;
+    // Accept a bare npub or a full noscat: pairing URI (QR/deep links).
+    let target_pubkey =
+        crate::parse_pairing_target(target).map_err(|_| TunnelError::BadAdvert)?;
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
     let socket = bind_udp("0.0.0.0:0".parse().unwrap())?;
