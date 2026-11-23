@@ -864,7 +864,10 @@ pub async fn bind_listener(
                     continue;
                 }
             };
-            if n < MIN_FRAME {
+            // A frame below FIN_FRAME is a punch marker (15 bytes): carry no
+            // state. FIN frames (16) MUST pass - they are how half-closes
+            // reach routed sessions.
+            if n < FIN_FRAME {
                 continue;
             }
             route_datagram(from, &wire[..n], &r_sessions, &r_handshakes, &accept_tx);
@@ -1204,6 +1207,10 @@ const TAG_RESUME: u8 = 5;
 /// Smallest authenticated frame (a 5-byte payload + the 16-byte Poly1305
 /// tag). Anything decrypt-failing below this is a punch marker, not a replay.
 const MIN_FRAME: usize = 5 + 16;
+/// Smallest legal transport frame on the wire: the AEAD tag over an empty
+/// payload - which is exactly what the FIN is. The router must pass these;
+/// only punch markers (15 bytes) are smaller.
+const FIN_FRAME: usize = 16;
 /// Per-chunk ACK wait before retransmitting.
 const ACK_TIMEOUT: Duration = Duration::from_secs(1);
 /// Sliding window: chunks in flight before an ack is required. Kept small
