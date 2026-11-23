@@ -144,23 +144,31 @@ pub struct MeshMember {
     pub last_seen_secs: Option<u64>,
 }
 
+/// One shared runtime for the standalone mesh helpers: each would
+/// otherwise open a full multi-thread runtime per call (thread-pool
+/// spin-up per roster view on a phone).
+fn mesh_runtime() -> Result<&'static tokio::runtime::Runtime, NoscatError> {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime cannot fail to build")
+    });
+    Ok(rt)
+}
+
 /// List the member devices of a mesh device directory, with each
 /// member's friendly name resolved from its current advert (concurrently;
 /// members that are offline simply come back unnamed). The directory is
 /// an enrolled mesh device (identity.nsec + MLS state), imported onto the
 /// device; membership is what authorizes mesh-scoped tunnels.
 #[uniffi::export]
-pub fn mesh_members(dir: String) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(NoscatError::fail)?;
+pub fn mesh_members(dir: String, relays: Option<Vec<String>>) -> Result<Vec<MeshMember>, NoscatError> {
+    let rt = mesh_runtime()?;
     let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
-    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
     rt.block_on(async move {
         let members = members_of(device)?;
         let relays = &relays;
@@ -194,17 +202,15 @@ pub fn mesh_members(dir: String) -> Result<Vec<MeshMember>, NoscatError> {
 /// `owner_npub`, the request is addressed to that owner alone (the one whose
 /// QR the user scanned); the returned npub is this device's address.
 #[uniffi::export]
-pub fn mesh_prepare(dir: String, owner_npub: Option<String>) -> Result<String, NoscatError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(NoscatError::fail)?;
+pub fn mesh_prepare(
+    dir: String,
+    owner_npub: Option<String>,
+    relays: Option<Vec<String>>,
+) -> Result<String, NoscatError> {
+    let rt = mesh_runtime()?;
     let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
-    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
     let target = match owner_npub {
         Some(npub) => Some(
             nostr::prelude::PublicKey::parse(&npub)
@@ -228,17 +234,12 @@ pub fn mesh_join(
     dir: String,
     timeout_secs: u64,
     owner_npub: String,
+    relays: Option<Vec<String>>,
 ) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(NoscatError::fail)?;
+    let rt = mesh_runtime()?;
     let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
-    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
     let expected =
         nostr::prelude::PublicKey::parse(&owner_npub).map_err(NoscatError::fail)?;
     rt.block_on(async move {
@@ -256,17 +257,15 @@ pub fn mesh_join(
 /// Keep the membership current: merge the owner's epoch commits (invites,
 /// removals) that arrive while we listen, then return the member list.
 #[uniffi::export]
-pub fn mesh_sync(dir: String, wait_secs: u64) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(NoscatError::fail)?;
+pub fn mesh_sync(
+    dir: String,
+    wait_secs: u64,
+    relays: Option<Vec<String>>,
+) -> Result<Vec<MeshMember>, NoscatError> {
+    let rt = mesh_runtime()?;
     let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
-    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
     rt.block_on(async move {
         device
             .sync_mesh(&relays, std::time::Duration::from_secs(wait_secs))
@@ -321,11 +320,16 @@ impl NoscatClient {
             },
             relays: config.relays.clone(),
             listen: Some(
-                std::net::SocketAddr::from(([0, 0, 0, 0], config.listen_port.unwrap_or(41641))),
+                std::net::SocketAddr::from((
+                    [0, 0, 0, 0],
+                    config
+                        .listen_port
+                        .unwrap_or(noscat_core::relay::DEFAULT_LISTEN_PORT),
+                )),
             ),
             mesh_dir: config.mesh_dir.as_ref().map(std::path::PathBuf::from),
             device_name: config.device_name,
-            advert_ttl_secs: 3600,
+            advert_ttl_secs: noscat_core::advert::ADVERT_TTL_SECS,
             max_incoming_bytes: None,
         })
         .map_err(NoscatError::fail)?;

@@ -102,7 +102,7 @@ impl Default for ClientConfig {
             listen: None,
             mesh_dir: None,
             device_name: None,
-            advert_ttl_secs: 3600,
+            advert_ttl_secs: noscat_core::advert::ADVERT_TTL_SECS,
             max_incoming_bytes: None,
         }
     }
@@ -348,12 +348,21 @@ impl Inner {
     /// when the directory cannot be read.
     fn fresh_psk(&self) -> Option<[u8; 32]> {
         match &self.mesh_dir {
-            Some(dir) => match noscat_core::mesh::Device::open(dir)
-                .and_then(|d| d.tunnel_psk())
-            {
-                Ok(psk) => <[u8; 32]>::try_from(psk).ok().or(self.psk),
-                Err(_) => self.psk,
-            },
+            Some(dir) => {
+                // Opening the MLS group (SQLite + crypto export) is
+                // blocking work; keep it off the async workers. A failure
+                // falls back to the session's PSK: a stale epoch beats no
+                // tunnel.
+                let dir = dir.clone();
+                let fallback = self.psk;
+                tokio::task::block_in_place(|| {
+                    noscat_core::mesh::Device::open(&dir)
+                        .and_then(|d| d.tunnel_psk())
+                        .ok()
+                        .and_then(|psk| <[u8; 32]>::try_from(psk).ok())
+                        .or(fallback)
+                })
+            }
             None => self.psk,
         }
     }
@@ -408,6 +417,14 @@ impl Clone for Client {
             events_rx: None,
         }
     }
+}
+
+/// Join two spliced copy tasks: surface whichever task's own io error
+/// (a JoinError means the runtime is dying - same treatment).
+async fn flatten_join<T: Send + 'static>(
+    h: tokio::task::JoinHandle<io::Result<T>>,
+) -> io::Result<T> {
+    h.await.map_err(|e| io::Error::other(e))?
 }
 
 impl Client {
@@ -526,7 +543,9 @@ impl Client {
                 relays: config.relays.unwrap_or_else(|| {
                     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
                 }),
-                listen: config.listen.unwrap_or_else(|| "0.0.0.0:41641".parse().unwrap()),
+                listen: config.listen.unwrap_or_else(|| {
+                    std::net::SocketAddr::from(([0, 0, 0, 0], noscat_core::relay::DEFAULT_LISTEN_PORT))
+                }),
                 ttl: config.advert_ttl_secs,
                 max_incoming: config
                     .max_incoming_bytes
@@ -830,7 +849,7 @@ impl Client {
                                 tokio::io::copy(&mut srd, &mut cwr).await?;
                                 cwr.shutdown().await
                             });
-                            tokio::try_join!(flatten(up), flatten(down)).map(|_| ())
+                            tokio::try_join!(flatten_join(up), flatten_join(down)).map(|_| ())
                         }
                         Err(e) => Err(io::Error::other(format!("cannot reach tcp/{to}: {e}"))),
                     };
@@ -839,12 +858,6 @@ impl Client {
                         error: res.as_ref().err().map(|e| e.to_string()),
                     });
                 });
-            }
-
-            async fn flatten<T: Send + 'static>(
-                h: tokio::task::JoinHandle<io::Result<T>>,
-            ) -> io::Result<T> {
-                h.await.map_err(|e| io::Error::other(e))?
             }
         });
         Ok(addr)
@@ -989,18 +1002,12 @@ impl Client {
                         tokio::io::copy(&mut srd, &mut cwr).await?;
                         cwr.shutdown().await
                     });
-                    let res = tokio::try_join!(flatten(up), flatten(down));
+                    let res = tokio::try_join!(flatten_join(up), flatten_join(down));
                     inner.emit(Event::TunnelClosed {
                         peer: target,
                         error: res.as_ref().err().map(|e| e.to_string()),
                     });
                 });
-            }
-
-            async fn flatten<T: Send + 'static>(
-                h: tokio::task::JoinHandle<io::Result<T>>,
-            ) -> io::Result<T> {
-                h.await.map_err(|e| io::Error::other(e))?
             }
         });
         id

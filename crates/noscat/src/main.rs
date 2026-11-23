@@ -31,7 +31,7 @@ enum Command {
         #[arg(long = "endpoint")]
         endpoints: Vec<String>,
         /// Advert lifetime in seconds.
-        #[arg(long, default_value_t = 3600)]
+        #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
     },
     /// Watch relays for noscat adverts from any node.
@@ -42,14 +42,14 @@ enum Command {
     },
     /// Serve a tunnel: advertise a UDP endpoint, bridge the first peer to stdio.
     Serve {
-        /// UDP address to listen on, e.g. `0.0.0.0:41641`.
-        #[arg(long, default_value = "0.0.0.0:41641")]
+        /// UDP address to listen on.
+        #[arg(long, default_value_t = format!("0.0.0.0:{}", noscat_core::relay::DEFAULT_LISTEN_PORT))]
         listen: String,
         /// Relay URLs to advertise on (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
         /// Advert lifetime in seconds.
-        #[arg(long, default_value_t = 3600)]
+        #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
@@ -101,7 +101,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         out: std::path::PathBuf,
         /// UDP address to listen on.
-        #[arg(long, default_value = "0.0.0.0:41641")]
+        #[arg(long, default_value_t = format!("0.0.0.0:{}", noscat_core::relay::DEFAULT_LISTEN_PORT))]
         listen: String,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
@@ -114,7 +114,7 @@ enum Command {
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
         /// Advert lifetime in seconds.
-        #[arg(long, default_value_t = 3600)]
+        #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
     },
     /// Expose a local TCP service to mesh peers over tunnels.
@@ -130,8 +130,8 @@ enum Command {
         /// Bridge raw inbound tunnels to this local service, e.g. 127.0.0.1:22.
         #[arg(long)]
         to: Option<std::net::SocketAddr>,
-        /// UDP address to listen on [default: 0.0.0.0:41641]
-        #[arg(long, default_value = "0.0.0.0:41641")]
+        /// UDP address to listen on.
+        #[arg(long, default_value_t = format!("0.0.0.0:{}", noscat_core::relay::DEFAULT_LISTEN_PORT))]
         listen: String,
         /// Relay URLs (repeatable; defaults to the public set)
         #[arg(long)]
@@ -143,8 +143,8 @@ enum Command {
         /// [default: ~/.noscat/device].
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
-        /// Advert lifetime in seconds [default: 3600]
-        #[arg(long, default_value = "3600")]
+        /// Advert lifetime in seconds.
+        #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
     },
     Expose {
@@ -152,7 +152,7 @@ enum Command {
         #[arg(long)]
         to: String,
         /// UDP address to listen on.
-        #[arg(long, default_value = "0.0.0.0:41641")]
+        #[arg(long, default_value_t = format!("0.0.0.0:{}", noscat_core::relay::DEFAULT_LISTEN_PORT))]
         listen: String,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
@@ -165,7 +165,7 @@ enum Command {
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
         /// Advert lifetime in seconds.
-        #[arg(long, default_value_t = 3600)]
+        #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
     },
     /// Forward a local TCP port over tunnels to a peer by npub.
@@ -471,16 +471,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The default mesh device directory, next to the shared identity.
-    // `--mesh` with no value (empty path) also resolves to this.
-    fn default_device_dir() -> std::path::PathBuf {
-        // unix shells set HOME; Windows-native environments set USERPROFILE.
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map(|h| std::path::PathBuf::from(h).join(".noscat").join("device"))
-            .unwrap_or_else(|_| std::path::PathBuf::from(".noscat").join("device"))
-    }
-
     // The mesh's epoch PSK, if the operator scoped the tunnel to a group.
     fn mesh_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
         let device = noscat_core::mesh::Device::open(dir)?;
@@ -772,26 +762,44 @@ fn main() -> anyhow::Result<()> {
                 Ok(rt) => rt,
                 Err(_) => return,
             };
-            for m in members {
-                use nostr::nips::nip19::ToBech32;
-                let Ok(npub_hex) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
+            // All members' adverts are fetched concurrently: an offline
+            // member costs its FETCH_WAIT, not the roster's total.
+            use nostr::nips::nip19::ToBech32;
+            let fetched: Vec<(bool, String, Option<noscat_core::advert::Advert>)> = rt
+                .block_on(futures_util::future::join_all(members.into_iter().map(|m| {
+                    let relays = relays.clone();
+                    async move {
+                        let Ok(npub_hex) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
+                            return (m.is_owner, String::new(), None);
+                        };
+                        // to_bech32's error type is the never type: unwrappable.
+                        let npub = npub_hex.to_bech32().expect("bech32 of a parsed key");
+                        let advert = noscat_core::relay::fetch_advert_for(
+                            &relays,
+                            None,
+                            Some(npub_hex),
+                        )
+                        .await
+                        .ok()
+                        .flatten();
+                        (m.is_owner, npub, advert)
+                    }
+                })));
+            for (is_owner, npub, advert) in fetched {
+                if npub.is_empty() {
                     continue;
-                };
-                // to_bech32's error type is the never type: unwrappable.
-                let npub = npub_hex.to_bech32().expect("bech32 of a parsed key");
-                let advert = rt.block_on(noscat_core::relay::fetch_advert_for(
-                    &relays,
-                    None,
-                    Some(npub_hex),
-                ));
-                if let Ok(Some(a)) = advert {
-                    b.lock()
-                        .expect("peer book")
-                        .noise_to_npub
-                        .insert(hex::encode(a.noise_pub), npub.clone());
-                    b.lock().expect("peer book").roster.push((npub, m.is_owner, a.name));
-                } else {
-                    b.lock().expect("peer book").roster.push((npub, m.is_owner, None));
+                }
+                match advert {
+                    Some(a) => {
+                        b.lock()
+                            .expect("peer book")
+                            .noise_to_npub
+                            .insert(hex::encode(a.noise_pub), npub.clone());
+                        b.lock().expect("peer book").roster.push((npub, is_owner, a.name));
+                    }
+                    None => {
+                        b.lock().expect("peer book").roster.push((npub, is_owner, None));
+                    }
                 }
             }
         });
@@ -943,7 +951,25 @@ fn main() -> anyhow::Result<()> {
     // Print events in the background while the main thread runs a blocking
     // session (serve/pipe bridge stdio and cannot drain themselves). `peers`
     // decorates chat messages with roster identities when running as a node.
-    fn spawn_printer(
+    /// Pump events until the in-flight transfer ends: `TransferDone` returns,
+/// `TransferFailed` bails. Every event still goes through `print_event`
+/// first so progress lines render in order.
+fn wait_transfer(rx: std::sync::mpsc::Receiver<Event>) -> anyhow::Result<()> {
+    for ev in rx {
+        let failed = match &ev {
+            Event::TransferDone { .. } => return Ok(()),
+            Event::TransferFailed { error, .. } => Some(error.clone()),
+            _ => None,
+        };
+        print_event(ev, None);
+        if let Some(error) = failed {
+            anyhow::bail!("transfer failed: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn spawn_printer(
         rx: std::sync::mpsc::Receiver<Event>,
         peers: Option<std::sync::Arc<std::sync::Mutex<PeerBook>>>,
     ) {
@@ -1031,25 +1057,29 @@ fn main() -> anyhow::Result<()> {
             mesh,
         } => {
             let identity = identity_from_arg_or_env(identity);
-            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
+            let (client, rx) = make_client(
+                identity,
+                relays,
+                mesh,
+                None,
+                noscat_core::advert::ADVERT_TTL_SECS,
+                None,
+            )?;
             spawn_printer(rx, None);
             client.pipe_stdio(&target)?;
         }
         Command::Send { path, target, relays, identity, mesh } => {
             let identity = identity_from_arg_or_env(identity);
-            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
+            let (client, rx) = make_client(
+                identity,
+                relays,
+                mesh,
+                None,
+                noscat_core::advert::ADVERT_TTL_SECS,
+                None,
+            )?;
             client.send_file(path, &target);
-            // wait for the transfer's terminal event
-            for ev in rx {
-                match &ev {
-                    Event::TransferDone { .. } => break,
-                    Event::TransferFailed { error, .. } => {
-                        anyhow::bail!("transfer failed: {error}")
-                    }
-                    _ => {}
-                }
-                print_event(ev, None);
-            }
+            wait_transfer(rx)?;
         }
         Command::Receive { out, listen, relays, identity, mesh, ttl } => {
             let identity = identity
@@ -1064,16 +1094,7 @@ fn main() -> anyhow::Result<()> {
             // handshake, and without this the user stares at silence.
             print_event(Event::Listening { npub: client.npub().to_string(), addr: listen }, None);
             client.receive_file(out);
-            for ev in rx {
-                match &ev {
-                    Event::TransferDone { .. } => break,
-                    Event::TransferFailed { error, .. } => {
-                        anyhow::bail!("transfer failed: {error}")
-                    }
-                    _ => {}
-                }
-                print_event(ev, None);
-            }
+            wait_transfer(rx)?;
         }
         // --identity does not apply here: in mesh mode this command IS its
         // mesh device, so the identity comes from the device directory.
@@ -1139,7 +1160,14 @@ fn main() -> anyhow::Result<()> {
         Command::Forward { target, port, bind, relays, identity, mesh } => {
             let identity = identity_from_arg_or_env(identity);
             let local = std::net::SocketAddr::new(bind, port);
-            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
+            let (client, rx) = make_client(
+                identity,
+                relays,
+                mesh,
+                None,
+                noscat_core::advert::ADVERT_TTL_SECS,
+                None,
+            )?;
             let id = client.forward(&target, local);
             eprintln!("# 🐈 forward {id}: tcp/{local} over tunnels to {target}");
             for ev in rx {

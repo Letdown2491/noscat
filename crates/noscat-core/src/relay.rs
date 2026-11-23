@@ -31,6 +31,8 @@ const FETCH_WAIT: Duration = Duration::from_secs(15);
 /// A connected client over `relays` - the one place relay plumbing is set
 /// up. Callers that publish/fetch shut the client down when done; the
 /// long-lived `watch_*` streams just drop it.
+pub(crate) type RelayClient = Client;
+
 pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayError> {
     if relays.is_empty() {
         return Err(RelayError::NoRelays);
@@ -56,11 +58,20 @@ pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayErr
     Ok(client)
 }
 
+/// The default relay set as owned strings: for surfaces (FFI mesh helpers,
+/// CLI defaults) that resolve relays without a config in hand.
+pub fn default_relays() -> Vec<String> {
+    DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+}
+
+/// The default UDP port serve-side tunnels listen on (one place; the CLI
+/// defaults, the client's default listen addr, and the FFI agree on it).
+pub const DEFAULT_LISTEN_PORT: u16 = 41641;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("no relays configured")]
-    NoRelays,
-    #[error("timed out connecting to relays")]
+    NoRelays,    #[error("timed out connecting to relays")]
     ConnectTimeout,
     #[error(transparent)]
     Sdk(#[from] nostr_sdk::error::Error),
@@ -195,6 +206,11 @@ pub async fn fetch_advert_for(
     npub: Option<PublicKey>,
 ) -> Result<Option<Advert>, RelayError> {
     const ADVERT_CACHE_TTL: Duration = Duration::from_secs(30);
+    // A miss must expire faster than the dialer's retry cadence (5s): a
+    // miss cached for the full 30s answers every retry from the cache, so
+    // a dial against a peer whose advert just landed performs exactly one
+    // real query and then fails against our own memory of the miss.
+    const ADVERT_MISS_TTL: Duration = Duration::from_secs(4);
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<Advert>)>>,
     > = std::sync::OnceLock::new();
@@ -205,7 +221,12 @@ pub async fn fetch_advert_for(
         (None, None) => String::new(),
     };
     if let Some((at, advert)) = cache.lock().expect("advert cache").get(&cache_key) {
-        if at.elapsed() < ADVERT_CACHE_TTL {
+        let ttl = if advert.is_some() {
+            ADVERT_CACHE_TTL
+        } else {
+            ADVERT_MISS_TTL
+        };
+        if at.elapsed() < ttl {
             return Ok(advert.clone());
         }
     }

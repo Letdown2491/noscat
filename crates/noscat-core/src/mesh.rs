@@ -437,11 +437,13 @@ impl Device {
             }
             targets.push(PublicKey::from_slice(m.credential.serialized_content())?);
         }
-        self.send_gift_wrap(&invitee_payload, device, relays).await?;
+        // One relay session carries the whole fan-out: the invitee's
+        // combined payload plus the commit to every other member.
+        let mut items: Vec<(PublicKey, &str)> = vec![(device, invitee_payload.as_str())];
         for member in targets {
-            self.send_gift_wrap(&member_payload, member, relays).await?;
+            items.push((member, member_payload.as_str()));
         }
-        Ok(())
+        self.send_gift_waps(relays, &items).await
     }
 
     /// Remove a device (by npub) from the mesh: commit the Remove, deliver
@@ -474,10 +476,11 @@ impl Device {
             .filter(|m| m.credential.serialized_content() != self.identity.public_key().to_bytes())
             .map(|m| PublicKey::from_slice(m.credential.serialized_content()))
             .collect::<Result<_, _>>()?;
-        for member in remaining {
-            self.send_gift_wrap(&payload, member, relays).await?;
-        }
-        Ok(())
+        let items: Vec<(PublicKey, &str)> = remaining
+            .iter()
+            .map(|m| (*m, payload.as_str()))
+            .collect();
+        self.send_gift_waps(relays, &items).await
     }
 
     /// Receive gift-wrapped mesh messages for up to `wait` and merge any
@@ -590,31 +593,45 @@ impl Device {
     }
 
     /// Gift-wrap `payload` (NIP-59) to `to`.
-    async fn send_gift_wrap(
-        &self,
-        payload: &str,
-        to: PublicKey,
-        relays: &[String],
-    ) -> Result<(), MeshError> {
-        let rumor = UnsignedEvent::new(
-            self.identity.public_key(),
-            Timestamp::now(),
-            Kind::Custom(MESH_KIND),
-            [],
-            payload.to_string(),
-        );
-        let gift_wrap = GiftWrapBuilder::new(to, rumor)
-            .expiration(Duration::from_secs(7 * 24 * 3600))
-            .finalize(self.identity.keys())
-            .map_err(|e| MeshError::Nostr(e))?;
-
-        let client = crate::relay::connect_client(relays).await?;
-        client.send_event(&gift_wrap).await?;
-        client.shutdown().await;
-        Ok(())
+    /// Gift-wrap `payload` (NIP-59) to `to` over a shared relay session:
+    /// fan-out to several members opens ONE connection set, not one per
+    /// member (relay connects are the expensive, rate-limit-earning part).
+    /// Single-recipient sends are the `(to, payload)` list of length one.
+    async fn send_gift_waps(&self, relays: &[String], items: &[(PublicKey, &str)]) -> Result<(), MeshError> {
+        let mut client: Option<crate::relay::RelayClient> = None;
+        let mut last_err: Option<MeshError> = None;
+        for (to, payload) in items {
+            let rumor = UnsignedEvent::new(
+                self.identity.public_key(),
+                Timestamp::now(),
+                Kind::Custom(MESH_KIND),
+                [],
+                (*payload).to_string(),
+            );
+            let gift_wrap = GiftWrapBuilder::new(*to, rumor)
+                .expiration(Duration::from_secs(7 * 24 * 3600))
+                .finalize(self.identity.keys())
+                .map_err(|e| MeshError::Nostr(e))?;
+            // Connect lazily: a single-recipient send is the common case
+            // (sync_mesh commits go to N-1, invites to N).
+            if client.is_none() {
+                client = Some(crate::relay::connect_client(relays).await?);
+            }
+            let c = client.as_ref().expect("just connected");
+            if let Err(e) = c.send_event(&gift_wrap).await {
+                tracing::warn!(%to, %e, "gift wrap failed");
+                last_err = Some(MeshError::Sdk(e));
+            }
+        }
+        if let Some(c) = client.as_ref() {
+            c.shutdown().await;
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
-    /// Wait for a gift-wrapped mesh invitation and join it.
     /// Wait for a gift-wrapped invitation and join the mesh. Invitations
     /// from anyone else are ignored, and the group's own policy must name
     /// `expected_owner` as owner before the join is accepted: the phone

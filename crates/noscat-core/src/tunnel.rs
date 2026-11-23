@@ -338,14 +338,7 @@ async fn accept_handshake(
     // Resolve it in the background: a relay round-trip can burn the whole
     // FETCH_WAIT, and the data path must never wait on a display name.
     let who = format!("noise key {}", hex::encode(initiator_noise));
-    let lookup_relays: Vec<String> = relays.to_vec();
-    let fallback = who.clone();
-    let who_lookup = tokio::spawn(async move {
-        match crate::relay::fetch_advert_for(&lookup_relays, Some(initiator_noise), None).await {
-            Ok(Some(advert)) => advert.npub.to_string(),
-            _ => fallback,
-        }
-    });
+    let who_lookup = spawn_who_lookup(relays, initiator_noise, who.clone());
 
     Ok(Session {
         socket: socket.clone(),
@@ -354,6 +347,24 @@ async fn accept_handshake(
         who,
         who_lookup: Some(who_lookup),
         tasks: Vec::new(),
+    })
+}
+
+/// Resolve the display name for a Noise static key in the background: a
+/// relay round-trip can burn the whole FETCH_WAIT, and the data path must
+/// never wait on a name. The task resolves to the npub from the key's
+/// signed advert, or `fallback` when there is none (or the lookup fails).
+fn spawn_who_lookup(
+    relays: &[String],
+    noise_key: [u8; 32],
+    fallback: String,
+) -> tokio::task::JoinHandle<String> {
+    let relays = relays.to_vec();
+    tokio::spawn(async move {
+        match crate::relay::fetch_advert_for(&relays, Some(noise_key), None).await {
+            Ok(Some(advert)) => advert.npub.to_string(),
+            _ => fallback,
+        }
     })
 }
 
@@ -477,7 +488,9 @@ pub async fn dial_session(
     // within one ADVERT_WAIT budget: a fresh advert (the peer just started
     // serving) can take a few seconds to propagate, but a missing one fails
     // fast instead of burning minutes - each poll costs a relay subscribe
-    // wait, so the worst case is two misses before the budget trips.
+    // wait, so misses re-query at the retry cadence (the negative advert
+    // cache expires faster than that, so a peer whose advert lands
+    // mid-dial is still found).
     let advert = {
         let deadline = tokio::time::Instant::now() + ADVERT_WAIT;
         loop {
@@ -582,9 +595,20 @@ enum Datagrams<'a> {
     Channel(&'a mut mpsc::Receiver<Vec<u8>>),
 }
 
+/// One received tunnel datagram: either read into the pump's stack `wire`
+/// (exclusive-socket path) or moved through the router's channel
+/// (shared-socket path). The latter decrypts straight from the moved
+/// buffer: a bounce back through `wire` would be a full copy per datagram
+/// on the busiest path in the codebase.
+enum Ingress {
+    Wire(usize),
+    Moved(Vec<u8>),
+}
+
 impl Datagrams<'_> {
-    /// Next tunnel datagram, written into `wire`; `None` = the source closed.
-    async fn recv(&mut self, wire: &mut [u8]) -> Result<Option<usize>, TunnelError> {
+    /// Next tunnel datagram, either in `wire` (stack path) or moved
+    /// (`Channel` path); `None` = the source closed.
+    async fn recv(&mut self, wire: &mut [u8]) -> Result<Option<Ingress>, TunnelError> {
         match self {
             Datagrams::Socket(socket, peer) => loop {
                 let (n, from) = socket.recv_from(wire).await?;
@@ -592,15 +616,11 @@ impl Datagrams<'_> {
                     tracing::debug!(%from, "ignoring packet from stranger");
                     continue;
                 }
-                return Ok(Some(n));
+                return Ok(Some(Ingress::Wire(n)));
             },
             Datagrams::Channel(rx) => match rx.recv().await {
                 None => Ok(None),
-                Some(d) => {
-                    let n = d.len();
-                    wire[..n].copy_from_slice(&d);
-                    Ok(Some(n))
-                }
+                Some(d) => Ok(Some(Ingress::Moved(d))),
             },
         }
     }
@@ -651,11 +671,18 @@ where
                 }
             }
             r = datagrams.recv(&mut wire) => {
-                let n = match r? {
+                // The moved (routed) form decrypts in place - the datagram
+                // is never copied a second time before `read_message`.
+                let moved;
+                let buf: &[u8] = match r? {
                     None => return Ok(()), // source closed
-                    Some(n) => n,
+                    Some(Ingress::Wire(n)) => &wire[..n],
+                    Some(Ingress::Moved(d)) => {
+                        moved = d;
+                        &moved
+                    }
                 };
-                match session.read_message(&wire[..n], &mut plain) {
+                match session.read_message(buf, &mut plain) {
                     Ok(0) => {
                         // Peer FIN: propagate the half-close downstream so
                         // TCP-backed transports see EOF properly.
@@ -777,77 +804,6 @@ impl AsyncWrite for TunnelStream {
     }
 }
 
-/// Serve one tunnel and bridge stdio over it.
-pub async fn serve(
-    identity: &Identity,
-    listen: SocketAddr,
-    relays: &[String],
-    ttl_secs: u64,
-    psk: Option<&[u8; 32]>,
-    name: Option<&str>,
-) -> Result<String, TunnelError> {
-    let session = serve_session(identity, listen, relays, ttl_secs, psk, name).await?;
-    let (socket, peer, hs, who) = session.finish().await;
-    eprintln!("# 🔗 tunnel up with {who} - bridging stdio");
-    let mut src = Datagrams::Socket(socket.clone(), peer);
-    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await?;
-    Ok(who)
-}
-
-/// Dial a peer by npub and bridge stdio over the tunnel.
-pub async fn pipe(
-    identity: &Identity,
-    target: &str,
-    relays: &[String],
-    psk: Option<&[u8; 32]>,
-) -> Result<(), TunnelError> {
-    let session = dial_session(identity, target, relays, psk).await?;
-    let (socket, peer, hs, _) = session.finish().await;
-    eprintln!("# 🔗 tunnel up with {target} at udp/{peer} - bridging stdio");
-    let mut src = Datagrams::Socket(socket.clone(), peer);
-    pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await
-}
-
-/// Expose a local TCP service to mesh peers: each tunnel is spliced to a
-/// fresh connection to `to`. Runs forever; with a `psk`, only mesh
-/// members can connect at all.
-///
-/// Concurrent sessions are first-class: one shared UDP socket on `listen`
-/// carries every session, with a router demuxing datagrams by source address
-/// (see [`TunnelListener`]). Each accepted tunnel is bridged to `to` on its
-/// own task, and the accept loop immediately waits for the next peer.
-pub async fn expose_tcp(
-    identity: &Identity,
-    listen: SocketAddr,
-    to: SocketAddr,
-    relays: &[String],
-    ttl_secs: u64,
-    psk: Option<&[u8; 32]>,
-    name: Option<&str>,
-) -> Result<(), TunnelError> {
-    let mut listener = bind_listener(identity, listen, relays, ttl_secs, psk, name).await?;
-    loop {
-        let session = listener.accept().await?;
-        let (socket, peer, hs, who, mut datagrams) = session.finish().await;
-        eprintln!("# 🔗 tunnel up with {who} - forwarding to tcp/{to}");
-        let sessions = listener.sessions.clone();
-        tokio::spawn(async move {
-            let mut src = Datagrams::Channel(&mut datagrams);
-            match tokio::net::TcpStream::connect(to).await {
-                Ok(conn) => {
-                    let (rd, wr) = tokio::io::split(conn);
-                    if let Err(e) = pump(rd, wr, socket, peer, hs, &mut src).await {
-                        tracing::warn!(%e, "tunnel session ended with error");
-                    }
-                }
-                Err(e) => tracing::warn!("cannot reach local service tcp/{to}: {e}"),
-            }
-            sessions.lock().expect("sessions lock").remove(&peer);
-            eprintln!("# 🔁 session with {who} closed");
-        });
-    }
-}
-
 /// A long-lived listener for many concurrent sessions: one UDP socket on the
 /// listen port, one advert, and a router task that owns the socket's receive
 /// side and demuxes every datagram by source address. Established sessions
@@ -887,8 +843,8 @@ impl TunnelListener {
 }
 
 /// Bind the shared listen socket, publish one advert, and start the router,
-/// the shared traversal watcher, and the punch loop. Session-level primitive
-/// under [`expose_tcp`]; pair with [`TunnelListener::accept`].
+/// the shared traversal watcher, and the punch loop. Session-level
+/// primitive; pair with [`TunnelListener::accept`].
 pub async fn bind_listener(
     identity: &Identity,
     listen: SocketAddr,
@@ -1248,16 +1204,7 @@ impl TunnelListener {
                 .map_err(|_| TunnelError::NoHandshake)?;
             let session = noise::into_transport(hs)?;
             let who = format!("noise key {}", hex::encode(initiator_noise));
-            let lookup_relays = self.relays.clone();
-            let fallback = who.clone();
-            let who_lookup = tokio::spawn(async move {
-                match crate::relay::fetch_advert_for(&lookup_relays, Some(initiator_noise), None)
-                    .await
-                {
-                    Ok(Some(advert)) => advert.npub.to_string(),
-                    _ => fallback,
-                }
-            });
+            let who_lookup = spawn_who_lookup(&self.relays, initiator_noise, who.clone());
 
             let (data_tx, data_rx) = mpsc::channel(SESSION_QUEUE);
             self.sessions.lock().expect("sessions lock").insert(from, data_tx);
@@ -1270,48 +1217,6 @@ impl TunnelListener {
                 who_lookup: Some(who_lookup),
             });
         }
-    }
-}
-
-/// Forward a local TCP port over tunnels to `target`: every connection to
-/// the local listener dials `target` (a fresh tunnel per connection) and
-/// splices the traffic through, encrypted. With a `psk`, only mesh
-/// members of the same group can be dialed.
-///
-/// The listener binds `bind` - loopback unless the caller says otherwise:
-/// anyone who can reach the port can make this process dial `target`, so
-/// exposing it beyond the local machine should be a deliberate choice.
-pub async fn forward_tcp(
-    identity: &Identity,
-    target: &str,
-    bind: SocketAddr,
-    relays: &[String],
-    psk: Option<&[u8; 32]>,
-) -> Result<(), TunnelError> {
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("# 🐈 forwarding tcp/{bind} over tunnels to {target}");
-    let psk = psk.copied();
-    loop {
-        let (conn, client) = listener.accept().await?;
-        eprintln!("# 🔈 connection from {client} - dialing {target}…");
-        // Each connection gets its own tunnel on its own task; the accept
-        // loop is free for the next one.
-        let identity = identity.clone();
-        let target = target.to_string();
-        let relays = relays.to_vec();
-        tokio::spawn(async move {
-            match dial_session(&identity, &target, &relays, psk.as_ref()).await {
-                Ok(session) => {
-                    let (socket, peer, hs, _) = session.finish().await;
-                    let (rd, wr) = tokio::io::split(conn);
-                    let mut src = Datagrams::Socket(socket.clone(), peer);
-                    if let Err(e) = pump(rd, wr, socket, peer, hs, &mut src).await {
-                        tracing::warn!(%e, "tunnel session ended with error");
-                    }
-                }
-                Err(e) => eprintln!("# ⚠️  cannot establish tunnel for {client}: {e}"),
-            }
-        });
     }
 }
 
@@ -1556,20 +1461,10 @@ async fn stream_chunks(
     let mut base: u32 = first; // next seq the receiver wants
     let mut next: u32 = first; // next unsent chunk
     let mut sweep_round: usize = 0;
-
-    async fn read_chunk_at(
-        file: &mut tokio::fs::File,
-        seq: u32,
-        len: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, TunnelError> {
-        let offset = seq as u64 * CHUNK as u64;
-        let want = CHUNK.min((len - offset) as usize);
-        file.seek(SeekFrom::Start(offset)).await?;
-        Ok(file.read(&mut buf[..want]).await?)
-    }
-
-    loop {
+    // The file reads are strictly sequential (chunks go out in order; a
+    // resume seeks once), so the per-chunk seek is a syscall for nothing:
+    // track the position and only seek when it differs.
+    let mut pos = u64::MAX;    loop {
         if base >= total {
             return Ok(());
         }
@@ -1581,7 +1476,14 @@ async fn stream_chunks(
         }
         // Fill the window with fresh frames.
         while next < total && next - base < WINDOW {
-            let m = read_chunk_at(file, next, len, &mut buf).await?;
+            let offset = next as u64 * CHUNK as u64;
+            let want = CHUNK.min((len - offset) as usize);
+            if pos != offset {
+                file.seek(SeekFrom::Start(offset)).await?;
+                pos = offset;
+            }
+            let m = file.read_exact(&mut buf[..want]).await?;
+            pos += m as u64;
             let ct = emit_chunk(socket, peer, hs, next, &buf[..m], &mut wire).await?;
             frames.push_back((ct, Instant::now(), 0));
             next += 1;

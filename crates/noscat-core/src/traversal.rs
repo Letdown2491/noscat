@@ -82,16 +82,22 @@ pub async fn send_traversal(
 /// more is flood, and every entry earns punch traffic for its lifetime.
 pub const MAX_ENDPOINTS: usize = 16;
 
-/// Watch for gift-wrapped traversal invitations (kind 30445 rumors:
-/// candidate lists).
-///
-/// For each valid one, delivers (sender's npub, payload) on `tx` and keeps
-/// running until the channel closes or the client shuts down.
-pub async fn watch_traversal(
+/// Watch for gift-wrapped rumors of `kind` addressed to `identity` and
+/// deliver (sender, rumor content) on `tx` - the shared body of traversal
+/// signaling and mesh message intake. `parse` turns a rumor into a
+/// deliverable (or `None` to drop it); the watcher runs until the channel
+/// closes or the relay stream ends.
+async fn watch_gift_wraps<T, F>(
     identity: Identity,
     relays: Vec<String>,
-    tx: mpsc::Sender<(PublicKey, TraversalPayload)>,
-) -> Result<(), TraversalError> {
+    kind: u16,
+    mut parse: F,
+    tx: mpsc::Sender<(PublicKey, T)>,
+) -> Result<(), TraversalError>
+where
+    F: FnMut(PublicKey, String) -> Option<T>,
+    T: Send + 'static,
+{
     let client = crate::relay::connect_client(&relays).await?;
     let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
     client.subscribe(filter).await?;
@@ -105,22 +111,41 @@ pub async fn watch_traversal(
             tracing::debug!("ignoring undecryptable gift wrap");
             continue;
         };
-        if u16::from(unwrapped.rumor.kind) != TRAVERSAL_KIND {
+        if u16::from(unwrapped.rumor.kind) != kind {
             continue;
         }
-        let Ok(payload) = serde_json::from_str::<TraversalPayload>(&unwrapped.rumor.content) else {
-            tracing::debug!("gift wrap rumor is not a traversal payload");
+        let Some(item) = parse(unwrapped.sender, unwrapped.rumor.content) else {
             continue;
         };
-        if payload.endpoints.len() > MAX_ENDPOINTS {
-            tracing::warn!(%unwrapped.sender, "traversal payload with excessive candidates; dropping");
-            continue;
-        }
-        if tx.send((unwrapped.sender, payload)).await.is_err() {
+        if tx.send((unwrapped.sender, item)).await.is_err() {
             break; // consumer gone; shut down
         }
     }
     Ok(())
+}
+
+/// Watch for gift-wrapped traversal invitations (kind 30445 rumors:
+/// candidate lists).
+///
+/// For each valid one, delivers (sender's npub, payload) on `tx` and keeps
+/// running until the channel closes or the client shuts down.
+pub async fn watch_traversal(
+    identity: Identity,
+    relays: Vec<String>,
+    tx: mpsc::Sender<(PublicKey, TraversalPayload)>,
+) -> Result<(), TraversalError> {
+    watch_gift_wraps(identity, relays, TRAVERSAL_KIND, |sender, content| {
+        let Ok(payload) = serde_json::from_str::<TraversalPayload>(&content) else {
+            tracing::debug!("gift wrap rumor is not a traversal payload");
+            return None;
+        };
+        if payload.endpoints.len() > MAX_ENDPOINTS {
+            tracing::warn!(%sender, "traversal payload with excessive candidates; dropping");
+            return None;
+        }
+        Some(payload)
+    }, tx)
+    .await
 }
 
 /// Watch for gift-wrapped mesh messages (kind 30444 rumors: MLS commits
@@ -132,25 +157,5 @@ pub async fn watch_mesh(
 ) -> Result<(), TraversalError> {
     use crate::mesh::MESH_KIND;
 
-    let client = crate::relay::connect_client(&relays).await?;
-    let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
-    client.subscribe(filter).await?;
-
-    let mut notifications = client.notifications();
-    while let Some(notification) = notifications.next().await {
-        let ClientNotification::Event { event, .. } = notification else {
-            continue;
-        };
-        let Ok(unwrapped) = extract_rumor(identity.keys(), &event) else {
-            tracing::debug!("ignoring undecryptable gift wrap");
-            continue;
-        };
-        if u16::from(unwrapped.rumor.kind) != MESH_KIND {
-            continue;
-        }
-        if tx.send((unwrapped.sender, unwrapped.rumor.content)).await.is_err() {
-            break; // consumer gone; shut down
-        }
-    }
-    Ok(())
+    watch_gift_wraps(identity, relays, MESH_KIND, |_, content| Some(content), tx).await
 }
