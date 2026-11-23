@@ -146,6 +146,12 @@ pub enum Event {
         peer: String,
         path: PathBuf,
     },
+    /// A receive ended WITHOUT a verified whole file: the kept
+    /// `.noscat-part` is only a resume seed, not a usable file.
+    TransferPartial {
+        peer: String,
+        path: PathBuf,
+    },
     /// A file transfer is under way: `sent` of `total` bytes acked by the
     /// peer. Emitted per percent change, only for sends (the receiver has
     /// no ack stream of its own).
@@ -684,6 +690,10 @@ impl Client {
                     use tokio::io::AsyncReadExt as _;
                     let mut tag = [0u8; 1];
                     if stream.read_exact(&mut tag).await.is_err() {
+                        // The peer vanished before even tagging its stream:
+                        // TunnelUp already went out, so close it out or the
+                        // UI hangs on a peer that is never heard from again.
+                        inner.emit(Event::TunnelClosed { peer: who, error: None });
                         return;
                     }
                     if tag[0] == tunnel::TAG_HEADER {
@@ -691,8 +701,13 @@ impl Client {
                         // the same TAG_HEADER framing the sender wrote.
                         let mut prefixed = PrefixedStream::new(tag[0], stream);
                         match tunnel::receive_routed_file(&who, &mut prefixed, &out_dir, inner.max_incoming).await {
-                            Ok((who, path)) => {
+                            Ok((who, path, true)) => {
                                 inner.emit(Event::TransferDone { peer: who, path })
+                            }
+                            // A partial is NOT a done transfer: the part
+                            // file is a resume seed only.
+                            Ok((who, path, false)) => {
+                                inner.emit(Event::TransferPartial { peer: who, path })
                             }
                             Err(e) => inner.emit(Event::TransferFailed {
                                 peer: who,
@@ -1191,7 +1206,10 @@ impl Client {
             )
             .await
             {
-                Ok((who, path)) => inner.emit(Event::TransferDone { peer: who, path }),
+                Ok((who, path, true)) => inner.emit(Event::TransferDone { peer: who, path }),
+                Ok((who, path, false)) => {
+                    inner.emit(Event::TransferPartial { peer: who, path })
+                }
                 Err(e) => inner.emit(Event::TransferFailed {
                     peer: String::new(),
                     path: None,

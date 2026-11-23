@@ -62,6 +62,9 @@ pub enum Event {
     TunnelClosed { peer: String, error: Option<String> },
     /// A file transfer finished: the final verified path.
     TransferDone { peer: String, path: String },
+    /// A receive ended WITHOUT a verified whole file: the kept
+    /// `.noscat-part` path is a resume seed only, not a usable file.
+    TransferPartial { peer: String, path: String },
     /// A file transfer is under way (sends only, one event per percent).
     TransferProgress {
         peer: String,
@@ -380,6 +383,9 @@ impl NoscatClient {
                     }
                     noscat_client::Event::TransferDone { peer, path } => {
                         Event::TransferDone { peer, path: path.display().to_string() }
+                    }
+                    noscat_client::Event::TransferPartial { peer, path } => {
+                        Event::TransferPartial { peer, path: path.display().to_string() }
                     }
                     noscat_client::Event::TransferProgress { peer, path, sent, total } => {
                         Event::TransferProgress {

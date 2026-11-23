@@ -44,14 +44,16 @@ pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayErr
     for relay in &relays {
         client.add_relay(relay).await?;
     }
-    let _ = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT))
-        .await
-        .map_err(|_| {
-            for relay in &relays {
-                note_relay_failure(relay, "connect timeout");
-            }
-            RelayError::ConnectTimeout
-        })?;
+    let connected = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT)).await;
+    if connected.is_err() {
+        for relay in &relays {
+            note_relay_failure(relay, "connect timeout");
+        }
+        // A failed connect still holds half-dialed relay sockets: without
+        // shutdown they accumulate while the watcher retries.
+        client.shutdown().await;
+        return Err(RelayError::ConnectTimeout);
+    }
     for relay in &relays {
         note_relay_success(relay);
     }
@@ -120,7 +122,7 @@ fn is_rate_limit(text: &str) -> bool {
 /// cool-down: `BACKOFF_BASE` doubled per consecutive failure, capped.
 /// Non-rate-limit failures only count toward the consecutive streak.
 pub fn note_relay_failure(url: &str, err: &str) {
-    let mut health = relay_health().lock().expect("relay health");
+    let mut health = relay_health().lock().unwrap_or_else(|p| p.into_inner());
     let h = health.entry(url.to_string()).or_default();
     h.failures = h.failures.saturating_add(1);
     if is_rate_limit(err) {
@@ -134,7 +136,7 @@ pub fn note_relay_failure(url: &str, err: &str) {
 /// Record a relay working again: clears the failure streak and any
 /// cool-down.
 pub fn note_relay_success(url: &str) {
-    let mut health = relay_health().lock().expect("relay health");
+    let mut health = relay_health().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(h) = health.get_mut(url) {
         h.failures = 0;
         h.cooling_until = None;
@@ -147,7 +149,7 @@ pub fn note_relay_success(url: &str) {
 /// going dark; the worst it does is hit a 429 again).
 pub fn healthy_relays(relays: &[String]) -> Vec<String> {
     let now = std::time::Instant::now();
-    let health = relay_health().lock().expect("relay health");
+    let health = relay_health().lock().unwrap_or_else(|p| p.into_inner());
     let usable: Vec<String> = relays
         .iter()
         .filter(|url| {
@@ -184,7 +186,9 @@ pub async fn publish_advert(
         Advert::event(identity, endpoints, noise_pub, name, ttl_secs, Timestamp::now())?;
 
     let client = connect_client(relays).await?;
-    let output = client.send_event(&event).await?;
+    let output = client.send_event(&event).await;
+    client.shutdown().await;
+    let output = output?;
     for (url, status) in &output.success {
         tracing::info!(%url, ?status, "advert published");
     }
@@ -224,7 +228,7 @@ pub async fn fetch_advert_for(
         (_, Some(p)) => format!("n:{p}"),
         (None, None) => String::new(),
     };
-    if let Some((at, advert)) = cache.lock().expect("advert cache").get(&cache_key) {
+    if let Some((at, advert)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&cache_key) {
         let ttl = if advert.is_some() {
             ADVERT_CACHE_TTL
         } else {
@@ -243,7 +247,13 @@ pub async fn fetch_advert_for(
     }
 
     let client = connect_client(relays).await?;
-    client.subscribe(filter).await?;
+    // Always disconnect, failures included: the client holds relay
+    // websockets that only shutdown() releases.
+    let subscribed = client.subscribe(filter).await;
+    if let Err(e) = subscribed {
+        client.shutdown().await;
+        return Err(e.into());
+    }
 
     let mut notifications = client.notifications();
     let found = timeout(
@@ -302,7 +312,11 @@ pub async fn fetch_key_package(
         .author(device);
 
     let client = connect_client(relays).await?;
-    client.subscribe(filter).await?;
+    let subscribed = client.subscribe(filter).await;
+    if let Err(e) = subscribed {
+        client.shutdown().await;
+        return Err(e.into());
+    }
 
     let mut notifications = client.notifications();
     let found = timeout(
@@ -334,7 +348,11 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
     let filter = Filter::new()
         .kind(Kind::Custom(ADVERT_KIND))
         .identifier(ADVERT_IDENTIFIER);
-    client.subscribe(filter).await?;
+    let subscribed = client.subscribe(filter).await;
+    if let Err(e) = subscribed {
+        client.shutdown().await;
+        return Err(e.into());
+    }
 
     let mut notifications = client.notifications();
     while let Some(notification) = notifications.next().await {
@@ -351,6 +369,7 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
             }
         }
     }
+    client.shutdown().await;
     Ok(())
 }
 
@@ -371,7 +390,11 @@ pub async fn watch_key_packages(
         .kind(Kind::Custom(KEY_PACKAGE_KIND))
         .identifier(KEY_PACKAGE_IDENTIFIER)
         .pubkey(target);
-    client.subscribe(filter).await?;
+    let subscribed = client.subscribe(filter).await;
+    if let Err(e) = subscribed {
+        client.shutdown().await;
+        return Err(e.into());
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
@@ -380,9 +403,14 @@ pub async fn watch_key_packages(
             if let ClientNotification::Event { event, .. } = notification {
                 // Bounded channel: a slow confirmer drops duplicates rather
                 // than buffering unbounded; the phone republishes on retry.
-                let _ = tx.try_send(event.pubkey);
+                // Receiver gone: end the watch (the relay client shuts down
+                // with it, via the take+shutdown below).
+                if tx.try_send(event.pubkey).is_err() {
+                    break;
+                }
             }
         }
+        client.shutdown().await;
     });
     Ok(rx)
 }
@@ -410,7 +438,7 @@ impl Presence {
     /// process. Entries older than the advert TTL already read as
     /// offline - expired ones are dropped; past that, the oldest evicts.
     pub fn note_at(&self, npub: &str, at: std::time::Instant) {
-        let mut map = self.last_seen.lock().expect("presence map");
+        let mut map = self.last_seen.lock().unwrap_or_else(|p| p.into_inner());
         if !map.contains_key(npub) && map.len() >= PRESENCE_CAP {
             let ttl = std::time::Duration::from_secs(crate::advert::ADVERT_TTL_SECS as u64);
             map.retain(|_, t| t.elapsed() < ttl);

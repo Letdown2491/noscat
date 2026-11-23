@@ -229,7 +229,7 @@ async fn punch_loop(
     punch_now: Arc<tokio::sync::Notify>,
 ) {
     loop {
-        let targets = candidates.lock().expect("candidates lock").clone();
+        let targets = candidates.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for addr in targets {
             let _ = socket.send_to(PUNCH, addr).await;
         }
@@ -434,7 +434,7 @@ pub async fn serve_session(
             // of distinct keypairs cannot grow it without end.
             last_replied.retain(|_, at| at.elapsed() < TRAVERSAL_REPLY_EVERY);
             last_replied.insert(sender, std::time::Instant::now());
-            *reply_candidates.lock().expect("candidates lock") =
+            *reply_candidates.lock().unwrap_or_else(|p| p.into_inner()) =
                 parse_endpoints(&payload.endpoints);
             // Punch toward the new candidates immediately: behind a
             // default-deny firewall the peer's packets may not open our
@@ -984,7 +984,7 @@ pub async fn bind_listener(
             let eps = parse_endpoints(&payload.endpoints);
             tracing::info!(%sender, ?eps, "traversal request received");
             {
-                let mut replied = c_last_replied.lock().expect("replied lock");
+                let mut replied = c_last_replied.lock().unwrap_or_else(|p| p.into_inner());
                 if replied
                     .get(&sender)
                     .is_some_and(|at| at.elapsed() < TRAVERSAL_REPLY_EVERY)
@@ -997,7 +997,7 @@ pub async fn bind_listener(
                 replied.insert(sender, std::time::Instant::now());
             }
             {
-                let mut map = c_candidates.lock().expect("candidates lock");
+                let mut map = c_candidates.lock().unwrap_or_else(|p| p.into_inner());
                 // Flood guard: only addresses that are genuinely new count
                 // against the cap - re-sending the same request cannot
                 // smuggle fresh addresses past a full table.
@@ -1038,8 +1038,8 @@ pub async fn bind_listener(
         loop {
             let targets: Vec<SocketAddr> = {
                 let now = std::time::Instant::now();
-                let established = p_sessions.lock().expect("sessions lock");
-                let mut map = candidates.lock().expect("candidates lock");
+                let established = p_sessions.lock().unwrap_or_else(|p| p.into_inner());
+                let mut map = candidates.lock().unwrap_or_else(|p| p.into_inner());
                 map.retain(|_, seen| now.duration_since(*seen) < CANDIDATE_TTL);
                 map.keys()
                     .filter(|a| !established.contains_key(*a))
@@ -1085,7 +1085,7 @@ fn route_datagram(
     accept: &mpsc::Sender<(SocketAddr, Vec<u8>)>,
 ) {
     {
-        let mut map = sessions.lock().expect("sessions lock");
+        let mut map = sessions.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tx) = map.get(&from) {
             if tx.try_send(datagram.to_vec()).is_err() {
                 // Queue full (peer stalled) or already closed: end the
@@ -1096,7 +1096,7 @@ fn route_datagram(
             return;
         }
     }
-    if let Some(tx) = handshakes.lock().expect("handshakes lock").get(&from) {
+    if let Some(tx) = handshakes.lock().unwrap_or_else(|p| p.into_inner()).get(&from) {
         let _ = tx.try_send(datagram.to_vec());
         return;
     }
@@ -1158,18 +1158,28 @@ impl TunnelListener {
             // members are added or removed, and a node that was already
             // serving must not keep rejecting peers with a stale one.
             let psk = match &self.mesh_dir {
-                Some(dir) => match crate::mesh::Device::open(dir)
-                    .and_then(|d| d.tunnel_psk())
-                {
-                    Ok(psk) => Some(
-                        <[u8; 32]>::try_from(psk)
-                            .map_err(|_| TunnelError::Io(std::io::Error::other("bad PSK length")))?,
-                    ),
-                    Err(e) => {
-                        tracing::warn!("mesh PSK reload failed: {e}; using the last known");
-                        self.psk
+                Some(dir) => {
+                    // Opening the MLS group (SQLite open + migrations +
+                    // crypto export) is blocking work: keep it off the
+                    // async workers (a burst of dialers would otherwise
+                    // stall every session's msg2). Same as the dial side's
+                    // fresh_psk; a failure falls back to the last PSK -
+                    // a stale epoch beats no tunnel.
+                    let dir = dir.clone();
+                    let fallback = self.psk;
+                    let reloaded = tokio::task::block_in_place(|| {
+                        crate::mesh::Device::open(&dir).and_then(|d| d.tunnel_psk())
+                    });
+                    match reloaded {
+                        Ok(psk) => Some(<[u8; 32]>::try_from(psk).map_err(|_| {
+                            TunnelError::Io(std::io::Error::other("bad PSK length"))
+                        })?),
+                        Err(e) => {
+                            tracing::warn!("mesh PSK reload failed: {e}; using the last known");
+                            fallback
+                        }
                     }
-                },
+                }
                 None => self.psk,
             };
             let mut hs = noise::responder(&self.noise_priv, psk.as_ref())?;
@@ -1180,18 +1190,18 @@ impl TunnelListener {
             // Register before msg2 goes out: the dialer's msg3 can only
             // follow it, and must land in our channel, not the accept queue.
             let (tx, mut rx) = mpsc::channel(HANDSHAKE_QUEUE);
-            self.handshakes.lock().expect("handshakes lock").insert(from, tx);
+            self.handshakes.lock().unwrap_or_else(|p| p.into_inner()).insert(from, tx);
             // Any failure from here on must free the handshakes entry, or
             // this source stays routed to a dead channel forever.
             let n = match hs.write_message(b"", &mut wire) {
                 Ok(n) => n,
                 Err(e) => {
-                    self.handshakes.lock().expect("handshakes lock").remove(&from);
+                    self.handshakes.lock().unwrap_or_else(|p| p.into_inner()).remove(&from);
                     return Err(e.into());
                 }
             };
             if let Err(e) = self.socket.send_to(&wire[..n], from).await {
-                self.handshakes.lock().expect("handshakes lock").remove(&from);
+                self.handshakes.lock().unwrap_or_else(|p| p.into_inner()).remove(&from);
                 return Err(e.into());
             }
 
@@ -1206,7 +1216,7 @@ impl TunnelListener {
                     },
                 }
             };
-            self.handshakes.lock().expect("handshakes lock").remove(&from);
+            self.handshakes.lock().unwrap_or_else(|p| p.into_inner()).remove(&from);
             if !ok {
                 continue; // dialer vanished mid-handshake; serve the next
             }
@@ -1221,7 +1231,7 @@ impl TunnelListener {
             let who_lookup = spawn_who_lookup(&self.relays, initiator_noise, who.clone());
 
             let (data_tx, data_rx) = mpsc::channel(SESSION_QUEUE);
-            self.sessions.lock().expect("sessions lock").insert(from, data_tx);
+            self.sessions.lock().unwrap_or_else(|p| p.into_inner()).insert(from, data_tx);
             return Ok(ListenerSession {
                 socket: self.socket.clone(),
                 peer: from,
@@ -1795,7 +1805,15 @@ pub async fn send_file(
             Ok(h.finalize().into())
         })
     };
-    let session = dial_session(identity, target, relays, psk).await?;
+    let session = match dial_session(identity, target, relays, psk).await {
+        Ok(s) => s,
+        // Dial failed: the whole-file hash would otherwise keep running
+        // detached on the blocking pool forever.
+        Err(e) => {
+            hash_task.abort();
+            return Err(e);
+        }
+    };
     let (socket, peer, mut hs, _) = session.finish().await;
     let file_sha = match hash_task.await {
         Ok(Ok(sha)) => sha,
@@ -1883,8 +1901,10 @@ async fn send_stream(
 
 /// Receive one file over a tunnel: serve until a peer completes the
 /// handshake, read the transfer header, and stream the bytes into
-/// `<out_dir>/<name>`. Resolves when the transfer completes, reporting
-/// (peer, path).
+/// `<out_dir>/<name>`. Resolves when the transfer ends, reporting
+/// (peer, path, complete): `complete` is false when the transfer ended
+/// without a verified whole-file hash - the partial is kept only for
+/// resume and must not be presented as a finished transfer.
 /// The receive-side disk cap: a header announcing more than this is
 /// refused before a byte is written. The wire ceiling (u32 chunks, ~5.4
 /// TiB) stays the protocol's limit; this bounds what an unattended
@@ -1902,7 +1922,7 @@ pub async fn receive_file(
     psk: Option<&[u8; 32]>,
     name: Option<&str>,
     max_bytes: u64,
-) -> Result<(String, PathBuf), TunnelError> {
+) -> Result<(String, PathBuf, bool), TunnelError> {
     let session = serve_session(identity, listen, relays, ttl_secs, psk, name).await?;
     let (socket, peer, mut hs, who) = session.finish().await;
     receive_stream(&who, &socket, peer, &mut hs, out_dir, max_bytes).await
@@ -1912,6 +1932,10 @@ pub async fn receive_file(
 /// (everything after `serve_session`): header, resume decision, chunk
 /// streaming, finalize. `max_bytes` refuses oversized headers before a
 /// byte is written (see [`MAX_INCOMING_BYTES`]).
+/// Returns `(who, final-or-partial path, complete)`: `complete` is false
+/// when the transfer ended without a verified whole-file hash (incomplete
+/// under a lossy link, or sha mismatch) - the caller MUST NOT present the
+/// path as a finished transfer; the partial is kept only for resume.
 async fn receive_stream(
     who: &str,
     socket: &UdpSocket,
@@ -1919,7 +1943,7 @@ async fn receive_stream(
     hs: &mut snow::TransportState,
     out_dir: &Path,
     max_bytes: u64,
-) -> Result<(String, PathBuf), TunnelError> {
+) -> Result<(String, PathBuf, bool), TunnelError> {
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
     let mut history: VecDeque<Vec<u8>> = VecDeque::new();
@@ -1973,7 +1997,8 @@ async fn receive_stream(
     use sha2::Digest as _;
     let mut resume_chunks = 0u32;
     let mut hasher = sha2::Sha256::new();
-    let saved_meta = std::fs::read(&meta_path)
+    let saved_meta = tokio::fs::read(&meta_path)
+        .await
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
     if let Some(meta) = &saved_meta {
@@ -2040,7 +2065,7 @@ async fn receive_stream(
             "# ⚠️  transfer incomplete: {received}/{} bytes (path too lossy); partial kept for resume",
             header.len
         );
-        return Ok((who.to_string(), part_path));
+        return Ok((who.to_string(), part_path, false));
     }
 
     // Whole-file integrity: the streamed bytes plus (on resume) the seeded
@@ -2048,7 +2073,7 @@ async fn receive_stream(
     let digest = hex::encode(hasher.finalize());
     if digest != header.sha256 {
         eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
-        return Ok((who.to_string(), part_path));
+        return Ok((who.to_string(), part_path, false));
     }
     let final_path = unique_final_path(final_path).await;
     tokio::fs::rename(&part_path, &final_path).await?;
@@ -2086,7 +2111,7 @@ async fn receive_stream(
             }
         }
     }
-    Ok((who.to_string(), final_path))
+    Ok((who.to_string(), final_path, true))
 }
 
 
@@ -2103,7 +2128,7 @@ pub async fn receive_routed_file<S>(
     stream: &mut S,
     out_dir: &Path,
     max_bytes: u64,
-) -> Result<(String, PathBuf), TunnelError>
+) -> Result<(String, PathBuf, bool), TunnelError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -2170,7 +2195,8 @@ where
     // only when its recorded (len, sha256) matches this transfer's header.
     let mut resume_chunks = 0u32;
     let mut hasher = sha2::Sha256::new();
-    let saved_meta = std::fs::read(&meta_path)
+    let saved_meta = tokio::fs::read(&meta_path)
+        .await
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
     if let Some(meta) = &saved_meta {
@@ -2308,12 +2334,12 @@ where
             "# ⚠️  transfer incomplete: {received}/{} bytes; partial kept for resume",
             header.len
         );
-        return Ok((who.to_string(), part_path));
+        return Ok((who.to_string(), part_path, false));
     }
     let digest = hex::encode(hasher.finalize());
     if digest != header.sha256 {
         eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
-        return Ok((who.to_string(), part_path));
+        return Ok((who.to_string(), part_path, false));
     }
     let final_path = unique_final_path(final_path).await;
     tokio::fs::rename(&part_path, &final_path).await?;
@@ -2341,7 +2367,7 @@ where
             .await?;
         stream.flush().await?;
     }
-    Ok((who.to_string(), final_path))
+    Ok((who.to_string(), final_path, true))
 }
 
 #[cfg(test)]
@@ -2657,7 +2683,8 @@ mod tests {
             tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2, u64::MAX).await });
         let (sent, got) = tokio::join!(sender, receiver);
         sent.unwrap().unwrap();
-        let (_, path) = got.unwrap().unwrap();
+        let (_, path, complete) = got.unwrap().unwrap();
+        assert!(complete, "test transfer must complete");
         assert_eq!(path, out_dir.join(&name), "completed transfer must be at the final name");
         let finished = tokio::fs::read(&path).await.unwrap();
         assert_eq!(finished, data, "resumed file must be byte-identical");
@@ -2725,7 +2752,8 @@ mod tests {
             tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2, u64::MAX).await });
         let (sent, got) = tokio::join!(sender, receiver);
         sent.unwrap().unwrap();
-        let (_, path) = got.unwrap().unwrap();
+        let (_, path, complete) = got.unwrap().unwrap();
+        assert!(complete, "test transfer must complete");
         assert_eq!(path, out_dir.join(&name));
         let finished = tokio::fs::read(&path).await.unwrap();
         assert_eq!(finished, data, "a mismatched sidecar must trigger a fresh transfer");

@@ -455,8 +455,9 @@ impl Device {
             .map_err(|e| MeshError::Nostr(e))?;
 
         let client = crate::relay::connect_client(relays).await?;
-        client.send_event(&event).await?;
+        let sent = client.send_event(&event).await;
         client.shutdown().await;
+        sent?;
         Ok(())
     }
 
@@ -674,9 +675,36 @@ impl Device {
                     continue;
                 }
             };
-            merged += self.accept_mesh_message(msg.0, &payload);
+            // The merge is blocking work (MLS deserialize, SQLite
+            // load/merge, sidecar fs): keep it off the async workers -
+            // the shared FFI runtime runs every mesh call on one pool.
+            merged += tokio::task::block_in_place(|| {
+                self.accept_mesh_message(msg.0, &payload)
+            });
         }
-        watch.abort();
+        // Dropping rx (the only receiver) is the watcher's exit signal:
+        // it breaks its relay loop and shuts the client down cleanly -
+        // aborting it dropped the nostr client without shutdown() and
+        // leaked websockets on every sync.
+        drop(rx);
+        match watch.await {
+            // Clean exit (deadline hit, or no relay ever answered).
+            Ok(Ok(())) => {}
+            // A relay failure killed the live watch: this used to be
+            // swallowed, so a sync with dead relays reported success
+            // having merged only backfill. Say so.
+            Ok(Err(e)) => {
+                return Err(MeshError::Mls(format!(
+                    "mesh watch failed after merging {merged} commit(s): {e}"
+                )));
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                return Err(MeshError::Mls(format!(
+                    "mesh watch task panicked after merging {merged} commit(s): {e}"
+                )));
+            }
+        }
         Ok(merged)
     }
 
@@ -1016,14 +1044,39 @@ impl Device {
         // Gift wraps are signed, so the sender cannot be spoofed: an
         // invitation from anyone but the expected owner is dropped unheard.
         let (sender, payload) = loop {
-            let (sender, payload) = rx.recv().await.ok_or(MeshError::JoinTimeout)?;
-            if sender != expected_owner {
-                eprintln!("# ignoring an invitation from {sender} (not the expected owner)");
+            let msg = match rx.recv().await {
+                Some(msg) => msg,
+                None => {
+                    // The watcher is gone. A relay-connect failure inside
+                    // it used to surface as the misleading "timed out
+                    // waiting for a mesh invitation"; report the real
+                    // cause instead.
+                    match watch.await {
+                        Ok(Ok(())) => return Err(MeshError::JoinTimeout),
+                        Ok(Err(e)) => {
+                            return Err(MeshError::Mls(format!(
+                                "relay watch failed while waiting for an invitation: {e}"
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(MeshError::Mls(format!(
+                                "mesh watch task failed: {e}"
+                            )));
+                        }
+                    }
+                }
+            };
+            if msg.0 != expected_owner {
+                eprintln!("# ignoring an invitation from {} (not the expected owner)", msg.0);
                 continue;
             }
-            break (sender, payload);
+            break msg;
         };
-        watch.abort();
+        // Only the invitation was wanted: end the watch. Dropping rx (the
+        // only receiver) is its exit signal - it breaks the relay loop and
+        // shuts its client down cleanly, also when this future is dropped
+        // by a caller's timeout (aborting leaked websockets per retry).
+        drop(rx);
 
         let msg: MeshMessage = serde_json::from_str(&payload)?;
         eprintln!("# ✉️  invitation received from {sender} - joining…");

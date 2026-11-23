@@ -70,8 +70,9 @@ pub async fn send_traversal(
         .finalize(identity.keys())?;
 
     let client = crate::relay::connect_client(relays).await?;
-    client.send_event(&gift_wrap).await?;
+    let sent = client.send_event(&gift_wrap).await;
     client.shutdown().await;
+    sent?;
     Ok(())
 }
 
@@ -102,25 +103,39 @@ where
     let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
     client.subscribe(filter).await?;
 
-    let mut notifications = client.notifications();
-    while let Some(notification) = notifications.next().await {
-        let ClientNotification::Event { event, .. } = notification else {
-            continue;
-        };
-        let Ok(unwrapped) = extract_rumor(identity.keys(), &event) else {
-            tracing::debug!("ignoring undecryptable gift wrap");
-            continue;
-        };
-        if u16::from(unwrapped.rumor.kind) != kind {
-            continue;
-        }
-        let Some(item) = parse(unwrapped.sender, unwrapped.rumor.content) else {
-            continue;
-        };
-        if tx.send((unwrapped.sender, item)).await.is_err() {
-            break; // consumer gone; shut down
+    {
+        let mut notifications = client.notifications();
+        loop {
+            tokio::select! {
+                // The consumer vanishing (rx dropped: the sync/join future
+                // returned, hit its timeout, or the process moved on) ends
+                // the watch promptly, even while parked on the relay
+                // stream - aborting the task instead would drop the
+                // nostr client without shutdown() and leak the websockets.
+                _ = tx.closed() => break,
+                notification = notifications.next() => {
+                    let Some(notification) = notification else { break };
+                    let ClientNotification::Event { event, .. } = notification else {
+                        continue;
+                    };
+                    let Ok(unwrapped) = extract_rumor(identity.keys(), &event) else {
+                        tracing::debug!("ignoring undecryptable gift wrap");
+                        continue;
+                    };
+                    if u16::from(unwrapped.rumor.kind) != kind {
+                        continue;
+                    }
+                    let Some(item) = parse(unwrapped.sender, unwrapped.rumor.content) else {
+                        continue;
+                    };
+                    if tx.send((unwrapped.sender, item)).await.is_err() {
+                        break; // consumer gone; shut down
+                    }
+                }
+            }
         }
     }
+    client.shutdown().await;
     Ok(())
 }
 

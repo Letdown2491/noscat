@@ -857,6 +857,12 @@ fn main() -> anyhow::Result<()> {
             Event::Incoming { .. } => {}
             Event::TransferDone { .. } => {}
             Event::TransferProgress { .. } => {} // the CLI narrates completion only
+            Event::TransferPartial { path, .. } => {
+                eprintln!(
+                    "# ⚠️  transfer ended incomplete: partial kept at {} (resume seed only, not a usable file)",
+                    path.display()
+                )
+            }
             Event::ChatMessage { peer, text } => {
                 let label = peers
                     .and_then(|b| b.lock().ok().map(|b| b.label(&peer)))
@@ -976,6 +982,14 @@ fn wait_transfer(rx: std::sync::mpsc::Receiver<Event>) -> anyhow::Result<()> {
     for ev in rx {
         let failed = match &ev {
             Event::TransferDone { .. } => return Ok(()),
+            // A partial is not a failed transfer either, but the CLI's
+            // `receive` reports success only for a verified whole file.
+            Event::TransferPartial { path, .. } => {
+                anyhow::bail!(
+                    "transfer ended incomplete; partial kept at {} (resume seed only)",
+                    path.display()
+                );
+            }
             Event::TransferFailed { error, .. } => Some(error.clone()),
             _ => None,
         };
