@@ -790,6 +790,11 @@ pub struct TunnelListener {
     socket: Arc<UdpSocket>,
     noise_priv: [u8; 32],
     psk: Option<[u8; 32]>,
+    /// When set, the PSK is re-derived from this device directory on every
+    /// accepted handshake: a tailnet epoch change (a device joined or was
+    /// removed elsewhere) must take effect for the next peer, not after a
+    /// node restart. `psk` is the fallback for a failed re-derivation.
+    tailnet_dir: Option<std::path::PathBuf>,
     relays: Vec<String>,
     accept_rx: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     /// Established sessions: source addr -> that session's tunnel datagrams.
@@ -802,6 +807,12 @@ impl TunnelListener {
     /// The advertised UDP address the shared socket is bound on.
     pub fn local_addr(&self) -> SocketAddr {
         self.socket.local_addr().expect("bound socket")
+    }
+
+    /// Point the listener at a tailnet device directory: accepted handshakes
+    /// re-derive the epoch PSK from it (see the `tailnet_dir` field).
+    pub fn set_tailnet_dir(&mut self, dir: std::path::PathBuf) {
+        self.tailnet_dir = Some(dir);
     }
 }
 
@@ -927,6 +938,7 @@ pub async fn bind_listener(
         socket,
         noise_priv,
         psk: psk.cloned(),
+        tailnet_dir: None,
         relays: relays.to_vec(),
         accept_rx,
         sessions,
@@ -1020,7 +1032,25 @@ impl TunnelListener {
                 Some(m) => m,
                 None => return Err(TunnelError::NoHandshake),
             };
-            let mut hs = noise::responder(&self.noise_priv, self.psk.as_ref())?;
+            // Fresh PSK per handshake: the tailnet's epoch secret changes when
+            // members are added or removed, and a node that was already
+            // serving must not keep rejecting peers with a stale one.
+            let psk = match &self.tailnet_dir {
+                Some(dir) => match crate::tailnet::Device::open(dir)
+                    .and_then(|d| d.tunnel_psk())
+                {
+                    Ok(psk) => Some(
+                        <[u8; 32]>::try_from(psk)
+                            .map_err(|_| TunnelError::Io(std::io::Error::other("bad PSK length")))?,
+                    ),
+                    Err(e) => {
+                        tracing::warn!("tailnet PSK reload failed: {e}; using the last known");
+                        self.psk
+                    }
+                },
+                None => self.psk,
+            };
+            let mut hs = noise::responder(&self.noise_priv, psk.as_ref())?;
             if hs.read_message(&msg1, &mut plain).is_err() {
                 continue; // not a handshake opener for us
             }

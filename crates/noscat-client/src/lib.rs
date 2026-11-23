@@ -203,6 +203,10 @@ struct Inner {
     identity: Identity,
     npub: String,
     psk: Option<[u8; 32]>,
+    /// Tailnet device directory, when scoped to one. Read on every tunnel:
+    /// the epoch PSK changes when members join or are removed, and long
+    /// running peers must pick up the new secret without a restart.
+    tailnet_dir: Option<PathBuf>,
     relays: Vec<String>,
     listen: SocketAddr,
     ttl: u64,
@@ -215,10 +219,27 @@ impl Inner {
         let _ = self.events.send(ev);
     }
 
+    /// The tailnet PSK as of *now*: re-derived from the device directory so
+    /// an epoch change (a join or removal elsewhere) applies to the next
+    /// tunnel without a client restart. Falls back to the cached secret
+    /// when the directory cannot be read.
+    fn fresh_psk(&self) -> Option<[u8; 32]> {
+        match &self.tailnet_dir {
+            Some(dir) => match noscat_core::tailnet::Device::open(dir)
+                .and_then(|d| d.tunnel_psk())
+            {
+                Ok(psk) => <[u8; 32]>::try_from(psk).ok().or(self.psk),
+                Err(_) => self.psk,
+            },
+            None => self.psk,
+        }
+    }
+
     /// Dial a peer and finish the session into a byte stream (async half of
     /// [`Client::connect`], reused by the forward loop).
     async fn dial(&self, target: &str) -> Result<(TunnelStream, SocketAddr), tunnel::TunnelError> {
-        let session = tunnel::dial_session(&self.identity, target, &self.relays, self.psk.as_ref()).await?;
+        let psk = self.fresh_psk();
+        let session = tunnel::dial_session(&self.identity, target, &self.relays, psk.as_ref()).await?;
         let (socket, peer, hs, who) = session.finish().await;
         let stream = TunnelStream::new(socket, peer, hs, TunnelInlet::Exclusive, who);
         Ok((stream, peer))
@@ -351,6 +372,7 @@ impl Client {
                 npub: identity.npub(),
                 identity,
                 psk,
+                tailnet_dir: config.tailnet_dir,
                 relays: config.relays.unwrap_or_else(|| {
                     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
                 }),
@@ -393,13 +415,16 @@ impl Client {
     /// demuxing flows per peer).
     pub fn listen(&self) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let listener = inner.rt.block_on(tunnel::bind_listener(
+        let mut listener = inner.rt.block_on(tunnel::bind_listener(
             &inner.identity,
             inner.listen,
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
         ))?;
+        if let Some(dir) = &inner.tailnet_dir {
+            listener.set_tailnet_dir(dir.clone());
+        }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {
             npub: inner.identity.npub(),
@@ -437,13 +462,16 @@ impl Client {
     /// authorization for everything inbound.
     pub fn up(&self, out_dir: PathBuf, bridge_to: Option<SocketAddr>) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let listener = inner.rt.block_on(tunnel::bind_listener(
+        let mut listener = inner.rt.block_on(tunnel::bind_listener(
             &inner.identity,
             inner.listen,
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
         ))?;
+        if let Some(dir) = &inner.tailnet_dir {
+            listener.set_tailnet_dir(dir.clone());
+        }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {
             npub: inner.identity.npub(),
@@ -534,13 +562,16 @@ impl Client {
         let inner = self.inner.clone();
         // Bind, advertise, and report readiness FIRST: the caller must see
         // the npub before the possibly long wait for the first peer.
-        let listener = inner.rt.block_on(tunnel::bind_listener(
+        let mut listener = inner.rt.block_on(tunnel::bind_listener(
             &inner.identity,
             inner.listen,
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
         ))?;
+        if let Some(dir) = &inner.tailnet_dir {
+            listener.set_tailnet_dir(dir.clone());
+        }
         let addr = listener.local_addr();
         inner.emit(Event::Listening { npub: inner.identity.npub(), addr });
         let inner2 = inner.clone();
@@ -566,13 +597,16 @@ impl Client {
     /// runs until the client is dropped.
     pub fn expose(&self, to: SocketAddr) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let listener = inner.rt.block_on(tunnel::bind_listener(
+        let mut listener = inner.rt.block_on(tunnel::bind_listener(
             &inner.identity,
             inner.listen,
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
         ))?;
+        if let Some(dir) = &inner.tailnet_dir {
+            listener.set_tailnet_dir(dir.clone());
+        }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {
             npub: inner.identity.npub(),
@@ -725,12 +759,13 @@ impl Client {
                     });
                 }
             };
+            let psk = inner.fresh_psk();
             match tunnel::send_file(
                 &inner.identity,
                 &target,
                 &source,
                 &inner.relays,
-                inner.psk.as_ref(),
+                psk.as_ref(),
                 Some(&progress),
             )
             .await
@@ -752,13 +787,14 @@ impl Client {
         let inner = self.inner.clone();
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
+            let psk = inner.fresh_psk();
             match tunnel::receive_file(
                 &inner.identity,
                 inner.listen,
                 &inner.relays,
                 inner.ttl,
                 &out_dir,
-                inner.psk.as_ref(),
+                psk.as_ref(),
             )
             .await
             {
