@@ -661,10 +661,12 @@ fn main() -> anyhow::Result<()> {
             let Some(tailnet) = tailnet else {
                 anyhow::bail!("up requires --tailnet: tailnet membership authorizes inbound connections (create one with `noscat tailnet create`)");
             };
-            let identity = identity
-                .map(IdentitySource::File)
-                .or_else(default_identity)
-                .unwrap_or(IdentitySource::Ephemeral);
+            let device_dir = tailnet_dir_path(&tailnet);
+            // In tailnet mode this node IS its tailnet device: one identity
+            // for the pairing QR, the invitations, and the tunnels. (The
+            // phone does the same once it has joined.)
+            let device = noscat_core::tailnet::Device::open(&device_dir)?;
+            let identity = IdentitySource::Secret(device.identity.secret_hex());
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -677,7 +679,6 @@ fn main() -> anyhow::Result<()> {
             // Pairing: when this device owns the tailnet, it watches the
             // relays for devices asking to join (their published key
             // packages) and invites them on confirmation.
-            let device_dir = tailnet_dir_path(&tailnet);
             let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl)?;
             spawn_printer(rx);
             spawn_pairing_watcher(device_dir, relays_or_default(relays));
