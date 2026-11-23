@@ -218,15 +218,16 @@ pub fn mesh_prepare(dir: String, owner_npub: Option<String>) -> Result<String, N
 }
 
 /// Join the mesh: wait up to `timeout_secs` for the owner's gift-wrapped
-/// invitation on the relays and process it. With `owner_npub`, invitations
-/// from anyone else are ignored (the phone only joins the mesh it
-/// targeted). Returns the member list on success; a timeout error means the
-/// owner has not invited this npub yet.
+/// invitation on the relays and process it. `owner_npub` is the mesh
+/// owner's npub (from the QR the phone scanned): invitations from anyone
+/// else, or a mesh owned by anyone else, are refused. Returns the member
+/// list on success; a timeout error means the owner has not invited this
+/// npub yet.
 #[uniffi::export]
 pub fn mesh_join(
     dir: String,
     timeout_secs: u64,
-    owner_npub: Option<String>,
+    owner_npub: String,
 ) -> Result<Vec<MeshMember>, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -238,13 +239,8 @@ pub fn mesh_join(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let expected = match owner_npub {
-        Some(npub) => Some(
-            nostr::prelude::PublicKey::parse(&npub)
-                .map_err(NoscatError::fail)?,
-        ),
-        None => None,
-    };
+    let expected =
+        nostr::prelude::PublicKey::parse(&owner_npub).map_err(NoscatError::fail)?;
     rt.block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
@@ -330,6 +326,7 @@ impl NoscatClient {
             mesh_dir: config.mesh_dir.as_ref().map(std::path::PathBuf::from),
             device_name: config.device_name,
             advert_ttl_secs: 3600,
+            max_incoming_bytes: None,
         })
         .map_err(NoscatError::fail)?;
 
@@ -388,7 +385,12 @@ impl NoscatClient {
                     // consumed internally by expose/listen/up operations.
                     noscat_client::Event::Incoming { .. } => continue,
                 };
-                listener.on_event(event);
+                // A throwing app callback must not kill event delivery
+                // permanently (the client keeps running; the UI would go
+                // deaf): unwind at the loop, keep pumping.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    listener.on_event(event);
+                }));
             }
         });
         std::mem::forget(pump); // detach: runs until the channel closes
@@ -500,7 +502,7 @@ impl NoscatClient {
 // Not exported: a plain private helper (MutexGuard cannot cross the FFI).
 impl NoscatClient {
     fn lock(&self) -> std::sync::MutexGuard<'_, noscat_client::Client> {
-        self.inner.client.lock().expect("client lock")
+        self.inner.client.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 

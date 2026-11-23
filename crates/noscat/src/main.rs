@@ -66,9 +66,11 @@ enum Command {
         /// Relay URLs to search for the peer's advert (repeatable).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
+        /// Identity file (default: ~/.noscat/identity.hex). A secret may
+        /// instead come from the NOSCAT_IDENTITY env var (hex or nsec) -
+        /// argv is visible to every local user via ps and shell history.
         #[arg(long)]
-        identity: Option<String>,
+        identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this mesh's device directory (MLS group
         /// membership becomes the authorization) [default: ~/.noscat/device].
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
@@ -83,9 +85,11 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
+        /// Identity file (default: ~/.noscat/identity.hex). A secret may
+        /// instead come from the NOSCAT_IDENTITY env var (hex or nsec) -
+        /// argv is visible to every local user via ps and shell history.
         #[arg(long)]
-        identity: Option<String>,
+        identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this mesh's device directory
         /// [default: ~/.noscat/device].
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
@@ -178,9 +182,11 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
+        /// Identity file (default: ~/.noscat/identity.hex). A secret may
+        /// instead come from the NOSCAT_IDENTITY env var (hex or nsec) -
+        /// argv is visible to every local user via ps and shell history.
         #[arg(long)]
-        identity: Option<String>,
+        identity: Option<std::path::PathBuf>,
         /// Restrict the tunnels to this mesh's device directory
         /// [default: ~/.noscat/device].
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
@@ -236,9 +242,10 @@ enum MeshCommand {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
-        /// The mesh owner's npub: invitations from anyone else are ignored.
+        /// The mesh owner's npub (from the owner's QR): invitations from
+        /// anyone else, or a mesh owned by anyone else, are refused.
         #[arg(long)]
-        owner: Option<String>,
+        owner: String,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
@@ -448,6 +455,22 @@ fn main() -> anyhow::Result<()> {
         ))
     }
 
+    /// Resolve a subcommand's identity: `--identity <file>`, else the
+    /// NOSCAT_IDENTITY env var (hex or nsec), else the default file, else
+    /// ephemeral. Secrets are never accepted on argv: ps and shell history
+    /// expose it to every local user.
+    fn identity_from_arg_or_env(path: Option<std::path::PathBuf>) -> IdentitySource {
+        if let Some(path) = path {
+            return IdentitySource::File(path);
+        }
+        match std::env::var("NOSCAT_IDENTITY") {
+            Ok(secret) if !secret.trim().is_empty() => {
+                IdentitySource::Secret(secret.trim().to_string())
+            }
+            _ => default_identity().unwrap_or(IdentitySource::Ephemeral),
+        }
+    }
+
     // The default mesh device directory, next to the shared identity.
     // `--mesh` with no value (empty path) also resolves to this.
     fn default_device_dir() -> std::path::PathBuf {
@@ -491,6 +514,7 @@ fn main() -> anyhow::Result<()> {
             mesh_dir: mesh,
             device_name: name,
             advert_ttl_secs: ttl,
+            max_incoming_bytes: None,
         })
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         let rx = client.events().expect("fresh client");
@@ -689,7 +713,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     fn short_npub(npub: &str) -> String {
-        format!("{}...", &npub[..npub.len().min(16)])
+        // Char-boundary safe: peers may carry arbitrary strings across the
+        // FFI, and slicing at a byte offset would panic on multibyte UTF-8.
+        let short: String = npub.chars().take(16).collect();
+        format!("{short}...")
     }
 
     /// Print the roster for the `to` listing, each peer with its live
@@ -812,10 +839,10 @@ fn main() -> anyhow::Result<()> {
                 println!("#    reply: 'to {label}' then type");
             }
             Event::ChatFailed { peer, error } => {
-                eprintln!("# ⚠️  message to {}... not delivered: {error}", &peer[..peer.len().min(16)])
+                eprintln!("# ⚠️  message to {} not delivered: {error}", short_npub(&peer))
             }
             Event::ChatDelivered { peer } => {
-                eprintln!("# ✓ delivered to {}...", &peer[..peer.len().min(16)])
+                eprintln!("# ✓ delivered to {}", short_npub(&peer))
             }
             Event::Clipboard { peer, text } => {
                 let label = peers
@@ -1003,19 +1030,13 @@ fn main() -> anyhow::Result<()> {
             identity,
             mesh,
         } => {
-            let identity = match identity {
-                Some(secret) => IdentitySource::Secret(secret),
-                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
-            };
+            let identity = identity_from_arg_or_env(identity);
             let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             spawn_printer(rx, None);
             client.pipe_stdio(&target)?;
         }
         Command::Send { path, target, relays, identity, mesh } => {
-            let identity = match identity {
-                Some(secret) => IdentitySource::Secret(secret),
-                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
-            };
+            let identity = identity_from_arg_or_env(identity);
             let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             client.send_file(path, &target);
             // wait for the transfer's terminal event
@@ -1116,10 +1137,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Forward { target, port, bind, relays, identity, mesh } => {
-            let identity = match identity {
-                Some(secret) => IdentitySource::Secret(secret),
-                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
-            };
+            let identity = identity_from_arg_or_env(identity);
             let local = std::net::SocketAddr::new(bind, port);
             let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             let id = client.forward(&target, local);
@@ -1164,11 +1182,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 MeshCommand::Join { dir, owner, relays } => {
                     let mut device = noscat_core::mesh::Device::open(&dir)?;
-                    let expected = match &owner {
-                        Some(npub) => Some(nostr::prelude::PublicKey::parse(npub)
-                            .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?),
-                        None => None,
-                    };
+                    let expected = nostr::prelude::PublicKey::parse(&owner)
+                        .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
                     rt.block_on(device.join_mesh(&relays_or_default(relays), expected))?;
                 }
                 MeshCommand::Members { dir } => {

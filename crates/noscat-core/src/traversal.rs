@@ -77,6 +77,14 @@ pub async fn send_traversal(
 
 /// Watch for gift wraps addressed to us whose rumor is a traversal request.
 ///
+/// The most candidate endpoints one traversal invite may carry: a
+/// legitimate payload holds a LAN address plus STUN results (a handful);
+/// more is flood, and every entry earns punch traffic for its lifetime.
+pub const MAX_ENDPOINTS: usize = 16;
+
+/// Watch for gift-wrapped traversal invitations (kind 30445 rumors:
+/// candidate lists).
+///
 /// For each valid one, delivers (sender's npub, payload) on `tx` and keeps
 /// running until the channel closes or the client shuts down.
 pub async fn watch_traversal(
@@ -104,6 +112,10 @@ pub async fn watch_traversal(
             tracing::debug!("gift wrap rumor is not a traversal payload");
             continue;
         };
+        if payload.endpoints.len() > MAX_ENDPOINTS {
+            tracing::warn!(%unwrapped.sender, "traversal payload with excessive candidates; dropping");
+            continue;
+        }
         if tx.send((unwrapped.sender, payload)).await.is_err() {
             break; // consumer gone; shut down
         }

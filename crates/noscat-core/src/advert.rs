@@ -82,6 +82,8 @@ pub enum AdvertError {
     BadNoiseKey,
     #[error("advert is expired (unix {0})")]
     Expired(u64),
+    #[error("advert payload is too large ({0} bytes)")]
+    TooLarge(usize),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -141,6 +143,13 @@ impl Advert {
             .ok_or(AdvertError::MissingExpiration)?;
         if expires_at <= now.as_secs() {
             return Err(AdvertError::Expired(expires_at));
+        }
+        // Relay-event limits are the outer bound; this is ours: a legit
+        // advert is a name plus a few endpoints, so refuse to parse
+        // anything bigger before serde sees it.
+        const CONTENT_MAX: usize = 8 * 1024;
+        if event.content.len() > CONTENT_MAX {
+            return Err(AdvertError::TooLarge(event.content.len()));
         }
         let payload: AdvertPayload = serde_json::from_str(&event.content)?;
         let noise_bytes = hex::decode(&payload.noise_pub)

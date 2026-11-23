@@ -393,6 +393,16 @@ impl Device {
         let key_package = key_package_in
             .validate(self.provider.crypto(), ProtocolVersion::default())
             .map_err(|e| MeshError::Mls(e.to_string()))?;
+        // The key package must belong to the device we are inviting: a
+        // malicious device can publish a package carrying someone else's
+        // credential (its own MLS signature still validates), which would
+        // seat it in the group under the victim's identity.
+        if key_package.leaf_node().credential().serialized_content() != device.to_bytes().to_vec()
+        {
+            return Err(MeshError::Mls(format!(
+                "key package of {device} carries a different credential"
+            )));
+        }
 
         let (commit, welcome, _info) = group
             .add_members(&self.provider, &self.signer, &[key_package])
@@ -542,16 +552,36 @@ impl Device {
             return Err(MeshError::Mls("expected a commit".into()));
         };
         // MLS authenticated the commit; the group's policy decides whether
-        // this committer may change the membership. The commit carries the
-        // (possibly new) group context with the policy extension.
-        let policy = MeshPolicy::from_context(staged.group_context())?;
-        if !policy.authorizes(&committer) {
-            return Err(MeshError::PolicyViolation(hex::encode(committer)));
-        }
+        // this committer may change the membership. See `authorize_commit`:
+        // the policy comes from OUR context, never the commit's.
+        Self::authorize_commit(&group, &staged, &committer)?;
         group
             .merge_staged_commit(&self.provider, *staged)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         self.persist()
+    }
+
+
+    /// Authorization for a staged commit: the policy is read from OUR
+    /// current context, never from the commit's own - the committer could
+    /// rewrite it with a GCE proposal and then satisfy it. A commit whose
+    /// context carries a different policy is rejected outright, so the
+    /// policy cannot be mutated after creation.
+    fn authorize_commit(
+        group: &MlsGroup,
+        staged: &StagedCommit,
+        committer: &[u8],
+    ) -> Result<(), MeshError> {
+        let local = MeshPolicy::from_extensions(group.extensions())?;
+        if MeshPolicy::from_context(staged.group_context())?.owner != local.owner {
+            return Err(MeshError::PolicyViolation(
+                "commit attempts to change the mesh policy".into(),
+            ));
+        }
+        if !local.authorizes(committer) {
+            return Err(MeshError::PolicyViolation(hex::encode(committer)));
+        }
+        Ok(())
     }
 
     /// The group's current epoch (display).
@@ -585,13 +615,17 @@ impl Device {
     }
 
     /// Wait for a gift-wrapped mesh invitation and join it.
-    /// Wait for a gift-wrapped invitation and join the mesh. With
-    /// `expected_owner`, invitations from anyone else are ignored: the phone
+    /// Wait for a gift-wrapped invitation and join the mesh. Invitations
+    /// from anyone else are ignored, and the group's own policy must name
+    /// `expected_owner` as owner before the join is accepted: the phone
     /// scanned a specific owner's QR, and only that mesh may adopt it.
+    /// (An attacker who knows the victim's npub can build their own MLS
+    /// group and send a valid Welcome - the expected owner is the anchor
+    /// that makes such an invitation refusable.)
     pub async fn join_mesh(
         &mut self,
         relays: &[String],
-        expected_owner: Option<PublicKey>,
+        expected_owner: PublicKey,
     ) -> Result<(), MeshError> {
         if self.group_id.is_some() {
             // Local state says this device is already a member. Forgetting a
@@ -612,7 +646,7 @@ impl Device {
         // invitation from anyone but the expected owner is dropped unheard.
         let (sender, payload) = loop {
             let (sender, payload) = rx.recv().await.ok_or(MeshError::JoinTimeout)?;
-            if expected_owner.is_some() && expected_owner != Some(sender) {
+            if sender != expected_owner {
                 eprintln!("# ignoring an invitation from {sender} (not the expected owner)");
                 continue;
             }
@@ -636,6 +670,16 @@ impl Device {
             None,
         )
         .map_err(|e| MeshError::Mls(e.to_string()))?;
+        // The group itself must agree the expected owner is in charge: a
+        // sender can only gift-wrap, not change who owns the mesh they
+        // claim. A policy mismatch here means the invitation is for a mesh
+        // we did not ask to join.
+        let policy = MeshPolicy::from_context(staged.group_context())?;
+        if policy.owner != expected_owner.to_bytes().to_vec() {
+            return Err(MeshError::PolicyViolation(
+                "invitation is not from the expected owner's mesh".into(),
+            ));
+        }
         let group = staged
             .into_group(&self.provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
@@ -685,7 +729,12 @@ impl MeshPolicy {
     /// Read the policy out of a group context (the one a commit or Welcome
     /// carries - MlsGroup keeps its current context private).
     fn from_context(context: &GroupContext) -> Result<Self, MeshError> {
-        for ext in context.extensions().iter() {
+        Self::from_extensions(context.extensions())
+    }
+
+    /// Read the policy out of a context's extension set.
+    fn from_extensions(extensions: &Extensions<GroupContext>) -> Result<Self, MeshError> {
+        for ext in extensions.iter() {
             if let Extension::Unknown(POLICY_EXTENSION_TYPE, UnknownExtension(bytes)) = ext {
                 return Ok(serde_json::from_slice(bytes)?);
             }
@@ -1069,6 +1118,72 @@ mod tests {
         // Refusing to merge leaves the epoch unchanged: the ratchet moves
         // only when `merge_staged_commit` runs.
         assert_eq!(owner_group.epoch(), fx.a_group.epoch());
+        Ok(())
+    }
+
+    /// A member commit that rewrites the policy via a GCE proposal must be
+    /// rejected: the authorization policy is read from OUR group's context,
+    /// not the committer's document. Without this, a non-owner could name
+    /// themselves owner in the commit and pass their own check.
+    #[test]
+    fn acl_rejects_policy_rewriting_commit() -> Result<(), MeshError> {
+        let mut fx = fixture_two_members()?;
+
+        // Member A (not the owner) proposes a GCE that renames A owner and
+        // commits it - legal MLS, and self-authorizing only if the receiver
+        // trusts the commit's context.
+        let attacker_owner = fx.a.public_key().to_bytes().to_vec();
+        let required = RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(POLICY_EXTENSION_TYPE)],
+            &[],
+            &[],
+        );
+        let attacker_ext = Extensions::from_vec(vec![
+            Extension::RequiredCapabilities(required),
+            MeshPolicy::extension(&attacker_owner)?,
+        ])
+        .map_err(|e| MeshError::Mls(e.to_string()))?;
+        let commit = fx
+            .a_group
+            .commit_builder()
+            .propose_group_context_extensions(attacker_ext)
+            .map_err(|e| MeshError::Mls(e.to_string()))?
+            .load_psks(fx.a_provider.storage())
+            .map_err(|e| MeshError::Mls(e.to_string()))?
+            .build(fx.a_provider.rand(), fx.a_provider.crypto(), &fx.a_signer, |_| true)
+            .map_err(|e| MeshError::Mls(e.to_string()))?
+            .stage_commit(&fx.a_provider)
+            .map_err(|e| MeshError::Mls(e.to_string()))?
+            .commit()
+            .clone();
+
+        // The receiver stages it (MLS authenticates A as a member), then
+        // authorization must fail - on the policy rewrite and, belt and
+        // braces, the non-owner committer.
+        let mut owner_group = fx.owner_group;
+        let message = commit_a_into_in(&commit)?;
+        let protocol: ProtocolMessage = match message.try_into() {
+            Ok(p) => p,
+            Err(_) => return Err(MeshError::Mls("not a public MLS message".into())),
+        };
+        let processed = owner_group
+            .process_message(&fx.owner_provider, protocol)
+            .map_err(|e| MeshError::Mls(e.to_string()))?;
+        let staged = match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => staged,
+            ProcessedMessageContent::ApplicationMessage(_) => {
+                return Err(MeshError::Mls("expected a commit".into()))
+            }
+            _ => return Err(MeshError::Mls("expected a commit".into())),
+        };
+        let committer = fx.a.public_key().to_bytes().to_vec();
+        assert!(matches!(
+            Device::authorize_commit(&owner_group, &staged, &committer),
+            Err(MeshError::PolicyViolation(_))
+        ));
+        // And the local policy still names the original owner, not A.
+        let local = MeshPolicy::from_extensions(owner_group.extensions())?;
+        assert_ne!(local.owner, attacker_owner, "the local policy must be untouchable by commit");
         Ok(())
     }
 }

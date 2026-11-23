@@ -49,7 +49,7 @@ use noscat_core::Identity;
 use tokio::io::AsyncWriteExt;
 
 /// Where the client's identity comes from.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum IdentitySource {
     /// A fresh ephemeral keypair (the netcat default).
     Ephemeral,
@@ -57,6 +57,18 @@ pub enum IdentitySource {
     Secret(String),
     /// A file holding the secret; generated and written on first use if missing.
     File(PathBuf),
+}
+
+impl std::fmt::Debug for IdentitySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // ClientConfig derives Debug and UIs log it; the secret must never
+        // ride along.
+        match self {
+            Self::Ephemeral => write!(f, "Ephemeral"),
+            Self::Secret(_) => write!(f, "Secret(<redacted>)"),
+            Self::File(path) => write!(f, "File({path:?})"),
+        }
+    }
 }
 
 /// Everything a client session needs, resolved once at [`Client::start`].
@@ -75,6 +87,11 @@ pub struct ClientConfig {
     pub device_name: Option<String>,
     /// Advert lifetime in seconds.
     pub advert_ttl_secs: u64,
+    /// Receive-side disk cap per transfer (see
+    /// [`noscat_core::tunnel::MAX_INCOMING_BYTES`] for the default's
+    /// rationale). `None` keeps the wire ceiling (~5.4 TiB) as the only
+    /// limit.
+    pub max_incoming_bytes: Option<u64>,
 }
 
 impl Default for ClientConfig {
@@ -86,6 +103,7 @@ impl Default for ClientConfig {
             mesh_dir: None,
             device_name: None,
             advert_ttl_secs: 3600,
+            max_incoming_bytes: None,
         }
     }
 }
@@ -257,10 +275,18 @@ struct Inner {
     /// Shared and never reset: relay reconnects only pause the feed.
     presence: std::sync::Arc<noscat_core::relay::Presence>,
     /// In-flight sends keyed by (peer, path string): their cancel flags.
-    /// `cancel_transfer` sets the flag; the send task removes the entry
-    /// when it ends (completed, failed, or cancelled).
-    cancels:
-        std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Concurrent sends of the same file to the same peer all live here:
+    /// a cancel fans out to all of them, and each task removes only its
+    /// own flag, so a finishing send never orphans a running one.
+    cancels: std::sync::Mutex<
+        std::collections::HashMap<
+            (String, String),
+            Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        >,
+    >,
+    /// Receive-side disk cap per transfer (the client config's
+    /// `max_incoming_bytes`).
+    max_incoming: u64,
     /// Active forwards: id -> entry. `cancel_forward` wakes the accept
     /// loop; the forward's own task removes the entry when it ends.
     forwards: std::sync::Mutex<std::collections::HashMap<u64, ForwardEntry>>,
@@ -289,6 +315,31 @@ impl Inner {
     /// Emit an event; a dropped receiver just means nobody is listening.
     fn emit(&self, ev: Event) {
         let _ = self.events.send(ev);
+    }
+
+    /// Bind the serve-side UDP listener and publish the advert: the shared
+    /// first step of [`Client::listen`], [`Client::up`],
+    /// [`Client::serve_stdio`], and [`Client::expose`]. Returns the
+    /// configured listener and its local address, emitting
+    /// [`Event::Listening`].
+    fn bind_and_announce(&self) -> Result<(tunnel::TunnelListener, SocketAddr), ClientError> {
+        let mut listener = self.rt.block_on(tunnel::bind_listener(
+            &self.identity,
+            self.listen,
+            &self.relays,
+            self.ttl,
+            self.psk.as_ref(),
+            self.device_name.as_deref(),
+        ))?;
+        if let Some(dir) = &self.mesh_dir {
+            listener.set_mesh_dir(dir.clone());
+        }
+        let addr = listener.local_addr();
+        self.emit(Event::Listening {
+            npub: self.identity.npub(),
+            addr,
+        });
+        Ok((listener, addr))
     }
 
     /// The mesh PSK as of *now*: re-derived from the device directory so
@@ -388,23 +439,32 @@ impl Client {
                     {
                         use std::io::Write as _;
                         use std::os::unix::fs::OpenOptionsExt as _;
-                        let mut f = std::fs::OpenOptions::new()
+                        match std::fs::OpenOptions::new()
                             .mode(0o600)
                             .write(true)
                             .create_new(true)
-                            .open(path)
-                            .map_err(|e| {
-                                ClientError::Identity(format!(
+                            .open(&path)
+                        {
+                            Ok(mut f) => {
+                                f.write_all(secret.as_bytes()).map_err(|e| {
+                                    ClientError::Identity(format!(
+                                        "cannot write {}: {e}",
+                                        path.display()
+                                    ))
+                                })?;
+                            }
+                            // A simultaneous first run (or a pre-planted
+                            // file) loses the create race: fall through to
+                            // reading the winner - generate() above is
+                            // simply discarded.
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(e) => {
+                                return Err(ClientError::Identity(format!(
                                     "cannot write {}: {e}",
                                     path.display()
-                                ))
-                            })?;
-                        f.write_all(secret.as_bytes()).map_err(|e| {
-                            ClientError::Identity(format!(
-                                "cannot write {}: {e}",
-                                path.display()
-                            ))
-                        })?;
+                                )))
+                            }
+                        }
                     }
                     #[cfg(not(unix))]
                     std::fs::write(path, secret.as_bytes()).map_err(|e| {
@@ -418,6 +478,23 @@ impl Client {
                     let secret = std::fs::read_to_string(path).map_err(|e| {
                         ClientError::Identity(format!("cannot read {}: {e}", path.display()))
                     })?;
+                    #[cfg(unix)]
+                    {
+                        // A pre-existing world-readable identity is a leaked
+                        // secret: refuse rather than use it silently (the
+                        // mesh device heals its own file the same way).
+                        use std::os::unix::fs::PermissionsExt as _;
+                        let mode = std::fs::metadata(&path)
+                            .map(|m| m.permissions().mode())
+                            .unwrap_or(0o600);
+                        if mode & 0o077 != 0 {
+                            return Err(ClientError::Identity(format!(
+                                "{} is readable by other users (mode {:o}); chmod 600 it and retry",
+                                path.display(),
+                                mode & 0o777
+                            )));
+                        }
+                    }
                     Identity::from_secret(secret.trim())
                         .map_err(|e| ClientError::Identity(e.to_string()))?
                 }
@@ -451,6 +528,9 @@ impl Client {
                 }),
                 listen: config.listen.unwrap_or_else(|| "0.0.0.0:41641".parse().unwrap()),
                 ttl: config.advert_ttl_secs,
+                max_incoming: config
+                    .max_incoming_bytes
+                    .unwrap_or(noscat_core::tunnel::MAX_INCOMING_BYTES),
                 events: tx,
                 presence: std::sync::Arc::new(noscat_core::relay::Presence::new()),
                 cancels: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -506,22 +586,7 @@ impl Client {
     /// demuxing flows per peer).
     pub fn listen(&self) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let mut listener = inner.rt.block_on(tunnel::bind_listener(
-            &inner.identity,
-            inner.listen,
-            &inner.relays,
-            inner.ttl,
-            inner.psk.as_ref(),
-            inner.device_name.as_deref(),
-        ))?;
-        if let Some(dir) = &inner.mesh_dir {
-            listener.set_mesh_dir(dir.clone());
-        }
-        let addr = listener.local_addr();
-        inner.emit(Event::Listening {
-            npub: inner.identity.npub(),
-            addr,
-        });
+        let (listener, addr) = inner.bind_and_announce()?;
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let mut listener = listener;
@@ -554,22 +619,16 @@ impl Client {
     /// authorization for everything inbound.
     pub fn up(&self, out_dir: PathBuf, bridge_to: Option<SocketAddr>) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let mut listener = inner.rt.block_on(tunnel::bind_listener(
-            &inner.identity,
-            inner.listen,
-            &inner.relays,
-            inner.ttl,
-            inner.psk.as_ref(),
-            inner.device_name.as_deref(),
-        ))?;
-        if let Some(dir) = &inner.mesh_dir {
-            listener.set_mesh_dir(dir.clone());
+        // Mesh scoping is the authorization for a node that accepts inbound
+        // tunnels and writes received files to disk: without the group's
+        // epoch PSK, anyone who learns the (public) npub can complete a
+        // handshake. Enforced here so every surface (CLI, FFI) inherits it.
+        if inner.mesh_dir.is_none() {
+            return Err(ClientError::Mesh(
+                "up requires a mesh-scoped client: membership is the authorization".into(),
+            ));
         }
-        let addr = listener.local_addr();
-        inner.emit(Event::Listening {
-            npub: inner.identity.npub(),
-            addr,
-        });
+        let (listener, addr) = inner.bind_and_announce()?;
         // Presence feed: watch advert refreshes for the whole of the mesh so
         // the roster and chat REPL can show liveness. Arrivals land in a
         // shared map that relay reconnects never wipe; members that never
@@ -616,7 +675,7 @@ impl Client {
                         // Hand the sniffed byte back so the receiver reads
                         // the same TAG_HEADER framing the sender wrote.
                         let mut prefixed = PrefixedStream::new(tag[0], stream);
-                        match tunnel::receive_routed_file(&who, &mut prefixed, &out_dir).await {
+                        match tunnel::receive_routed_file(&who, &mut prefixed, &out_dir, inner.max_incoming).await {
                             Ok((who, path)) => {
                                 inner.emit(Event::TransferDone { peer: who, path })
                             }
@@ -659,9 +718,14 @@ impl Client {
                                 })
                                 .unwrap_or(false);
                         if !ok {
-                            inner.emit(Event::ChatFailed {
-                                peer: who,
-                                error: "malformed clipboard share".into(),
+                            // Not ChatFailed: nothing the *user* sent
+                            // failed - a remote peer sent garbage. A
+                            // generic stop keeps the receiver's UI out of
+                            // it (a remote cannot fabricate local
+                            // "message failed" bubbles).
+                            inner.emit(Event::Stopped {
+                                what: "clipboard",
+                                error: Some(format!("malformed clipboard share from {who}")),
                             });
                         }
                         let _ = stream.shutdown().await;
@@ -710,19 +774,7 @@ impl Client {
         let inner = self.inner.clone();
         // Bind, advertise, and report readiness FIRST: the caller must see
         // the npub before the possibly long wait for the first peer.
-        let mut listener = inner.rt.block_on(tunnel::bind_listener(
-            &inner.identity,
-            inner.listen,
-            &inner.relays,
-            inner.ttl,
-            inner.psk.as_ref(),
-            inner.device_name.as_deref(),
-        ))?;
-        if let Some(dir) = &inner.mesh_dir {
-            listener.set_mesh_dir(dir.clone());
-        }
-        let addr = listener.local_addr();
-        inner.emit(Event::Listening { npub: inner.identity.npub(), addr });
+        let (listener, _addr) = inner.bind_and_announce()?;
         let inner2 = inner.clone();
         inner.rt.block_on(async move {
             let mut listener = listener;
@@ -746,22 +798,7 @@ impl Client {
     /// runs until the client is dropped.
     pub fn expose(&self, to: SocketAddr) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
-        let mut listener = inner.rt.block_on(tunnel::bind_listener(
-            &inner.identity,
-            inner.listen,
-            &inner.relays,
-            inner.ttl,
-            inner.psk.as_ref(),
-            inner.device_name.as_deref(),
-        ))?;
-        if let Some(dir) = &inner.mesh_dir {
-            listener.set_mesh_dir(dir.clone());
-        }
-        let addr = listener.local_addr();
-        inner.emit(Event::Listening {
-            npub: inner.identity.npub(),
-            addr,
-        });
+        let (listener, addr) = inner.bind_and_announce()?;
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let mut listener = listener;
@@ -818,46 +855,22 @@ impl Client {
     /// failure surfaces as [`Event::ChatFailed`] (the caller keeps its
     /// optimistic copy of the message).
     pub fn send_chat(&self, target: &str, text: &str) {
-        let inner = self.inner.clone();
-        let target = target.to_string();
-        let text = text.to_string();
-        let rt = inner.rt.handle().clone();
-        rt.spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let res = match inner.dial(&target).await {
-                Ok((mut stream, _)) => {
-                    let mut payload = vec![tunnel::TAG_CHAT];
-                    payload.extend_from_slice(text.as_bytes());
-                    let sent = stream.write_all(&payload).await.is_ok()
-                        && stream.flush().await.is_ok()
-                        && stream.shutdown().await.is_ok();
-                    if !sent {
-                        Err("could not send".to_string())
-                    } else {
-                        // The peer echoes a FIN once the message is in hand.
-                        let mut sink = Vec::new();
-                        match stream.read_to_end(&mut sink).await {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(e.to_string()),
-                        }
-                    }
-                }
-                Err(e) => Err(e.to_string()),
-            };
-            if let Err(error) = res {
-                inner.emit(Event::ChatFailed { peer: target, error });
-            } else {
-                inner.emit(Event::ChatDelivered { peer: target });
-            }
-        });
+        self.send_tagged_text(tunnel::TAG_CHAT, target, text);
     }
 
     /// Share the local clipboard with `target`: dial a tunnel, write the
     /// text tagged as a clipboard share, and wait for the peer's delivery
     /// FIN. The receiver puts the text on its system clipboard. Wire shape
-    /// and failure reporting mirror [`Self::send_chat`] (failure surfaces
-    /// as [`Event::ChatFailed`]).
+    /// and failure reporting mirror [`Self::send_chat`].
     pub fn send_clipboard(&self, target: &str, text: &str) {
+        self.send_tagged_text(tunnel::TAG_CLIP, target, text);
+    }
+
+    /// The one-shot text send both [`Self::send_chat`] and
+    /// [`Self::send_clipboard`] are: dial, write `tag` + text, half-close,
+    /// and wait for the receiver's FIN echo - that echo is the delivery
+    /// confirmation (`ChatDelivered`); anything else is `ChatFailed`.
+    fn send_tagged_text(&self, tag: u8, target: &str, text: &str) {
         let inner = self.inner.clone();
         let target = target.to_string();
         let text = text.to_string();
@@ -866,7 +879,7 @@ impl Client {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             let res = match inner.dial(&target).await {
                 Ok((mut stream, _)) => {
-                    let mut payload = vec![tunnel::TAG_CLIP];
+                    let mut payload = vec![tag];
                     payload.extend_from_slice(text.as_bytes());
                     let sent = stream.write_all(&payload).await.is_ok()
                         && stream.flush().await.is_ok()
@@ -904,7 +917,7 @@ impl Client {
             .next_forward_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-        inner.forwards.lock().expect("forward registry").insert(
+        inner.forwards.lock().unwrap_or_else(|p| p.into_inner()).insert(
             id,
             ForwardEntry {
                 target: target.to_string(),
@@ -920,8 +933,7 @@ impl Client {
                 Err(e) => {
                     inner
                         .forwards
-                        .lock()
-                        .expect("forward registry")
+                        .lock().unwrap_or_else(|p| p.into_inner())
                         .remove(&id);
                     inner.emit(Event::ForwardStopped {
                         id,
@@ -933,7 +945,7 @@ impl Client {
             loop {
                 let accepted = tokio::select! {
                     _ = cancel.notified() => {
-                        inner.forwards.lock().expect("forward registry").remove(&id);
+                        inner.forwards.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
                         inner.emit(Event::ForwardStopped { id, error: None });
                         return;
                     }
@@ -944,8 +956,7 @@ impl Client {
                     Err(e) => {
                         inner
                             .forwards
-                            .lock()
-                            .expect("forward registry")
+                            .lock().unwrap_or_else(|p| p.into_inner())
                             .remove(&id);
                         inner.emit(Event::ForwardStopped {
                             id,
@@ -1001,8 +1012,7 @@ impl Client {
     pub fn list_forwards(&self) -> Vec<ForwardInfo> {
         self.inner
             .forwards
-            .lock()
-            .expect("forward registry")
+            .lock().unwrap_or_else(|p| p.into_inner())
             .iter()
             .map(|(id, e)| ForwardInfo {
                 id: *id,
@@ -1020,8 +1030,7 @@ impl Client {
         match self
             .inner
             .forwards
-            .lock()
-            .expect("forward registry")
+            .lock().unwrap_or_else(|p| p.into_inner())
             .get(&id)
         {
             Some(entry) => {
@@ -1042,11 +1051,12 @@ impl Client {
         let source = path.clone();
         let key = (target.clone(), source.display().to_string());
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        inner
+        let mut flags = inner
             .cancels
             .lock()
-            .expect("cancel registry")
-            .insert(key.clone(), flag.clone());
+            .unwrap_or_else(|p| p.into_inner());
+        flags.entry(key.clone()).or_default().push(flag.clone());
+        drop(flags);
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             // One event per percent change: per-ack would cross the FFI
@@ -1077,11 +1087,18 @@ impl Client {
                 Some(flag.as_ref()),
             )
             .await;
-            inner
+            // Remove only this send's flag: a concurrent same-key send
+            // stays cancellable.
+            let mut flags = inner
                 .cancels
                 .lock()
-                .expect("cancel registry")
-                .remove(&key);
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(list) = flags.get_mut(&key) {
+                list.retain(|f| !std::sync::Arc::ptr_eq(f, &flag));
+                if list.is_empty() {
+                    flags.remove(&key);
+                }
+            }
             match outcome {
                 Ok(()) => inner.emit(Event::TransferDone { peer: target, path: source }),
                 Err(tunnel::TunnelError::TransferCancelled) => {
@@ -1098,26 +1115,36 @@ impl Client {
 
     /// Receive one file into `out_dir`. Returns immediately; the outcome
     /// arrives as [`Event::TransferDone`] (path = the verified final file) or
-    /// Cancel an in-flight send: the transfer stops between chunks (within
+    /// Cancel in-flight sends to `target` of the file at `path` (all of
+    /// them, if several are running): each stops between chunks (within
     /// one retry round), [`Event::TransferCancelled`] fires, and the
     /// receiver keeps its resumable partial for a later send of the same
-    /// file. `path` is the source path the send was started with. Returns
-    /// false when no send to that peer with that path is in flight (it may
-    /// have already finished). The receive side has no cancel: it ends
-    /// when the sender stops.
+    /// file. Returns false when no send to that peer with that path is in
+    /// flight (it may have already finished). The receive side has no
+    /// cancel: it ends when the sender stops.
     pub fn cancel_transfer(&self, target: &str, path: &std::path::Path) -> bool {
         let key = (target.to_string(), path.display().to_string());
-        match self.inner.cancels.lock().expect("cancel registry").get(&key) {
-            Some(flag) => {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut flags = self
+            .inner
+            .cancels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match flags.get_mut(&key) {
+            Some(list) if !list.is_empty() => {
+                for flag in list {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
+    /// Receive one file into `out_dir`. Returns immediately; the outcome
+    /// arrives as [`Event::TransferDone`] (with the verified final path) or
     /// [`Event::TransferFailed`].
-    pub fn receive_file(&self, out_dir: PathBuf) {        let inner = self.inner.clone();
+    pub fn receive_file(&self, out_dir: PathBuf) {
+        let inner = self.inner.clone();
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let psk = inner.fresh_psk();
@@ -1130,6 +1157,7 @@ impl Client {
                 &out_dir,
                 psk.as_ref(),
                 name.as_deref(),
+                inner.max_incoming,
             )
             .await
             {

@@ -184,10 +184,40 @@ pub(crate) fn advert_refresh_interval(ttl_secs: u64) -> Duration {
     Duration::from_secs((ttl_secs / 2).max(MIN_REFRESH))
 }
 
-/// Candidates as dialable addresses.
-fn parse_endpoints(endpoints: &[Endpoint]) -> Vec<SocketAddr> {    endpoints
+/// Seed `hasher` with the first `prefix_len` bytes of `part`, streaming in
+/// 64 KiB pieces: a resume of a multi-GiB partial must not allocate the
+/// partial's size just to hash it.
+async fn hash_prefix(
+    hasher: &mut sha2::Sha256,
+    part: &mut tokio::fs::File,
+    prefix_len: u64,
+) -> std::io::Result<()> {
+    use sha2::Digest as _;
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+    part.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut left = prefix_len;
+    while left > 0 {
+        let want = buf.len().min(left as usize);
+        let n = part.read(&mut buf[..want]).await?;
+        if n == 0 {
+            return Err(std::io::Error::other("part file shorter than its resume point"));
+        }
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(())
+}
+
+/// Candidates as dialable addresses. A payload may list at most
+/// [`crate::traversal::MAX_ENDPOINTS`] of them: a legitimate invite holds a
+/// LAN address plus STUN results (a handful), more is flood - and every
+/// entry earns punch traffic for its lifetime.
+fn parse_endpoints(endpoints: &[Endpoint]) -> Vec<SocketAddr> {
+    endpoints
         .iter()
         .filter_map(|e| e.addr.parse().ok())
+        .take(crate::traversal::MAX_ENDPOINTS)
         .collect()
 }
 
@@ -376,8 +406,19 @@ pub async fn serve_session(
     let reply_endpoints = endpoints.clone();
     let reply_relays: Vec<String> = relays.to_vec();
     let replier = tokio::spawn(async move {
+        // One reply per sender per cadence: a sender we cannot authenticate
+        // yet (the handshake does that) must not be able to keep us
+        // answering at invite rate.
+        let mut last_replied: Option<(PublicKey, std::time::Instant)> = None;
         while let Some((sender, payload)) = rx.recv().await {
             tracing::info!(%sender, ?payload.endpoints, "traversal request received");
+            if last_replied
+                .as_ref()
+                .is_some_and(|(s, at)| *s == sender && at.elapsed() < TRAVERSAL_REPLY_EVERY)
+            {
+                continue;
+            }
+            last_replied = Some((sender, std::time::Instant::now()));
             *reply_candidates.lock().expect("candidates lock") =
                 parse_endpoints(&payload.endpoints);
             // Punch toward the new candidates immediately: behind a
@@ -947,10 +988,10 @@ pub async fn bind_listener(
     });
 
     // Traversal: one shared watcher for all sessions. A dialer's gift-wrapped
-    // candidate list is recorded under the addrs it points at (the punch loop
-    // needs a target), and answered with ours, so both NAT mappings get
-    // opened from the inside.
-    let candidates: Arc<Mutex<HashMap<SocketAddr, Vec<SocketAddr>>>> =
+    // candidate list is recorded under the addrs it points at, each entry
+    // stamped with when it arrived (stale entries stop being punched), and
+    // answered with ours, so both NAT mappings get opened from the inside.
+    let candidates: Arc<Mutex<HashMap<SocketAddr, std::time::Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::channel::<(PublicKey, crate::traversal::TraversalPayload)>(16);
     let watch_identity = identity.clone();
@@ -965,18 +1006,39 @@ pub async fn bind_listener(
     let reply_noise = noise_pub;
     let reply_endpoints = endpoints.clone();
     let reply_relays = relays.to_vec();
+    // Per-sender reply cadence: a sender we cannot authenticate yet (the
+    // handshake does that) must not be able to keep us answering - and
+    // punching their chosen addresses - at invite rate.
+    let last_replied: Arc<Mutex<HashMap<PublicKey, std::time::Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let c_last_replied = last_replied.clone();
     tokio::spawn(async move {
         while let Some((sender, payload)) = rx.recv().await {
             let eps = parse_endpoints(&payload.endpoints);
             tracing::info!(%sender, ?eps, "traversal request received");
             {
+                let mut replied = c_last_replied.lock().expect("replied lock");
+                if replied
+                    .get(&sender)
+                    .is_some_and(|at| at.elapsed() < TRAVERSAL_REPLY_EVERY)
+                {
+                    continue;
+                }
+                replied.insert(sender, std::time::Instant::now());
+            }
+            {
                 let mut map = c_candidates.lock().expect("candidates lock");
-                if map.len() < MAX_CANDIDATE_PEERS || map.keys().any(|k| eps.contains(k)) {
-                    map.extend(eps.iter().map(|a| (*a, eps.clone())));
-                } else {
-                    // Flood guard: too many distinct peers are already being
-                    // punched; ignore the rest until they free up.
+                // Flood guard: only addresses that are genuinely new count
+                // against the cap - re-sending the same request cannot
+                // smuggle fresh addresses past a full table.
+                let fresh = eps.iter().filter(|a| !map.contains_key(*a)).count();
+                if map.len() + fresh > MAX_CANDIDATE_PEERS {
                     tracing::warn!("candidate table full; ignoring traversal request");
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                for addr in eps {
+                    map.insert(addr, now);
                 }
             }
             // Punch toward the new candidates immediately: behind a
@@ -998,18 +1060,19 @@ pub async fn bind_listener(
     // candidate that has not grown into an established session yet. The
     // dialer's own punch + msg1 opened the mapping in one direction; this
     // opens it in ours, which stricter NATs need before msg2 can land.
-    // Woken early by a traversal invite so the mapping opens now.
+    // Woken early by a traversal invite so the mapping opens now; entries
+    // that no invite has refreshed within CANDIDATE_TTL stop being punched.
     let p_socket = socket.clone();
     let p_sessions = sessions.clone();
     tokio::spawn(async move {
         loop {
             let targets: Vec<SocketAddr> = {
+                let now = std::time::Instant::now();
                 let established = p_sessions.lock().expect("sessions lock");
-                candidates
-                    .lock()
-                    .expect("candidates lock")
-                    .keys()
-                    .filter(|a| !established.contains_key(a))
+                let mut map = candidates.lock().expect("candidates lock");
+                map.retain(|_, seen| now.duration_since(*seen) < CANDIDATE_TTL);
+                map.keys()
+                    .filter(|a| !established.contains_key(*a))
                     .cloned()
                     .collect()
             };
@@ -1336,10 +1399,18 @@ const SESSION_QUEUE: usize = 64;
 const HANDSHAKE_QUEUE: usize = 16;
 /// Queue depth of candidate handshake openers waiting for `accept`.
 const ACCEPT_QUEUE: usize = 64;
-/// Cap on distinct peer candidate lists held by the listener: a flood of
-/// gift-wrapped traversal requests must not grow the map (or the punch
-/// loop's sweep) without bound.
+/// Cap on distinct peer candidate addresses held by the listener: a flood
+/// of gift-wrapped traversal requests must not grow the map (or the punch
+/// loop's sweep) without bound. Only genuinely new addresses count against
+/// the cap, so replaying the same request cannot smuggle more in.
 const MAX_CANDIDATE_PEERS: usize = 256;
+/// Punching at a candidate stops this long after the invite that listed
+/// it: entries expire instead of accumulating forever.
+const CANDIDATE_TTL: Duration = Duration::from_secs(10 * 60);
+/// Traversal replies to one sender are throttled to this cadence: the
+/// handshake is what authenticates a sender, so an unauthenticated gift
+/// wrap must not keep us answering at invite rate.
+const TRAVERSAL_REPLY_EVERY: Duration = Duration::from_secs(2);
 
 /// One encrypted send + the ack round-trip for it (header and FIN frames).
 ///
@@ -1682,14 +1753,23 @@ where
                 // let the ack stream outrun the sender's consumption under
                 // timing skew and the nonce gap would outgrow the replay
                 // history - one ack per window keeps the gap trivially small.
-                if (seq + 1) % WINDOW == 0 || (len > 0 && received >= len) {
+                if seq.wrapping_add(1) % WINDOW == 0 || (len > 0 && received >= len) {
                     file.flush().await?;
                     if let Some((meta_path, meta)) = meta.as_mut() {
-                        meta.chunks = seq as u64 + 1;
+                        meta.chunks = seq.wrapping_add(1) as u64;
                         let _ = tokio::fs::write(meta_path, serde_json::to_string(meta)?).await;
                     }
-                    ack_and_replay(socket, peer, hs, TAG_ACK, seq + 1, history, &mut wire, false)
-                        .await?;
+                    ack_and_replay(
+                        socket,
+                        peer,
+                        hs,
+                        TAG_ACK,
+                        seq.wrapping_add(1),
+                        history,
+                        &mut wire,
+                        false,
+                    )
+                    .await?;
                 }
                 if len > 0 && received >= len {
                     break;
@@ -1703,11 +1783,28 @@ where
 }
 
 /// Strip any path components from a peer-supplied filename.
-fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {    let name = Path::new(name)
+fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {
+    let name = Path::new(name)
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| TunnelError::UnsafePath(PathBuf::from(name)))?;
     if name.is_empty() || name == "." || name == ".." {
+        return Err(TunnelError::UnsafePath(PathBuf::from(name)));
+    }
+    // Filesystem sanity, cross-platform: a peer-supplied name is capped
+    // (255-byte filename limits are near-universal), and Windows reserves
+    // device names - `out_dir.join("CON")` would open a device, not a
+    // file. The check is unconditional so behavior stays identical on all
+    // platforms.
+    if name.len() > 255 {
+        return Err(TunnelError::UnsafePath(PathBuf::from(name)));
+    }
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    if RESERVED.contains(&stem.to_ascii_uppercase().as_str()) {
         return Err(TunnelError::UnsafePath(PathBuf::from(name)));
     }
     Ok(PathBuf::from(name))
@@ -1839,6 +1936,14 @@ async fn send_stream(
 /// handshake, read the transfer header, and stream the bytes into
 /// `<out_dir>/<name>`. Resolves when the transfer completes, reporting
 /// (peer, path).
+/// The receive-side disk cap: a header announcing more than this is
+/// refused before a byte is written. The wire ceiling (u32 chunks, ~5.4
+/// TiB) stays the protocol's limit; this bounds what an unattended
+/// receiver will accept from any single transfer. Mesh membership is the
+/// real authorization - the PSK gates the handshake - but an advert is
+/// public and dialable, so the disk-fill surface stays.
+pub const MAX_INCOMING_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
 pub async fn receive_file(
     identity: &Identity,
     listen: SocketAddr,
@@ -1847,21 +1952,24 @@ pub async fn receive_file(
     out_dir: &Path,
     psk: Option<&[u8; 32]>,
     name: Option<&str>,
+    max_bytes: u64,
 ) -> Result<(String, PathBuf), TunnelError> {
     let session = serve_session(identity, listen, relays, ttl_secs, psk, name).await?;
     let (socket, peer, mut hs, who) = session.finish().await;
-    receive_stream(&who, &socket, peer, &mut hs, out_dir).await
+    receive_stream(&who, &socket, peer, &mut hs, out_dir, max_bytes).await
 }
 
 /// The receiver half of a file transfer over an established Noise session
 /// (everything after `serve_session`): header, resume decision, chunk
-/// streaming, finalize.
+/// streaming, finalize. `max_bytes` refuses oversized headers before a
+/// byte is written (see [`MAX_INCOMING_BYTES`]).
 async fn receive_stream(
     who: &str,
     socket: &UdpSocket,
     peer: SocketAddr,
     hs: &mut snow::TransportState,
     out_dir: &Path,
+    max_bytes: u64,
 ) -> Result<(String, PathBuf), TunnelError> {
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
@@ -1904,6 +2012,9 @@ async fn receive_stream(
     if total_chunks > u32::MAX as u64 {
         return Err(TunnelError::TransferTooLarge(header.len));
     }
+    if header.len > max_bytes {
+        return Err(TunnelError::TransferTooLarge(header.len));
+    }
     let total_chunks = total_chunks as u32;
     eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
 
@@ -1924,13 +2035,11 @@ async fn receive_stream(
             && prefix_len <= header.len
             && tokio::fs::metadata(&part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
         {
-            // Seed the hash with the durable prefix; the part file is
+            // Seed the hash with the durable prefix, streamed (a huge
+            // partial must not allocate its size); the part file is
             // appended from there.
-            use tokio::io::AsyncReadExt;
             let mut part = tokio::fs::File::open(&part_path).await?;
-            let mut prefix = vec![0u8; prefix_len as usize];
-            part.read_exact(&mut prefix).await?;
-            hasher.update(&prefix);
+            hash_prefix(&mut hasher, &mut part, prefix_len).await?;
             resume_chunks = (prefix_len / CHUNK as u64) as u32;
         }
     }
@@ -2036,6 +2145,7 @@ pub async fn receive_routed_file<S>(
     who: &str,
     stream: &mut S,
     out_dir: &Path,
+    max_bytes: u64,
 ) -> Result<(String, PathBuf), TunnelError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -2048,8 +2158,12 @@ where
     /// datagram costs a tick, not the transfer.
     const REACK_EVERY: Duration = Duration::from_millis(500);
 
-    // <- TAG_HEADER, then the JSON header. Datagram boundaries are lost on a
-    // byte stream, so accumulate until the JSON parses completely.
+    // <- TAG_HEADER, then the JSON header. Datagram boundaries are lost on
+    // a byte stream, so accumulate until the JSON parses completely - but
+    // no further than a legal header can be (the name is a filename):
+    // unbounded accumulation lets a peer pin memory with non-JSON garbage,
+    // and the per-chunk re-parse is quadratic in the bytes it sends.
+    const HEADER_MAX: usize = 4 * 1024;
     let mut tag = [0u8; 1];
     stream
         .read_exact(&mut tag)
@@ -2060,6 +2174,9 @@ where
     }
     let mut buf: Vec<u8> = Vec::new();
     let header: TransferHeader = loop {
+        if buf.len() > HEADER_MAX {
+            return Err(TunnelError::TransferStalled);
+        }
         let mut chunk = [0u8; 256];
         let n = timeout_at(
             tokio::time::Instant::now() + IDLE_TIMEOUT,
@@ -2086,6 +2203,9 @@ where
     if total_chunks > u32::MAX as u64 {
         return Err(TunnelError::TransferTooLarge(header.len));
     }
+    if header.len > max_bytes {
+        return Err(TunnelError::TransferTooLarge(header.len));
+    }
     let total_chunks = total_chunks as u32;
     eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
 
@@ -2105,9 +2225,7 @@ where
             && tokio::fs::metadata(&part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
         {
             let mut part = tokio::fs::File::open(&part_path).await?;
-            let mut prefix = vec![0u8; prefix_len as usize];
-            part.read_exact(&mut prefix).await?;
-            hasher.update(&prefix);
+            hash_prefix(&mut hasher, &mut part, prefix_len).await?;
             resume_chunks = (prefix_len / CHUNK as u64) as u32;
         }
     }
@@ -2145,15 +2263,25 @@ where
     // <- chunks, -> cumulative acks. Over a routed stream every read is
     // exact: tag (1), seq (4), then the chunk's known span (CHUNK for all
     // but the last, from the header). The re-ack timer repeats the
-    // cumulative ack so a lost ack datagram cannot stall the sender.
-    let mut received = resume_chunks as u64 * CHUNK as u64;
+    // cumulative ack so a lost ack datagram cannot stall the sender - but
+    // it must not pin this task forever against a silent peer, so the
+    // re-ack path also enforces the overall idle bound: if no chunk has
+    // landed for IDLE_TIMEOUT, the transfer is stalled.
+    const CHUNK_U: u64 = CHUNK as u64;
+    let mut received = resume_chunks as u64 * CHUNK_U;
     let mut next_reack = tokio::time::Instant::now() + REACK_EVERY;
+    let mut last_progress = tokio::time::Instant::now();
+    let mut data = [0u8; CHUNK];
     loop {
         let mut tagb = [0u8; 1];
         match timeout_at(next_reack, stream.read(&mut tagb)).await {
-            // Re-ack timer fired.
+            // Re-ack timer fired - but only while the peer is progressing.
             Err(_) => {
-                let ack = (received.div_ceil(CHUNK as u64) as u32).to_be_bytes();
+                if last_progress.elapsed() > IDLE_TIMEOUT {
+                    return Err(TunnelError::TransferStalled);
+                }
+                let ack =
+                    (received.div_ceil(CHUNK_U) as u32).to_be_bytes();
                 stream
                     .write_all(&[TAG_ACK, ack[0], ack[1], ack[2], ack[3]])
                     .await?;
@@ -2182,27 +2310,30 @@ where
         if seq >= total_chunks {
             return Err(TunnelError::TransferTooLarge(header.len));
         }
-        let start = seq as u64 * CHUNK as u64;
-        let span = (header.len - start).min(CHUNK as u64) as usize;
-        let mut data = vec![0u8; span];
+        let start = seq as u64 * CHUNK_U;
+        let span = (header.len - start).min(CHUNK_U) as usize;
         timeout_at(
             tokio::time::Instant::now() + IDLE_TIMEOUT,
-            stream.read_exact(&mut data),
+            stream.read_exact(&mut data[..span]),
         )
         .await
         .map_err(|_| TunnelError::TransferStalled)??;
-        hasher.update(&data);
-        file.write_all(&data).await?;
+        hasher.update(&data[..span]);
+        file.write_all(&data[..span]).await?;
         received += span as u64;
-        let cumulative = (seq + 1).to_be_bytes();
+        // u32::MAX is a legal (if absurd) seq from a peer; the increment
+        // must wrap, not panic (debug builds).
+        let next = seq.wrapping_add(1);
+        last_progress = tokio::time::Instant::now();
+        let cumulative = next.to_be_bytes();
         stream
             .write_all(&[TAG_ACK, cumulative[0], cumulative[1], cumulative[2], cumulative[3]])
             .await?;
         stream.flush().await?;
-        if (seq + 1) % WINDOW == 0 || (header.len > 0 && received >= header.len) {
+        if next % WINDOW == 0 || (header.len > 0 && received >= header.len) {
             file.flush().await?;
             if let Some((meta_path, meta)) = meta_state.as_mut() {
-                meta.chunks = seq as u64 + 1;
+                meta.chunks = next as u64;
                 let _ = tokio::fs::write(meta_path, serde_json::to_string(meta)?).await;
             }
         }
@@ -2565,7 +2696,7 @@ mod tests {
         });
         let out_dir2 = out_dir.clone();
         let receiver =
-            tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2).await });
+            tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2, u64::MAX).await });
         let (sent, got) = tokio::join!(sender, receiver);
         sent.unwrap().unwrap();
         let (_, path) = got.unwrap().unwrap();
@@ -2633,7 +2764,7 @@ mod tests {
         });
         let out_dir2 = out_dir.clone();
         let receiver =
-            tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2).await });
+            tokio::spawn(async move { receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2, u64::MAX).await });
         let (sent, got) = tokio::join!(sender, receiver);
         sent.unwrap().unwrap();
         let (_, path) = got.unwrap().unwrap();
@@ -2694,7 +2825,7 @@ mod tests {
         });
         let out_dir2 = out_dir.clone();
         let receiver = tokio::spawn(async move {
-            receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2).await
+            receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2, u64::MAX).await
         });
 
         let sent = sender.await.unwrap();
