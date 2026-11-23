@@ -120,7 +120,10 @@ Wait for a gift-wrapped invitation and join the mesh; with
 invitations from anyone else are ignored.
 .TP
 .B mesh members
-List the mesh's members and epoch.
+List the mesh's members and epoch, each with its presence from the
+member's freshest advert on the relays (online while the advert is within
+the TTL, otherwise when it was last seen; a member with no advert reads
+as offline).
 .TP
 .B mesh remove <npub>
 Remove a device from this (owner's) mesh; the epoch ratchets.

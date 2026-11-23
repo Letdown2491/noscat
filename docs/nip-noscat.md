@@ -367,6 +367,9 @@ authenticates the scanner to the holder just as any other dial would.
    streams above (file / chat / clipboard / raw bridge), and answer join
    requests: watch kind-30443 key packages, confirm each requester, then
    commit the Add and send the Welcome gift-wrapped to that requester alone.
+   It also subscribes to advert refreshes (kind 37195) to track which
+   mesh-mates are live: a member is online while an advert arrived within
+   the advert TTL.
 9. `chat` / `clipboard`: dial a fresh session, write the one-shot tag plus
    UTF-8 payload, half-close, and treat the peer's echoed FIN as delivery.
 

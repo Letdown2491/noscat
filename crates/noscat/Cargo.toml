@@ -23,6 +23,7 @@ tracing-subscriber = { workspace = true }
 nostr = { workspace = true }
 hex = { workspace = true }
 qrcode = { workspace = true }
+futures-util = { workspace = true }
 
 [lints]
 workspace = true

@@ -234,6 +234,17 @@ mesh app sends the phone's model, and the CLI defaults to the hostname.
 Names show up in the chat terminal, the roster (`mesh members`), and the
 Android device list; nothing depends on them (addresses stay npub-keyed).
 
+### Presence
+
+Nodes watch each other's advert refreshes on the relays, so the mesh shows
+who is live: the `up` chat's `to` list marks each peer "seen 5s ago" or
+"offline", `mesh members` prints the same from the freshest advert, and
+the Android device list shows an online dot. A node republishes its own
+advert at half the advert TTL with its current endpoints, so a network
+switch (Wi-Fi to cellular) heals on the next refresh without a restart.
+A peer counts as online while its advert arrived within the advert TTL
+(an hour); relays dropping and reconnecting never clears what was seen.
+
 ## Development
 
 The project targets atomic/bootc hosts: there is no toolchain on the host, builds run

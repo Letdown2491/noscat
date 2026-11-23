@@ -233,6 +233,9 @@ struct Inner {
     listen: SocketAddr,
     ttl: u64,
     events: std_mpsc::Sender<Event>,
+    /// Liveness of mesh-mates, fed by the advert watcher `up` starts.
+    /// Shared and never reset: relay reconnects only pause the feed.
+    presence: std::sync::Arc<noscat_core::relay::Presence>,
 }
 
 impl Inner {
@@ -402,6 +405,7 @@ impl Client {
                 listen: config.listen.unwrap_or_else(|| "0.0.0.0:41641".parse().unwrap()),
                 ttl: config.advert_ttl_secs,
                 events: tx,
+                presence: std::sync::Arc::new(noscat_core::relay::Presence::new()),
             }),
             events_rx: Some(rx),
         })
@@ -410,6 +414,20 @@ impl Client {
     /// This client's npub (the mesh address UIs display).
     pub fn npub(&self) -> &str {
         &self.inner.npub
+    }
+
+    /// Seconds since this mesh-mate's advert was last received by the
+    /// presence watcher [`Client::up`] starts; `None` = never seen. `npub`
+    /// is the hex form the mesh roster uses. Never errors: a member with
+    /// no recent advert just reads as offline.
+    pub fn member_age_secs(&self, npub_hex: &str) -> Option<u64> {
+        self.inner.presence.age_secs(npub_hex)
+    }
+
+    /// Online = the member's advert arrived within the advert TTL. Only
+    /// meaningful once [`Client::up`] is running (the watcher's lifetime).
+    pub fn member_online(&self, npub_hex: &str) -> bool {
+        self.inner.presence.is_online(npub_hex)
     }
 
     /// Take the event stream (once). Events arrive for every background
@@ -502,6 +520,22 @@ impl Client {
             npub: inner.identity.npub(),
             addr,
         });
+        // Presence feed: watch advert refreshes for the whole of the mesh so
+        // the roster and chat REPL can show liveness. Arrivals land in a
+        // shared map that relay reconnects never wipe; members that never
+        // advertise simply read as offline. Membership is checked at query
+        // time, so devices joining mid-run appear without a resubscribe.
+        {
+            let presence = inner.presence.clone();
+            let relays = inner.relays.clone();
+            inner.rt.handle().spawn(async move {
+                if let Ok(mut rx) = noscat_core::relay::watch_adverts_presence(&relays).await {
+                    while let Some(npub_hex) = rx.recv().await {
+                        presence.note(&npub_hex);
+                    }
+                }
+            });
+        }
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let mut listener = listener;

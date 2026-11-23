@@ -117,6 +117,10 @@ pub struct MeshMember {
     /// The device's friendly name from its advert, when it is serving and
     /// published one. None = show a generic label.
     pub name: Option<String>,
+    /// Seconds since the device's advert was last seen (published or
+    /// received), when one is known. Online = within the advert TTL;
+    /// None = no advert on the relays, treat as offline.
+    pub last_seen_secs: Option<u64>,
 }
 
 /// List the member devices of a mesh device directory, with each
@@ -139,7 +143,8 @@ pub fn mesh_members(dir: String) -> Result<Vec<MeshMember>, NoscatError> {
     rt.block_on(async move {
         let members = members_of(device)?;
         let relays = &relays;
-        let names = members.iter().map(|m| async move {
+        let now = nostr::prelude::Timestamp::now().as_secs();
+        let infos = members.iter().map(|m| async move {
             let Ok(pk) = nostr::prelude::PublicKey::parse(&m.npub) else {
                 return None;
             };
@@ -147,13 +152,18 @@ pub fn mesh_members(dir: String) -> Result<Vec<MeshMember>, NoscatError> {
                 .await
                 .ok()
                 .flatten()
-                .and_then(|a| a.name)
+                .map(|a| (a.name, now.saturating_sub(a.created_at)))
         });
-        let names = futures_util::future::join_all(names).await;
+        let infos = futures_util::future::join_all(infos).await;
         Ok(members
             .into_iter()
-            .zip(names)
-            .map(|(m, name)| MeshMember { name, ..m })
+            .zip(infos)
+            .map(|(m, info)| {
+                let (name, last_seen_secs) = info
+                    .map(|(n, s)| (n, Some(s)))
+                    .unwrap_or((None, None));
+                MeshMember { name, last_seen_secs, ..m }
+            })
             .collect())
     })
 }
@@ -257,7 +267,12 @@ fn members_of(device: noscat_core::mesh::Device) -> Result<Vec<MeshMember>, Nosc
             .map_err(NoscatError::fail)?
             .to_bech32()
             .map_err(NoscatError::fail)?;
-        out.push(MeshMember { npub, is_owner: m.is_owner, name: None });
+        out.push(MeshMember {
+            npub,
+            is_owner: m.is_owner,
+            name: None,
+            last_seen_secs: None,
+        });
     }
     Ok(out)
 }

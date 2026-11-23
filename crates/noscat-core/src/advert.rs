@@ -14,9 +14,14 @@ use crate::identity::Identity;
 /// Kind for noscat overlay adverts: parameterized replaceable (30000-39999),
 /// following the FIPS advert convention (kind 37195).
 pub const ADVERT_KIND: u16 = 37195;
-
 /// Fixed `d` tag value scoping all noscat adverts to one replaceable slot per node.
 pub const ADVERT_IDENTIFIER: &str = "noscat-overlay-v1";
+
+/// The default advert lifetime, and the presence window: a mesh-mate
+/// counts as online while their freshest advert was received (or was
+/// published, for point-in-time checks) within this many seconds. Defined
+/// here, next to the advert code it belongs to, so every consumer agrees.
+pub const ADVERT_TTL_SECS: u64 = 3600;
 
 /// How a node is reachable. Mirrors the FIPS `OverlayAdvert` endpoint shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +61,9 @@ pub struct Advert {
     pub endpoints: Vec<Endpoint>,
     /// Unix seconds after which this advert should be considered stale.
     pub expires_at: u64,
+    /// Unix seconds when this advert was published (the event's created_at):
+    /// for a freshest-advert query this is the node's last-seen time.
+    pub created_at: u64,
     /// The node's friendly device name, when it published one.
     pub name: Option<String>,
 }
@@ -144,6 +152,7 @@ impl Advert {
             noise_pub,
             endpoints: payload.endpoints,
             expires_at,
+            created_at: event.created_at.as_secs(),
             name: payload.name,
         })
     }

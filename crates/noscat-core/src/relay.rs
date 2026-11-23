@@ -258,3 +258,184 @@ pub async fn watch_key_packages(
     });
     Ok(rx)
 }
+
+/// Presence tracking for mesh-mates: when each member's advert was last
+/// received. Keyed by hex npub (the mesh roster's native form), so the
+/// client and UIs never need the nostr types to query it. Held by the
+/// caller (the node's client), so relay reconnects never wipe it - only
+/// fresh arrivals update it, and a member with no recent advert simply
+/// reads as offline rather than erroring.
+pub struct Presence {
+    last_seen: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+impl Presence {
+    pub fn new() -> Self {
+        Self {
+            last_seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Record an advert arrival for `npub` (hex) as of `at`.
+    pub fn note_at(&self, npub: &str, at: std::time::Instant) {
+        self.last_seen
+            .lock()
+            .expect("presence map")
+            .insert(npub.to_string(), at);
+    }
+
+    /// Record an advert arrival for `npub` (hex) as of now.
+    pub fn note(&self, npub: &str) {
+        self.note_at(npub, std::time::Instant::now());
+    }
+
+    /// Seconds since `npub`'s (hex) last advert arrival; `None` = never seen.
+    pub fn age_secs(&self, npub: &str) -> Option<u64> {
+        self.last_seen
+            .lock()
+            .expect("presence map")
+            .get(npub)
+            .map(|t| t.elapsed().as_secs())
+    }
+
+    /// Online = an advert arrived within the advert TTL
+    /// ([`crate::advert::ADVERT_TTL_SECS`]). A member with no recent advert is
+    /// offline, never an error.
+    pub fn is_online(&self, npub: &str) -> bool {
+        matches!(self.age_secs(npub), Some(age) if age < crate::advert::ADVERT_TTL_SECS)
+    }
+}
+
+impl Default for Presence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Subscribe to noscat adverts (kind 37195) on the relays and forward each
+/// valid advert's author (hex npub) to the returned channel; the stream
+/// lives until the receiver is dropped. This is the node's presence feed:
+/// every arrival is recorded in the caller's [`Presence`] map, and callers
+/// filter to mesh-mates at query time, so devices that join mid-run show up
+/// without resubscribing. Reconnects are handled inside (a dropped relay
+/// stream or an unreachable relay just restarts the subscription after a
+/// short back off), so the caller's last-seen map survives relay churn
+/// untouched.
+pub async fn watch_adverts_presence(
+    relays: &[String],
+) -> Result<tokio::sync::mpsc::Receiver<String>, RelayError> {
+    if relays.is_empty() {
+        return Err(RelayError::NoRelays);
+    }
+    let filter = Filter::new()
+        .kind(Kind::Custom(ADVERT_KIND))
+        .identifier(ADVERT_IDENTIFIER);
+    let relays = relays.to_vec();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        while !tx.is_closed() {
+            let client = match connect_client(&relays).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(%e, "presence: relays unreachable; retrying");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            if let Err(e) = client.subscribe(filter.clone()).await {
+                tracing::warn!(%e, "presence: subscribe failed; retrying");
+                client.shutdown().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            let mut notifications = client.notifications();
+            loop {
+                match notifications.next().await {
+                    Some(ClientNotification::Event { event, .. }) => {
+                        match Advert::from_event(&event, Timestamp::now()) {
+                            Ok(a) => {
+                                if tx.try_send(a.npub.to_string()).is_err() {
+                                    return; // receiver gone: stop watching
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(%e, "presence: ignoring invalid advert")
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => break, // relay stream ended: resubscribe
+                }
+            }
+            client.shutdown().await;
+            if tx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+    Ok(rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+    const B: &str = "d5b9b0b6c3d9a4b0c1f2e3d4c5b6a79881726354435261728394a5b6c7d8e9f0";
+
+    #[test]
+    fn presence_tracks_arrivals() {
+        let p = Presence::new();
+        assert!(!p.is_online(A));
+        assert_eq!(p.age_secs(A), None);
+        p.note(A);
+        assert_eq!(p.age_secs(A), Some(0));
+        assert!(p.is_online(A));
+    }
+
+    #[test]
+    fn presence_ages_out_after_the_advert_ttl() {
+        let p = Presence::new();
+        // Arrived just past the TTL window: offline, but still remembered.
+        p.note_at(
+            A,
+            std::time::Instant::now() - Duration::from_secs(crate::advert::ADVERT_TTL_SECS + 5),
+        );
+        assert!(!p.is_online(A));
+        assert!(p.age_secs(A).is_some());
+        // Still inside the window: online.
+        p.note_at(
+            A,
+            std::time::Instant::now() - Duration::from_secs(crate::advert::ADVERT_TTL_SECS - 5),
+        );
+        assert!(p.is_online(A));
+    }
+
+    #[test]
+    fn presence_never_errors_on_unknown_members() {
+        let p = Presence::new();
+        p.note(A);
+        // An unknown member reads as offline with no age, no panic.
+        assert_eq!(p.age_secs(B), None);
+        assert!(!p.is_online(B));
+        // And the known member is unaffected.
+        assert!(p.is_online(A));
+    }
+
+    #[test]
+    fn presence_survives_reconnect_shaped_updates() {
+        // The watcher re-sends the same author after every resubscribe;
+        // recording it again must refresh, not corrupt, the entry.
+        let p = Presence::new();
+        p.note(A);
+        p.note_at(
+            A,
+            std::time::Instant::now() - Duration::from_secs(1200),
+        );
+        assert_eq!(p.age_secs(A), Some(1200));
+        p.note(A);
+        assert_eq!(p.age_secs(A), Some(0));
+        assert!(p.is_online(A));
+    }
+}

@@ -692,8 +692,10 @@ fn main() -> anyhow::Result<()> {
         format!("{}...", &npub[..npub.len().min(16)])
     }
 
-    /// Print the roster for the `to` listing.
-    fn list_roster(peers: &std::sync::Mutex<PeerBook>) {
+    /// Print the roster for the `to` listing, each peer with its live
+    /// presence from the advert watcher the node runs ("5s ago" fresh,
+    /// "offline" otherwise).
+    fn list_roster(client: &Client, peers: &std::sync::Mutex<PeerBook>) {
         let book = peers.lock().expect("peer book");
         if book.roster.is_empty() {
             eprintln!("# 💬 roster still loading - try again in a moment");
@@ -702,9 +704,24 @@ fn main() -> anyhow::Result<()> {
         for (npub, owner, name) in &book.roster {
             let owner_tag = if *owner { " [owner]" } else { "" };
             let short = &npub[..npub.len().min(16)];
+            // The presence map is hex-keyed; the roster speaks bech32.
+            let presence = match nostr::prelude::PublicKey::parse(npub) {
+                Ok(pk) => match client.member_age_secs(&pk.to_string()) {
+                    Some(age) if client.member_online(&pk.to_string()) => {
+                        format!(", seen {age}s ago")
+                    }
+                    _ => ", offline".to_string(),
+                },
+                Err(_) => String::new(),
+            };
             match name {
-                Some(n) => eprintln!("# 💬 {n}{owner_tag} - {} ({short})", short_npub(npub)),
-                None => eprintln!("# 💬 {owner_tag}{} ({short})", short_npub(npub)),
+                Some(n) => {
+                    eprintln!("# 💬 {n}{owner_tag} - {}{presence} ({short})", short_npub(npub))
+                }
+                None => eprintln!(
+                    "# 💬 {owner_tag}{}{presence} ({short})",
+                    short_npub(npub)
+                ),
             }
         }
     }
@@ -835,7 +852,7 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 if line == "to" {
-                    list_roster(&peers);
+                    list_roster(&client, &peers);
                     continue;
                 }
                 if line == "clip" {
@@ -860,7 +877,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 if let Some(prefix) = line.strip_prefix("to ").map(str::trim) {
                     if prefix.is_empty() {
-                        list_roster(&peers);
+                        list_roster(&client, &peers);
                         continue;
                     }
                     match peers.lock().expect("peer book").resolve(prefix) {
@@ -870,7 +887,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         Err(e) => {
                             eprintln!("# ⚠️  {e}");
-                            list_roster(&peers);
+                            list_roster(&client, &peers);
                         }
                     }
                     continue;
@@ -1140,9 +1157,41 @@ fn main() -> anyhow::Result<()> {
                 }
                 MeshCommand::Members { dir } => {
                     let device = noscat_core::mesh::Device::open(&dir)?;
-                    for m in device.list_members()? {
+                    let members = device.list_members()?;
+                    // Point-in-time presence: each member's freshest advert
+                    // says when it was last live (published within the
+                    // advert TTL = online). Offline members read as
+                    // offline, never an error.
+                    let relays = relays_or_default(Vec::new());
+                    let now = nostr::prelude::Timestamp::now().as_secs();
+                    let ages = members.iter().map(|m| async {
+                        let Ok(pk) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
+                            return None;
+                        };
+                        noscat_core::relay::fetch_advert_for(&relays, None, Some(pk))
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|a| now.saturating_sub(a.created_at))
+                    });
+                    let ages = rt.block_on(futures_util::future::join_all(ages));
+                    for (m, age) in members.into_iter().zip(ages) {
+                        let presence = match age {
+                            Some(a) if a < noscat_core::advert::ADVERT_TTL_SECS => {
+                                format!("online, advert {a}s ago")
+                            }
+                            Some(a) => {
+                                let (v, unit) = if a < 86_400 {
+                                    (a / 60, "min")
+                                } else {
+                                    (a / 3_600, "h")
+                                };
+                                format!("offline, advert {v} {unit} ago")
+                            }
+                            None => "offline, no advert".to_string(),
+                        };
                         println!(
-                            "{} epoch={} {}",
+                            "{} epoch={} {} ({presence})",
                             if m.is_owner { "owner " } else { "member" },
                             m.epoch,
                             m.npub
