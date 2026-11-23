@@ -83,12 +83,30 @@ pub async fn publish_advert(
 /// Fetch the freshest advert matching a Noise key and/or npub from the relays.
 ///
 /// Subscribes, waits up to [`FETCH_WAIT`] for a valid, unexpired advert, then
-/// disconnects. `None` means "nothing valid arrived in time".
+/// disconnects. `None` means "nothing valid arrived in time". Results are
+/// cached briefly ([`ADVERT_CACHE_TTL`]): lookups repeat constantly (accept-
+/// time peer display, roster names, dials) and relays rate-limit the churn.
 pub async fn fetch_advert_for(
     relays: &[String],
     noise_key: Option<[u8; 32]>,
     npub: Option<PublicKey>,
 ) -> Result<Option<Advert>, RelayError> {
+    const ADVERT_CACHE_TTL: Duration = Duration::from_secs(30);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<Advert>)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cache_key = match (noise_key, npub) {
+        (Some(k), _) => format!("k:{}", hex::encode(k)),
+        (_, Some(p)) => format!("n:{p}"),
+        (None, None) => String::new(),
+    };
+    if let Some((at, advert)) = cache.lock().expect("advert cache").get(&cache_key) {
+        if at.elapsed() < ADVERT_CACHE_TTL {
+            return Ok(advert.clone());
+        }
+    }
+
     let mut filter = Filter::new()
         .kind(Kind::Custom(ADVERT_KIND))
         .identifier(ADVERT_IDENTIFIER);
@@ -103,6 +121,7 @@ pub async fn fetch_advert_for(
     let found = timeout(
         FETCH_WAIT,
         async {
+            let cache_key = cache_key.clone();
             while let Some(notification) = notifications.next().await {
                 let ClientNotification::Event { event, .. } = notification else {
                     continue;
@@ -119,6 +138,10 @@ pub async fn fetch_advert_for(
                         continue;
                     }
                 }
+                cache
+                    .lock()
+                    .expect("advert cache")
+                    .insert(cache_key, (std::time::Instant::now(), Some(advert.clone())));
                 return Some(advert);
             }
             None
@@ -128,6 +151,10 @@ pub async fn fetch_advert_for(
     .unwrap_or(None);
 
     client.shutdown().await;
+    cache
+        .lock()
+        .expect("advert cache")
+        .insert(cache_key, (std::time::Instant::now(), found.clone()));
     Ok(found)
 }
 

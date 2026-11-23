@@ -292,7 +292,13 @@ fn default_device_dir() -> std::path::PathBuf {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Default to our own logs only: nostr_sdk logs every relay reconnect as
+    // ERROR (rate limits included), which drowns the chat REPL. RUST_LOG
+    // restores the full firehose.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("noscat=info,noscat_core=info,nostr_sdk=off")
+    });
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let cli = Cli::parse();
 
     fn relays_or_default(relays: Vec<String>) -> Vec<String> {
@@ -486,7 +492,142 @@ fn main() -> anyhow::Result<()> {
 
     // Narrate one client event on stderr - the same shape the core's
     // run-to-completion operations used to print.
-    fn print_event(ev: Event) {
+    /// The tailnet roster plus a noise-key -> npub map, for the `up` chat
+    /// REPL: incoming chats address peers by their Noise static key until an
+    /// advert lookup resolves them, and `to <prefix>` needs real npubs.
+    struct PeerBook {
+        /// (bech32 npub, is_owner, friendly name from the advert)
+        roster: Vec<(String, bool, Option<String>)>,
+        /// Noise static key (hex) -> bech32 npub
+        noise_to_npub: std::collections::HashMap<String, String>,
+    }
+
+    impl PeerBook {
+        /// The best display label for a chat peer: its npub prefix when the
+        /// roster or advert map knows one, else the raw peer string.
+        fn label(&self, peer: &str) -> String {
+            self.resolve_display(peer)
+                .unwrap_or_else(|| peer.to_string())
+        }
+
+        /// The npub a chat peer refers to, if the book knows it.
+        fn resolve_display(&self, peer: &str) -> Option<String> {
+            if peer.starts_with("npub1") {
+                return Some(peer.to_string());
+            }
+            let hex = peer.strip_prefix("noise key ").unwrap_or(peer);
+            if hex.len() == 64 {
+                return self.noise_to_npub.get(hex).cloned();
+            }
+            None
+        }
+
+        /// Resolve a `to <prefix>`: npub prefix, a noise-key prefix (as
+        /// shown in a reply hint), or `owner`.
+        fn resolve(&self, prefix: &str) -> anyhow::Result<String> {
+            use anyhow::bail;
+            let prefix = prefix
+                .strip_prefix("noise key ")
+                .unwrap_or(prefix)
+                .trim();
+            if prefix.eq_ignore_ascii_case("owner") {
+                if let Some((npub, _, _)) = self.roster.iter().find(|(_, owner, _)| *owner) {
+                    return Ok(npub.clone());
+                }
+                bail!("this device is not the tailnet owner");
+            }
+            let mut npub_hits: Vec<String> = self
+                .roster
+                .iter()
+                .filter(|(npub, _, _)| npub.starts_with(prefix))
+                .map(|(npub, _, _)| npub.clone())
+                .collect();
+            if npub_hits.len() == 1 {
+                return Ok(npub_hits.remove(0));
+            }
+            let noise_hits: Vec<String> = self
+                .noise_to_npub
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .map(|(_, npub)| npub.clone())
+                .collect();
+            match noise_hits.len().max(npub_hits.len()) {
+                1 => Ok(noise_hits.first().cloned().unwrap_or_else(|| {
+                    npub_hits.first().cloned().unwrap_or_default()
+                })),
+                0 if self.roster.is_empty() => bail!("roster still loading - try again in a moment"),
+                0 => bail!("no device matches '{prefix}'"),
+                _ => bail!("'{prefix}' is ambiguous"),
+            }
+        }
+    }
+
+    fn short_npub(npub: &str) -> String {
+        format!("{}...", &npub[..npub.len().min(16)])
+    }
+
+    /// Print the roster for the `to` listing.
+    fn list_roster(peers: &std::sync::Mutex<PeerBook>) {
+        let book = peers.lock().expect("peer book");
+        if book.roster.is_empty() {
+            eprintln!("# 💬 roster still loading - try again in a moment");
+            return;
+        }
+        for (npub, owner, name) in &book.roster {
+            let owner_tag = if *owner { " [owner]" } else { "" };
+            let short = &npub[..npub.len().min(16)];
+            match name {
+                Some(n) => eprintln!("# 💬 {n}{owner_tag} - {} ({short})", short_npub(npub)),
+                None => eprintln!("# 💬 {owner_tag}{} ({short})", short_npub(npub)),
+            }
+        }
+    }
+
+    /// Load the roster and each member's advert in the background, filling
+    /// the peer book the REPL and the chat display share.
+    fn spawn_peer_book(
+        device_dir: std::path::PathBuf,
+        relays: Vec<String>,
+    ) -> std::sync::Arc<std::sync::Mutex<PeerBook>> {
+        let book = std::sync::Arc::new(std::sync::Mutex::new(PeerBook {
+            roster: Vec::new(),
+            noise_to_npub: std::collections::HashMap::new(),
+        }));
+        let b = book.clone();
+        std::thread::spawn(move || {
+            let members = noscat_core::tailnet::Device::open(&device_dir)
+                .and_then(|d| d.list_members())
+                .unwrap_or_default();
+            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            for m in members {
+                use nostr::nips::nip19::ToBech32;
+                let Ok(npub_hex) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
+                    continue;
+                };
+                let Ok(npub) = npub_hex.to_bech32() else { continue };
+                let advert = rt.block_on(noscat_core::relay::fetch_advert_for(
+                    &relays,
+                    None,
+                    Some(npub_hex),
+                ));
+                if let Ok(Some(a)) = advert {
+                    b.lock()
+                        .expect("peer book")
+                        .noise_to_npub
+                        .insert(hex::encode(a.noise_pub), npub.clone());
+                    b.lock().expect("peer book").roster.push((npub, m.is_owner, a.name));
+                } else {
+                    b.lock().expect("peer book").roster.push((npub, m.is_owner, None));
+                }
+            }
+        });
+        book
+    }
+
+    fn print_event(ev: Event, peers: Option<&std::sync::Mutex<PeerBook>>) {
         match ev {
             Event::Listening { npub, addr } => {
                 eprintln!("# 🐈 serving as {npub} on udp/{addr} - waiting for a peer… (Ctrl-C to quit)");
@@ -520,8 +661,11 @@ fn main() -> anyhow::Result<()> {
             Event::TransferDone { .. } => {}
             Event::TransferProgress { .. } => {} // the CLI narrates completion only
             Event::ChatMessage { peer, text } => {
-                println!("# 💬 {}...: {}", &peer[..peer.len().min(16)], text);
-                println!("#    reply: 'to {}' then type", &peer[..peer.len().min(16)]);
+                let label = peers
+                    .and_then(|b| b.lock().ok().map(|b| b.label(&peer)))
+                    .unwrap_or_else(|| peer.clone());
+                println!("# 💬 {label}: {text}");
+                println!("#    reply: 'to {label}' then type");
             }
             Event::ChatFailed { peer, error } => {
                 eprintln!("# ⚠️  message to {}... not delivered: {error}", &peer[..peer.len().min(16)])
@@ -532,69 +676,61 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    /// Reply to tailnet chats from the `up` terminal: `to <npub prefix>`
-    /// picks the peer, every other non-empty line goes to them as a chat
-    /// message. Incoming messages print via the event printer.
-    fn spawn_chat_repl(client: Client, device_dir: std::path::PathBuf) {
+    /// Reply to tailnet chats from the `up` terminal: `to <prefix>` picks a
+    /// peer (a roster npub prefix, `owner`, or the noise-key prefix from an
+    /// incoming message's reply hint), every other non-empty line goes to
+    /// them as a chat message. Bare `to` lists the roster.
+    fn spawn_chat_repl(
+        client: Client,
+        peers: std::sync::Arc<std::sync::Mutex<PeerBook>>,
+    ) {
         std::thread::spawn(move || {
             let mut target: Option<String> = None;
-            eprintln!("# 💬 chat ready: 'to <npub prefix>' picks a peer, then type lines to send");
+            eprintln!("# 💬 chat ready: 'to' lists devices, 'to <prefix>' picks one, then type lines to send");
             for line in std::io::stdin().lines().map_while(Result::ok) {
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
                 }
+                if line == "to" {
+                    list_roster(&peers);
+                    continue;
+                }
                 if let Some(prefix) = line.strip_prefix("to ").map(str::trim) {
-                    match resolve_member_prefix(&device_dir, prefix) {
+                    if prefix.is_empty() {
+                        list_roster(&peers);
+                        continue;
+                    }
+                    match peers.lock().expect("peer book").resolve(prefix) {
                         Ok(npub) => {
-                            eprintln!("# 💬 chatting with {}...", &npub[..16]);
+                            eprintln!("# 💬 chatting with {}...", short_npub(&npub));
                             target = Some(npub);
                         }
-                        Err(e) => eprintln!("# ⚠️  {e}"),
+                        Err(e) => {
+                            eprintln!("# ⚠️  {e}");
+                            list_roster(&peers);
+                        }
                     }
                     continue;
                 }
                 match &target {
                     Some(npub) => client.send_chat(npub, &line),
-                    None => eprintln!("# 💬 no peer selected: 'to <npub prefix>' first"),
+                    None => eprintln!("# 💬 no peer selected: 'to' lists devices, 'to <prefix>' picks one"),
                 }
             }
         });
     }
 
-    /// Resolve a (possibly partial) npub against the tailnet roster: exact
-    /// npub, unique prefix, or `owner` for the owner device.
-    fn resolve_member_prefix(
-        device_dir: &std::path::PathBuf,
-        prefix: &str,
-    ) -> anyhow::Result<String> {
-        use anyhow::bail;
-        let device = noscat_core::tailnet::Device::open(device_dir)?;
-        let members = device.list_members()?;
-        if prefix.eq_ignore_ascii_case("owner") {
-            return members
-                .into_iter()
-                .find(|m| m.is_owner)
-                .map(|m| m.npub)
-                .ok_or_else(|| anyhow::anyhow!("this device is not the tailnet owner"));
-        }
-        let hits: Vec<String> = members
-            .into_iter()
-            .map(|m| m.npub)
-            .filter(|n| n.starts_with(prefix))
-            .collect();
-        match hits.len() {
-            1 => Ok(hits[0].clone()),
-            0 => bail!("no member matches '{prefix}'"),
-            _ => bail!("'{prefix}' is ambiguous ({} matches)", hits.len()),
-        }
-    }
-
     // Print events in the background while the main thread runs a blocking
-    // session (serve/pipe bridge stdio and cannot drain themselves).
-    fn spawn_printer(rx: std::sync::mpsc::Receiver<Event>) {        std::thread::spawn(move || {
+    // session (serve/pipe bridge stdio and cannot drain themselves). `peers`
+    // decorates chat messages with roster identities when running as a node.
+    fn spawn_printer(
+        rx: std::sync::mpsc::Receiver<Event>,
+        peers: Option<std::sync::Arc<std::sync::Mutex<PeerBook>>>,
+    ) {
+        std::thread::spawn(move || {
             for ev in rx {
-                print_event(ev);
+                print_event(ev, peers.as_deref());
             }
         });
     }
@@ -666,7 +802,7 @@ fn main() -> anyhow::Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
             let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
-            spawn_printer(rx);
+            spawn_printer(rx, None);
             client.serve_stdio()?;
         }
         Command::Pipe {
@@ -680,7 +816,7 @@ fn main() -> anyhow::Result<()> {
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
-            spawn_printer(rx);
+            spawn_printer(rx, None);
             client.pipe_stdio(&target)?;
         }
         Command::Send { path, target, relays, identity, tailnet } => {
@@ -699,7 +835,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     _ => {}
                 }
-                print_event(ev);
+                print_event(ev, None);
             }
         }
         Command::Receive { out, listen, relays, identity, tailnet, ttl } => {
@@ -713,7 +849,7 @@ fn main() -> anyhow::Result<()> {
             let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
             // Report readiness up front: receive_file blocks on the sender's
             // handshake, and without this the user stares at silence.
-            print_event(Event::Listening { npub: client.npub().to_string(), addr: listen });
+            print_event(Event::Listening { npub: client.npub().to_string(), addr: listen }, None);
             client.receive_file(out);
             for ev in rx {
                 match &ev {
@@ -723,7 +859,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     _ => {}
                 }
-                print_event(ev);
+                print_event(ev, None);
             }
         }
         Command::Up { out, to, listen, relays, identity, tailnet, ttl, name } => {
@@ -752,10 +888,11 @@ fn main() -> anyhow::Result<()> {
             // relays for devices asking to join (their published key
             // packages) and invites them on confirmation.
             let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl, Some(device_name))?;
-            spawn_printer(rx);
+            let peers = spawn_peer_book(device_dir.clone(), relays_or_default(relays.clone()));
+            spawn_printer(rx, Some(peers.clone()));
             spawn_pairing_watcher(device_dir.clone(), relays_or_default(relays));
             client.up(out_dir, to)?;
-            spawn_chat_repl(client.clone(), device_dir);
+            spawn_chat_repl(client.clone(), peers);
             // The node runs on the client's background tasks; park forever
             // (park can return spuriously, so loop) until Ctrl-C.
             loop {
@@ -781,7 +918,7 @@ fn main() -> anyhow::Result<()> {
                     Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
                     _ => {}
                 }
-                print_event(ev);
+                print_event(ev, None);
             }
         }
         Command::Forward { target, port, bind, relays, identity, tailnet } => {
@@ -798,7 +935,7 @@ fn main() -> anyhow::Result<()> {
                     Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
                     _ => {}
                 }
-                print_event(ev);
+                print_event(ev, None);
             }
         }
         Command::Tailnet(cmd) => {
