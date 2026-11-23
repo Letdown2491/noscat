@@ -50,7 +50,7 @@ enum Command {
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
-        /// Reuse the same identity across runs by storing its secret in this file.
+        /// Identity file holding the secret; created automatically on first use.
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this tailnet's device directory (MLS group
@@ -100,7 +100,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Reuse the same identity across runs by storing its secret in this file.
+        /// Identity file holding the secret; created automatically on first use.
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this tailnet's device directory.
@@ -121,7 +121,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Reuse the same identity across runs by storing its secret in this file.
+        /// Identity file holding the secret; created automatically on first use.
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnels to this tailnet's device directory.

@@ -55,7 +55,7 @@ pub enum IdentitySource {
     Ephemeral,
     /// An existing identity, hex secret or `nsec1...`.
     Secret(String),
-    /// A file holding the secret (the `serve --identity` convention).
+    /// A file holding the secret; generated and written on first use if missing.
     File(PathBuf),
 }
 
@@ -220,11 +220,56 @@ impl Client {
             IdentitySource::Secret(s) => Identity::from_secret(s)
                 .map_err(|e| ClientError::Identity(e.to_string()))?,
             IdentitySource::File(path) => {
-                let secret = std::fs::read_to_string(path).map_err(|e| {
-                    ClientError::Identity(format!("cannot read {}: {e}", path.display()))
-                })?;
-                Identity::from_secret(secret.trim())
-                    .map_err(|e| ClientError::Identity(e.to_string()))?
+                if !path.exists() {
+                    // First run on this node: generate the identity and store
+                    // it, so `--identity <file>` is the whole setup.
+                    let identity = Identity::generate();
+                    let secret = identity.secret_hex();
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir).map_err(|e| {
+                            ClientError::Identity(format!(
+                                "cannot create {}: {e}",
+                                dir.display()
+                            ))
+                        })?;
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::io::Write as _;
+                        use std::os::unix::fs::OpenOptionsExt as _;
+                        let mut f = std::fs::OpenOptions::new()
+                            .mode(0o600)
+                            .write(true)
+                            .create_new(true)
+                            .open(path)
+                            .map_err(|e| {
+                                ClientError::Identity(format!(
+                                    "cannot write {}: {e}",
+                                    path.display()
+                                ))
+                            })?;
+                        f.write_all(secret.as_bytes()).map_err(|e| {
+                            ClientError::Identity(format!(
+                                "cannot write {}: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    }
+                    #[cfg(not(unix))]
+                    std::fs::write(path, secret.as_bytes()).map_err(|e| {
+                        ClientError::Identity(format!(
+                            "cannot write {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    identity
+                } else {
+                    let secret = std::fs::read_to_string(path).map_err(|e| {
+                        ClientError::Identity(format!("cannot read {}: {e}", path.display()))
+                    })?;
+                    Identity::from_secret(secret.trim())
+                        .map_err(|e| ClientError::Identity(e.to_string()))?
+                }
             }
         };
         let psk = match &config.tailnet_dir {

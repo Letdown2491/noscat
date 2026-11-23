@@ -127,3 +127,46 @@ async fn connect_fails_fast_without_reachable_advert() {
     .unwrap();
     assert!(res.is_err()); // no advert anywhere
 }
+
+/// `--identity <file>` is the whole setup: a missing file is generated and
+/// stored (0600), and later runs reuse the same identity.
+#[test]
+fn identity_file_is_created_and_stable() {
+    let dir = std::env::temp_dir().join(format!(
+        "noscat-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let path = dir.join("nested").join("identity.hex");
+
+    let first = Client::start(ClientConfig {
+        identity: IdentitySource::File(path.clone()),
+        ..ClientConfig::default()
+    })
+    .expect("a missing identity file should be generated, not an error");
+
+    let stored = std::fs::read_to_string(&path).expect("identity file written");
+    assert_eq!(
+        Identity::from_secret(stored.trim()).unwrap().npub(),
+        first.npub()
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "secret file must be owner-only");
+    }
+
+    let second = Client::start(ClientConfig {
+        identity: IdentitySource::File(path.clone()),
+        ..ClientConfig::default()
+    })
+    .unwrap();
+    assert_eq!(first.npub(), second.npub(), "same file, same identity");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
