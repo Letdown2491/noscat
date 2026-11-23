@@ -672,7 +672,7 @@ fn main() -> anyhow::Result<()> {
             let device_dir = tailnet_dir_path(&tailnet);
             let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl)?;
             spawn_printer(rx);
-            spawn_pairing_watcher(device_dir, relays);
+            spawn_pairing_watcher(device_dir, relays_or_default(relays));
             client.up(out_dir, to)?;
             // The node runs on the client's background tasks; park forever
             // (park can return spuriously, so loop) until Ctrl-C.
