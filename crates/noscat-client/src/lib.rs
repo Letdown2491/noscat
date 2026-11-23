@@ -372,9 +372,8 @@ impl Inner {
                 let fallback = self.psk;
                 tokio::task::block_in_place(|| {
                     noscat_core::mesh::Device::open(&dir)
-                        .and_then(|d| d.tunnel_psk())
+                        .and_then(|d| d.tunnel_psk32())
                         .ok()
-                        .and_then(|psk| <[u8; 32]>::try_from(psk).ok())
                         .or(fallback)
                 })
             }
@@ -519,12 +518,10 @@ impl Client {
             Some(dir) => {
                 let device = noscat_core::mesh::Device::open(dir)
                     .map_err(|e| ClientError::Mesh(e.to_string()))?;
-                let psk = device
-                    .tunnel_psk()
-                    .map_err(|e| ClientError::Mesh(e.to_string()))?;
                 Some(
-                    <[u8; 32]>::try_from(psk)
-                        .map_err(|_| ClientError::Mesh("unexpected PSK length".into()))?,
+                    device
+                        .tunnel_psk32()
+                        .map_err(|e| ClientError::Mesh(e.to_string()))?,
                 )
             }
             None => None,
@@ -1122,6 +1119,8 @@ impl Client {
                 }
             };
             let psk = inner.fresh_psk();
+            // Announce the session like the other tunnel users: the core's
+            // eprintln used to double up with this event in UIs.
             let outcome = tunnel::send_file(
                 &inner.identity,
                 &target,
@@ -1145,6 +1144,9 @@ impl Client {
                 }
             }
             match outcome {
+                // The send path narrates through the transfer events
+                // (progress/done/failed/partial); no TunnelUp - the
+                // session lives only inside this call.
                 Ok(()) => inner.emit(Event::TransferDone { peer: target, path: source }),
                 Err(tunnel::TunnelError::TransferCancelled) => {
                     inner.emit(Event::TransferCancelled { peer: target, path: source })
@@ -1186,8 +1188,9 @@ impl Client {
     }
 
     /// Receive one file into `out_dir`. Returns immediately; the outcome
-    /// arrives as [`Event::TransferDone`] (with the verified final path) or
-    /// [`Event::TransferFailed`].
+    /// arrives as [`Event::TransferDone`] (verified final path),
+    /// [`Event::TransferPartial`] (incomplete: the kept `.noscat-part` is
+    /// a resume seed, not a usable file) or [`Event::TransferFailed`].
     pub fn receive_file(&self, out_dir: PathBuf) {
         let inner = self.inner.clone();
         let rt = inner.rt.handle().clone();

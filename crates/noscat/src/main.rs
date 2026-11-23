@@ -40,7 +40,8 @@ enum Command {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Serve a tunnel: advertise a UDP endpoint, bridge the first peer to stdio.
+    /// Serve a tunnel: advertise a UDP endpoint, bridge the first peer to
+    /// stdio. Without --mesh, any peer who learns the npub can dial.
     Serve {
         /// UDP address to listen on.
         #[arg(long, default_value_t = format!("0.0.0.0:{}", noscat_core::relay::DEFAULT_LISTEN_PORT))]
@@ -117,9 +118,12 @@ enum Command {
         #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
     },
-    /// Expose a local TCP service to mesh peers over tunnels.
-    /// Run the persistent mesh node: advertise, accept any number of
-    /// inbound peers, auto-receive files, bridge raw tunnels.
+    /// Expose a local TCP service over tunnels. Without --mesh, any peer
+    /// who learns the npub can connect.
+    /// Run the persistent mesh node: advertise, accept inbound peers,
+    /// auto-receive files, bridge raw tunnels. With --mesh only mesh
+    /// members can connect; WITHOUT it the advert is public and any peer
+    /// who learns the npub can dial in.
     Up {
         /// Directory to save inbound files into (default: ~/Downloads).
         #[arg(long)]
@@ -454,7 +458,7 @@ fn main() -> anyhow::Result<()> {
 
     fn relays_or_default(relays: Vec<String>) -> Vec<String> {
         if relays.is_empty() {
-            noscat_core::relay::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+            noscat_core::relay::default_relays()
         } else {
             relays
         }
@@ -492,11 +496,8 @@ fn main() -> anyhow::Result<()> {
     // The mesh's epoch PSK, if the operator scoped the tunnel to a group.
     fn mesh_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
         let device = noscat_core::mesh::Device::open(dir)?;
-        let psk = device.tunnel_psk().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let psk: [u8; 32] = psk
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("unexpected PSK length"))?;
-        eprintln!("# 🔐 tunnel bound to mesh (psk) (epoch PSK loaded from {})", dir.display());
+        let psk = device.tunnel_psk32().map_err(|e| anyhow::anyhow!("{e}"))?;
+        eprintln!("# 🔐 tunnel bound to mesh: epoch PSK loaded from {}", dir.display());
         Ok(psk)
     }
 
@@ -511,7 +512,7 @@ fn main() -> anyhow::Result<()> {
         name: Option<String>,
     ) -> anyhow::Result<(Client, std::sync::mpsc::Receiver<Event>)> {
         // `--mesh` with no value is an empty string: the default device dir.
-        let mesh = mesh.map(|d| if d.is_empty() { default_device_dir() } else { std::path::PathBuf::from(d) });
+        let mesh = mesh.map(|d| mesh_dir_path(&d));
         if let Some(dir) = &mesh {
             mesh_psk(dir)?;
         }
@@ -751,12 +752,9 @@ fn main() -> anyhow::Result<()> {
             };
             match name {
                 Some(n) => {
-                    eprintln!("# 💬 {n}{owner_tag} - {}{presence} ({short})", short_npub(npub))
+                    eprintln!("# 💬 {n}{owner_tag} - {presence} ({short})")
                 }
-                None => eprintln!(
-                    "# 💬 {owner_tag}{}{presence} ({short})",
-                    short_npub(npub)
-                ),
+                None => eprintln!("# 💬 {owner_tag}{presence} ({short})"),
             }
         }
     }
@@ -783,30 +781,21 @@ fn main() -> anyhow::Result<()> {
             // All members' adverts are fetched concurrently: an offline
             // member costs its FETCH_WAIT, not the roster's total.
             use nostr::nips::nip19::ToBech32;
-            let fetched: Vec<(bool, String, Option<noscat_core::advert::Advert>)> = rt
-                .block_on(futures_util::future::join_all(members.into_iter().map(|m| {
-                    let relays = relays.clone();
-                    async move {
-                        let Ok(npub_hex) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
-                            return (m.is_owner, String::new(), None);
-                        };
-                        // to_bech32's error type is the never type: unwrappable.
-                        let npub = npub_hex.to_bech32().expect("bech32 of a parsed key");
-                        let advert = noscat_core::relay::fetch_advert_for(
-                            &relays,
-                            None,
-                            Some(npub_hex),
-                        )
-                        .await
+            let keyed: Vec<(bool, String, nostr::prelude::PublicKey)> = members
+                .into_iter()
+                .filter_map(|m| {
+                    let is_owner = m.is_owner;
+                    // to_bech32's error type is the never type: unwrappable.
+                    nostr::prelude::PublicKey::from_hex(&m.npub)
                         .ok()
-                        .flatten();
-                        (m.is_owner, npub, advert)
-                    }
-                })));
-            for (is_owner, npub, advert) in fetched {
-                if npub.is_empty() {
-                    continue;
-                }
+                        .map(|k| (is_owner, k.to_bech32().expect("bech32 of a parsed key"), k))
+                })
+                .collect();
+            let adverts = rt.block_on(noscat_core::relay::fetch_adverts_concurrent(
+                &relays,
+                keyed.iter().map(|(_, _, k)| *k).collect(),
+            ));
+            for ((is_owner, npub, _), advert) in keyed.into_iter().zip(adverts) {
                 match advert {
                     Some(a) => {
                         b.lock()
@@ -855,7 +844,9 @@ fn main() -> anyhow::Result<()> {
                 None => eprintln!("# {what} stopped"),
             },
             Event::Incoming { .. } => {}
-            Event::TransferDone { .. } => {}
+            Event::TransferDone { peer, path } => {
+                eprintln!("# ✅ {peer} -> {}", path.display())
+            }
             Event::TransferProgress { .. } => {} // the CLI narrates completion only
             Event::TransferPartial { path, .. } => {
                 eprintln!(
@@ -1250,7 +1241,15 @@ fn spawn_printer(
                     // hands over.
                     let expected = noscat_core::parse_pairing_target(&owner)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    rt.block_on(device.join_mesh(&relays_or_default(relays), expected))?;
+                    // The wait bound lives in the device (clean watcher
+                    // exit); the CLI has no deadline - Ctrl-C is the way out.
+                    eprintln!("# ⏳ waiting for a mesh invitation (Ctrl-C to give up)…");
+                    rt.block_on(device.join_mesh(
+                        &relays_or_default(relays),
+                        expected,
+                        std::time::Duration::from_secs(u64::MAX / 4),
+                    ))?;
+                    eprintln!("# ✅ joined mesh of {expected}");
                 }
                 MeshCommand::Members { dir } => {
                     let device = noscat_core::mesh::Device::open(&dir)?;
@@ -1261,17 +1260,21 @@ fn spawn_printer(
                     // offline, never an error.
                     let relays = relays_or_default(Vec::new());
                     let now = nostr::prelude::Timestamp::now().as_secs();
-                    let ages = members.iter().map(|m| async {
-                        let Ok(pk) = nostr::prelude::PublicKey::from_hex(&m.npub) else {
-                            return None;
-                        };
-                        noscat_core::relay::fetch_advert_for(&relays, None, Some(pk))
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|a| now.saturating_sub(a.created_at))
-                    });
-                    let ages = rt.block_on(futures_util::future::join_all(ages));
+                    let keyed: Vec<(usize, nostr::prelude::PublicKey)> = members
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, m)| {
+                            nostr::prelude::PublicKey::from_hex(&m.npub).ok().map(|k| (i, k))
+                        })
+                        .collect();
+                    let adverts = rt.block_on(noscat_core::relay::fetch_adverts_concurrent(
+                        &relays,
+                        keyed.iter().map(|(_, k)| *k).collect(),
+                    ));
+                    let mut ages: Vec<Option<u64>> = vec![None; members.len()];
+                    for ((i, _), advert) in keyed.into_iter().zip(adverts) {
+                        ages[i] = advert.map(|a| now.saturating_sub(a.created_at));
+                    }
                     for (m, age) in members.into_iter().zip(ages) {
                         let presence = match age {
                             Some(a) if a < noscat_core::advert::ADVERT_TTL_SECS => {

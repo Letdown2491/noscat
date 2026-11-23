@@ -46,8 +46,9 @@ class Noscat < Formula
 
   def caveats
     <<~EOS
-      Identities are ephemeral by default; pin them with --identity.
-      Tailnet commands keep state under --dir (default ./noscat-device).
+      Identities are ephemeral by default; pin them with --identity (or the
+      NOSCAT_IDENTITY variable). Mesh commands use ~/.noscat/device by
+      default; override with --dir.
     EOS
   end
 

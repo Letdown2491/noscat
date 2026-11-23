@@ -79,6 +79,12 @@ pub enum MeshError {
     Delivery(String),
     #[error("commit rejected: {0} is not authorized to change the mesh (policy is owner-only)")]
     PolicyViolation(String),
+    /// This operation is owner-only (the caller passed a device that is
+    /// not the mesh's owner, or the journal is empty because only owners
+    /// commit). Distinct so UIs can say "wrong device" instead of a
+    /// generic MLS failure.
+    #[error("owner-only operation: {0}")]
+    NotOwner(&'static str),
 }
 
 impl From<tls_codec::Error> for MeshError {
@@ -120,7 +126,10 @@ type SqliteStore =
 
 /// OpenMLS provider with a SQLite storage profile: all MLS state (key
 /// packages, trees, secrets, groups) survives process restarts through
-/// `<device>/mls.sqlite3`. `Default` builds an in-memory store (tests).
+/// `<device>/mls.sqlite3`. `Default` builds an in-memory store (tests) -
+/// deliberately not part of the API surface: state that vanishes on drop
+/// must never be picked by accident in application code.
+#[doc(hidden)]
 pub struct Provider {
     crypto: openmls_rust_crypto::RustCrypto,
     storage: SqliteStore,
@@ -253,7 +262,7 @@ impl Device {
                 // the atomic writer prevents new ones) must not brick the
                 // device: fail loud, continue mesh-less.
                 Err(e) => {
-                    eprintln!("# ⚠️  {} is corrupt, ignoring: {e}", gid_path.display());
+                    tracing::warn!(file = %gid_path.display(), "group-id sidecar corrupt, ignoring: {e}");
                     None
                 }
             },
@@ -338,6 +347,14 @@ impl Device {
             .export_secret(self.provider.crypto(), EXPORTER_LABEL, &[], 32)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         Ok(psk)
+    }
+
+    /// [`Self::tunnel_psk`] as the `[u8; 32]` the Noise handshake wants,
+    /// with the length check done once here instead of at every caller.
+    pub fn tunnel_psk32(&self) -> Result<[u8; 32], MeshError> {
+        let psk = self.tunnel_psk()?;
+        <[u8; 32]>::try_from(psk)
+            .map_err(|_| MeshError::Mls("derived PSK has the wrong length".into()))
     }
 
     fn group(&self) -> Result<MlsGroup, MeshError> {
@@ -545,7 +562,7 @@ impl Device {
         for member in targets {
             items.push((member, member_payload.as_str()));
         }
-        self.send_gift_waps(relays, &items).await
+        self.send_gift_wraps(relays, &items).await
     }
 
     /// Remove a device (by npub) from the mesh: commit the Remove, deliver
@@ -585,7 +602,7 @@ impl Device {
             .iter()
             .map(|m| (*m, payload.as_str()))
             .collect();
-        self.send_gift_waps(relays, &items).await
+        self.send_gift_wraps(relays, &items).await
     }
 
     /// Re-publish the owner's recorded commit chain (the `commits.json`
@@ -607,10 +624,9 @@ impl Device {
         }
         let journal = self.commit_journal()?;
         if journal.is_empty() {
-            return Err(MeshError::Mls(
+            return Err(MeshError::NotOwner(
                 "no recorded commits to resend (only the mesh owner commits; \
-                 run this on the owner's device)"
-                    .into(),
+                 run this on the owner's device)",
             ));
         }
         let group = self.group()?;
@@ -623,7 +639,7 @@ impl Device {
                 .collect::<Result<_, _>>()?,
         };
         if targets.is_empty() {
-            return Err(MeshError::Mls("no other members to resend to".into()));
+            return Err(MeshError::NotOwner("no other members to resend to"));
         }
         let mut items: Vec<(PublicKey, &str)> = Vec::new();
         let mut owned = Vec::new();
@@ -639,7 +655,7 @@ impl Device {
             }
         }
         let sent = items.len();
-        self.send_gift_waps(relays, &items).await?;
+        self.send_gift_wraps(relays, &items).await?;
         Ok(sent)
     }
 
@@ -679,7 +695,7 @@ impl Device {
             let payload: MeshMessage = match serde_json::from_str(&msg.1) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("# ⚠️  undecodable mesh message from {}: {e}", msg.0);
+                    tracing::warn!(from = %msg.0, "undecodable mesh message: {e}");
                     continue;
                 }
             };
@@ -727,7 +743,7 @@ impl Device {
         let client = match crate::relay::connect_client(relays).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("# ⚠️  mesh backfill skipped (relays unreachable): {e}");
+                tracing::warn!("mesh backfill skipped (relays unreachable): {e}");
                 return 0;
             }
         };
@@ -738,7 +754,7 @@ impl Device {
         {
             Ok(events) => events,
             Err(e) => {
-                eprintln!("# ⚠️  mesh backfill fetch failed: {e}");
+                tracing::warn!("mesh backfill fetch failed: {e}");
                 client.shutdown().await;
                 return 0;
             }
@@ -780,7 +796,7 @@ impl Device {
     /// sync of the rest.
     fn accept_mesh_message(&mut self, sender: PublicKey, payload: &MeshMessage) -> usize {
         if payload.welcome.is_some() {
-            eprintln!("# ⚠️  got an unexpected invitation from {sender} (already in a mesh)");
+            tracing::warn!(%sender, "unexpected invitation (already in a mesh); ignored");
             return 0;
         }
         // Already merged (or older than us - relays deliver stored events
@@ -793,7 +809,7 @@ impl Device {
         let mut group = match self.group() {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("# ⚠️  cannot open our mesh group: {e}");
+                tracing::warn!("cannot open our mesh group: {e}");
                 return 0;
             }
         };
@@ -803,20 +819,33 @@ impl Device {
                     return 0; // already merged: normal backfill-live overlap
                 }
                 if let Err(e) = self.persist() {
-                    eprintln!("# ⚠️  merged commit from {sender} but persist failed: {e}");
+                    tracing::warn!(%sender, "merged commit but persist failed: {e}");
                     return 0;
                 }
-                eprintln!("# ⬇️  merged commit from {sender} (epoch {})", self.epoch().unwrap_or(0));
+                tracing::info!(%sender, epoch = self.epoch().unwrap_or(0), "merged commit");
                 1
             }
             Err(MeshError::PolicyViolation(e)) => {
-                eprintln!("# 🚫 commit from {sender} rejected: {e}");
+                tracing::warn!(%sender, "commit rejected: {e}");
                 0
             }
             Err(e) => {
-                eprintln!("# ⚠️  commit from {sender} not merged: {e}");
+                tracing::warn!(%sender, "commit not merged: {e}");
                 0
             }
+        }
+    }
+
+    /// Decode a hex-serialized commit into its MLS protocol message
+    /// (shared by [`Self::commit_epoch`] and [`Self::accept_commit_on`]).
+    fn decode_protocol_message(commit_hex: &str) -> Result<ProtocolMessage, MeshError> {
+        let bytes = hex::decode(commit_hex)
+            .map_err(|e| MeshError::Mls(format!("bad commit hex: {e}")))?;
+        let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
+            .map_err(|e| MeshError::Mls(e.to_string()))?;
+        match message.try_into() {
+            Ok(p) => Ok(p),
+            Err(_) => Err(MeshError::Mls("not a public MLS message".into())),
         }
     }
 
@@ -824,14 +853,7 @@ impl Device {
     /// commits by it (they must merge oldest-first) and skips ones already
     /// merged into our group.
     fn commit_epoch(commit_hex: &str) -> Result<u64, MeshError> {
-        let bytes = hex::decode(commit_hex)
-            .map_err(|e| MeshError::Mls(format!("bad commit hex: {e}")))?;
-        let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
-            .map_err(|e| MeshError::Mls(e.to_string()))?;
-        let protocol: ProtocolMessage = match message.try_into() {
-            Ok(p) => p,
-            Err(_) => return Err(MeshError::Mls("not a public MLS message".into())),
-        };
+        let protocol = Self::decode_protocol_message(commit_hex)?;
         Ok(protocol.epoch().as_u64())
     }
 
@@ -861,14 +883,7 @@ impl Device {
             }
             _ => {}
         }
-        let bytes = hex::decode(commit_hex)
-            .map_err(|e| MeshError::Mls(format!("bad commit hex: {e}")))?;
-        let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
-            .map_err(|e| MeshError::Mls(e.to_string()))?;
-        let protocol: ProtocolMessage = match message.try_into() {
-            Ok(p) => p,
-            Err(_) => return Err(MeshError::Mls("not a public MLS message".into())),
-        };
+        let protocol = Self::decode_protocol_message(commit_hex)?;
         let processed = group
             .process_message(provider, protocol)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
@@ -929,7 +944,7 @@ impl Device {
     /// still fails after the retries comes back as [`MeshError::Delivery`]
     /// naming the npubs; the commit itself is safely merged on the owner
     /// and recoverable via `mesh resend`.
-    async fn send_gift_waps(&self, relays: &[String], items: &[(PublicKey, &str)]) -> Result<(), MeshError> {
+    async fn send_gift_wraps(&self, relays: &[String], items: &[(PublicKey, &str)]) -> Result<(), MeshError> {
         const ATTEMPTS: usize = 3;
         const RETRY_PAUSE: Duration = Duration::from_secs(2);
 
@@ -1033,13 +1048,14 @@ impl Device {
         &mut self,
         relays: &[String],
         expected_owner: PublicKey,
+        wait: std::time::Duration,
     ) -> Result<(), MeshError> {
         if self.group_id.is_some() {
             // Local state says this device is already a member. Forgetting a
             // mesh on the device (the mobile "disconnect") does not remove
             // it from the group, so this is the normal path when rejoining
             // after a disconnect: the existing membership is still valid.
-            eprintln!("# ✅ already a member of a mesh - nothing to join");
+            tracing::info!("already a member of a mesh - nothing to join");
             return Ok(());
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(PublicKey, String)>(16);
@@ -1048,17 +1064,25 @@ impl Device {
             relays.to_vec(),
             tx,
         ));
-        eprintln!("# ⏳ waiting for a mesh invitation (Ctrl-C to give up)…");
+        tracing::info!("waiting for a mesh invitation");
         // Gift wraps are signed, so the sender cannot be spoofed: an
         // invitation from anyone but the expected owner is dropped unheard.
+        // The wait bound lives HERE (not in a caller-side timeout): a
+        // caller dropping this future mid-wait was the FFI websocket-leak
+        // class, and deadline + clean watcher exit keep everything orderly.
+        let deadline = tokio::time::Instant::now() + wait;
         let (sender, payload) = loop {
-            let msg = match rx.recv().await {
-                Some(msg) => msg,
-                None => {
-                    // The watcher is gone. A relay-connect failure inside
-                    // it used to surface as the misleading "timed out
-                    // waiting for a mesh invitation"; report the real
-                    // cause instead.
+            let msg = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(msg)) => msg,
+                // Deadline hit, or the watcher is gone. Either way, report
+                // the watcher's real cause: a relay-connect failure inside
+                // it used to surface as the misleading "timed out waiting
+                // for a mesh invitation".
+                Ok(None) | Err(_) => {
+                    // Ending the watch before awaiting it: dropping the last
+                    // receiver is its exit signal, and a still-running
+                    // watcher would make this await hang.
+                    drop(rx);
                     match watch.await {
                         Ok(Ok(())) => return Err(MeshError::JoinTimeout),
                         Ok(Err(e)) => {
@@ -1075,7 +1099,7 @@ impl Device {
                 }
             };
             if msg.0 != expected_owner {
-                eprintln!("# ignoring an invitation from {} (not the expected owner)", msg.0);
+                tracing::info!(from = %msg.0, "ignoring an invitation (not the expected owner)");
                 continue;
             }
             break msg;
@@ -1087,7 +1111,7 @@ impl Device {
         drop(rx);
 
         let msg: MeshMessage = serde_json::from_str(&payload)?;
-        eprintln!("# ✉️  invitation received from {sender} - joining…");
+        tracing::info!(%sender, "invitation received; joining");
 
         let welcome_bytes = hex::decode(&msg.welcome.ok_or_else(|| {
             MeshError::Mls("invitation carries no Welcome".into())
@@ -1119,7 +1143,7 @@ impl Device {
         self.group_id = Some(group_id);
         self.persist()?;
 
-        eprintln!("# ✅ joined mesh of {}", sender);
+        tracing::info!(owner = %sender, "joined mesh");
         Ok(())
     }
 }
@@ -1285,6 +1309,43 @@ fn mls_signer(identity: &Identity) -> Result<SignatureKeyPair, MeshError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The policy extension's wire format is the spec's: owner as a hex
+    /// STRING (a derived serde would have emitted a JSON byte array, which
+    /// no other implementation would parse). Roundtrip plus lenient reads.
+    #[test]
+    fn mesh_policy_owner_is_hex_on_the_wire() {
+        let owner_bytes = [7u8; 32];
+        let policy = MeshPolicy { owner: owner_bytes.to_vec() };
+        let json = serde_json::to_string(&policy).unwrap();
+        assert_eq!(json, format!(r#"{{"owner":"{}"}}"#, hex::encode(owner_bytes)));
+        let back: MeshPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, policy);
+
+        // Lenient: optional 0x prefix, case-insensitive.
+        let back: MeshPolicy =
+            serde_json::from_str(&format!(r#"{{"owner":"0x{}"}}"#, hex::encode(owner_bytes))).unwrap();
+        assert_eq!(back, policy);
+        let back: MeshPolicy =
+            serde_json::from_str(&format!(r#"{{"owner":"{}"}}"#, hex::encode(owner_bytes).to_uppercase())).unwrap();
+        assert_eq!(back, policy);
+
+        // Malformed: broken hex, empty owner.
+        assert!(serde_json::from_str::<MeshPolicy>(r#"{"owner":"zz"}"#).is_err());
+        assert!(serde_json::from_str::<MeshPolicy>(r#"{"owner":""}"#).is_err());
+    }
+
+    /// The mesh message drops `welcome` (not `null`) when absent, per the
+    /// spec example: commit fan-out must not carry a Welcome field.
+    #[test]
+    fn mesh_message_omits_absent_welcome() {
+        let msg = MeshMessage { commit: "ab".into(), welcome: None };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"commit":"ab"}"#);
+        // Reads stay compatible with writers that did send null.
+        let back: MeshMessage = serde_json::from_str(r#"{"commit":"ab","welcome":null}"#).unwrap();
+        assert!(back.welcome.is_none());
+    }
+
 
     /// The heart of the mesh: the owner adds a device from its published
     /// key package, the device joins from the Welcome, and both independently
@@ -1460,8 +1521,8 @@ mod tests {
         device.create_mesh()?;
         let empty = rt.block_on(device.resend_commits(None, &[]));
         assert!(
-            matches!(&empty, Err(MeshError::Mls(m)) if m.contains("no recorded commits")),
-            "an empty journal must read as 'nothing to resend': {empty:?}"
+            matches!(&empty, Err(MeshError::NotOwner(m)) if m.contains("no recorded commits")),
+            "an empty journal must read as 'owner-only, nothing recorded': {empty:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

@@ -173,30 +173,24 @@ pub fn mesh_members(dir: String, relays: Option<Vec<String>>) -> Result<Vec<Mesh
         .map_err(NoscatError::fail)?;
     let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
     rt.block_on(async move {
-        let members = members_of(device)?;
-        let relays = &relays;
+        let mut members = members_of(device)?;
         let now = nostr::prelude::Timestamp::now().as_secs();
-        let infos = members.iter().map(|m| async move {
-            let Ok(pk) = nostr::prelude::PublicKey::parse(&m.npub) else {
-                return None;
-            };
-            noscat_core::relay::fetch_advert_for(relays, None, Some(pk))
-                .await
-                .ok()
-                .flatten()
-                .map(|a| (a.name, now.saturating_sub(a.created_at)))
-        });
-        let infos = futures_util::future::join_all(infos).await;
-        Ok(members
-            .into_iter()
-            .zip(infos)
-            .map(|(m, info)| {
-                let (name, last_seen_secs) = info
-                    .map(|(n, s)| (n, Some(s)))
-                    .unwrap_or((None, None));
-                MeshMember { name, last_seen_secs, ..m }
-            })
-            .collect())
+        // Parse keys once, keeping their member index; fetch all concurrently.
+        let keyed: Vec<(usize, nostr::prelude::PublicKey)> = members
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| nostr::prelude::PublicKey::parse(&m.npub).ok().map(|k| (i, k)))
+            .collect();
+        let adverts =
+            noscat_core::relay::fetch_adverts_concurrent(&relays, keyed.iter().map(|(_, k)| *k).collect()).await;
+        for ((i, _), advert) in keyed.into_iter().zip(adverts) {
+            if let Some(a) = advert {
+                let member = &mut members[i];
+                member.name = a.name;
+                member.last_seen_secs = Some(now.saturating_sub(a.created_at));
+            }
+        }
+        Ok(members)
     })
 }
 
@@ -246,13 +240,19 @@ pub fn mesh_join(
     // Accept a bare npub or the full noscat: URI a QR scan hands over.
     let expected = noscat_core::parse_pairing_target(&owner_npub).map_err(NoscatError::fail)?;
     rt.block_on(async move {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            device.join_mesh(&relays, expected),
-        )
-        .await
-        .map_err(|_| NoscatError::Failed("no invitation arrived in time".into()))?
-        .map_err(NoscatError::fail)?;
+        // The wait bound lives in the device itself: the watcher ends
+        // cleanly at the deadline instead of the whole future being
+        // dropped mid-relay-session (the old websocket leak).
+        device
+            .join_mesh(&relays, expected, std::time::Duration::from_secs(timeout_secs))
+            .await
+            .map_err(|e| {
+                if matches!(e, noscat_core::mesh::MeshError::JoinTimeout) {
+                    NoscatError::Failed("no invitation arrived in time".into())
+                } else {
+                    NoscatError::fail(e)
+                }
+            })?;
         members_of(device)
     })
 }

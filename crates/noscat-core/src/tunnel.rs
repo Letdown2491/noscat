@@ -1169,13 +1169,10 @@ impl TunnelListener {
                     // a stale epoch beats no tunnel.
                     let dir = dir.clone();
                     let fallback = self.psk;
-                    let reloaded = tokio::task::block_in_place(|| {
-                        crate::mesh::Device::open(&dir).and_then(|d| d.tunnel_psk())
-                    });
-                    match reloaded {
-                        Ok(psk) => Some(<[u8; 32]>::try_from(psk).map_err(|_| {
-                            TunnelError::Io(std::io::Error::other("bad PSK length"))
-                        })?),
+                    match tokio::task::block_in_place(|| {
+                        crate::mesh::Device::open(&dir).and_then(|d| d.tunnel_psk32())
+                    }) {
+                        Ok(psk) => Some(psk),
                         Err(e) => {
                             tracing::warn!("mesh PSK reload failed: {e}; using the last known");
                             fallback
@@ -1822,10 +1819,10 @@ pub async fn send_file(
         Ok(Err(e)) => return Err(e.into()),
         Err(e) => return Err(TunnelError::Io(std::io::Error::other(e))),
     };
-    eprintln!(
-        "# 🔗 tunnel up with {target} at udp/{peer} - sending {}",
-        name.display()
-    );
+    // Session narration is the caller's job (an event for UIs, stderr for
+    // the CLI): a library eprintln showed up as a stray "tunnel up" line
+    // next to the client's own event in embedded consumers.
+    tracing::info!(%target, %peer, file = %name.display(), "tunnel up; sending");
 
     send_stream(&socket, peer, &mut hs, path, &name, &file_sha, progress, cancel).await
 }
@@ -1876,10 +1873,7 @@ async fn send_stream(
     let resumed = reply != u32::MAX && reply > 0;
     let first = reply.min(total_chunks);
     if resumed {
-        eprintln!(
-            "# ↩️  resuming {} at chunk {first}/{total_chunks} (receiver kept a partial copy)",
-            name.display()
-        );
+        tracing::info!(file = %name.display(), first, total_chunks, "resuming from the receiver's partial copy");
     }
     if first < total_chunks {
         stream_chunks(socket, peer, hs, total_chunks, len, &mut file, first, progress, cancel).await?;
@@ -1893,11 +1887,7 @@ async fn send_stream(
     send_and_ack(socket, peer, hs, &[TAG_FIN], Some(total_chunks), MAX_RETRIES, &mut plain, &mut wire)
         .await?;
     let dt = started.elapsed().as_secs_f64();
-    eprintln!(
-        "# ✅ {} received by peer ({len} bytes in {dt:.1}s, {:.1} MB/s)",
-        name.display(),
-        len as f64 / dt / (1024.0 * 1024.0)
-    );
+    tracing::info!(file = %name.display(), len, seconds = format!("{dt:.1}"), "transfer received and verified by peer");
     Ok(())
 }
 
@@ -1914,6 +1904,98 @@ async fn send_stream(
 /// real authorization - the PSK gates the handshake - but an advert is
 /// public and dialable, so the disk-fill surface stays.
 pub const MAX_INCOMING_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// The shared resume decision (both receive paths): a partial file from an
+/// interrupted attempt continues only when its recorded identity - len and
+/// whole-file sha256, both from the previous header - matches this
+/// transfer's header, the recorded prefix actually exists on disk, and it
+/// is a nonzero proper prefix of this transfer. Returns the resume chunk
+/// count and a hasher seeded with the durable prefix (streamed: a huge
+/// partial must not allocate its size).
+async fn decide_resume(
+    part_path: &Path,
+    meta_path: &Path,
+    header_len: u64,
+    header_sha: &str,
+    total_chunks: u32,
+) -> Result<(u32, sha2::Sha256), TunnelError> {
+    use sha2::Digest as _;
+    let mut resume_chunks = 0u32;
+    let mut hasher = sha2::Sha256::new();
+    let saved_meta = tokio::fs::read(meta_path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
+    if let Some(meta) = &saved_meta {
+        let prefix_len = meta.chunks.min(total_chunks as u64) * CHUNK as u64;
+        if meta.len == header_len
+            && meta.sha256 == header_sha
+            && prefix_len > 0
+            && prefix_len <= header_len
+            && tokio::fs::metadata(part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
+        {
+            let mut part = tokio::fs::File::open(part_path).await?;
+            hash_prefix(&mut hasher, &mut part, prefix_len).await?;
+            resume_chunks = (prefix_len / CHUNK as u64) as u32;
+        }
+    }
+    Ok((resume_chunks, hasher))
+}
+
+/// The writer for the (continued or fresh) part file, positioned at the
+/// resume point (append) or at the start (create).
+async fn open_writer(
+    part_path: &Path,
+    resume_chunks: u32,
+) -> Result<tokio::io::BufWriter<tokio::fs::File>, TunnelError> {
+    Ok(if resume_chunks > 0 {
+        tokio::io::BufWriter::with_capacity(
+            64 * 1024,
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(part_path)
+                .await?,
+        )
+    } else {
+        tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(part_path).await?)
+    })
+}
+
+/// The shared finalize (both receive paths): sync the file, then
+/// - incomplete under the header's length, or a whole-file hash mismatch,
+///   keeps the part file + sidecar for resume and reports `complete = false`;
+/// - otherwise renames the part onto a collision-free final path (and drops
+///   the sidecar) and reports `complete = true`. The FIN/linger exchange
+///   differs per transport and stays at the call sites.
+async fn finalize_transfer(
+    received: u64,
+    header_len: u64,
+    header_sha: &str,
+    hasher: sha2::Sha256,
+    part_path: &Path,
+    meta_path: &Path,
+    final_path: PathBuf,
+    who: &str,
+) -> Result<(PathBuf, bool), TunnelError> {
+    use sha2::Digest as _;
+    if received != header_len {
+        // Leave the part file + sidecar: the next attempt picks up here.
+        tracing::warn!(received, total = header_len, "transfer incomplete; partial kept for resume");
+        return Ok((part_path.to_path_buf(), false));
+    }
+    // Whole-file integrity: the streamed bytes plus (on resume) the seeded
+    // prefix must hash to the header's digest.
+    let digest = hex::encode(hasher.finalize());
+    if digest != header_sha {
+        tracing::warn!(got = %digest, expected = %header_sha, "sha256 mismatch; keeping the partial");
+        return Ok((part_path.to_path_buf(), false));
+    }
+    let final_path = unique_final_path(final_path).await;
+    tokio::fs::rename(part_path, &final_path).await?;
+    tokio::fs::remove_file(meta_path).await.ok();
+    tracing::info!(who = %who, to = %final_path.display(), received, "transfer complete");
+    Ok((final_path, true))
+}
 
 pub async fn receive_file(
     identity: &Identity,
@@ -1991,54 +2073,22 @@ async fn receive_stream(
         return Err(TunnelError::TransferTooLarge(header.len));
     }
     let total_chunks = total_chunks as u32;
-    eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
+    tracing::info!(%who, file = %name.display(), len = header.len, "incoming transfer");
 
-    // Resume decision: a partial file from an interrupted attempt continues
-    // only when its recorded identity - len and whole-file sha256, both from
-    // the previous header - matches this transfer's header.
-    use sha2::Digest as _;
-    let mut resume_chunks = 0u32;
-    let mut hasher = sha2::Sha256::new();
-    let saved_meta = tokio::fs::read(&meta_path)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
-    if let Some(meta) = &saved_meta {
-        let prefix_len = meta.chunks.min(total_chunks as u64) * CHUNK as u64;
-        if meta.len == header.len
-            && meta.sha256 == header.sha256
-            && prefix_len > 0
-            && prefix_len <= header.len
-            && tokio::fs::metadata(&part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
-        {
-            // Seed the hash with the durable prefix, streamed (a huge
-            // partial must not allocate its size); the part file is
-            // appended from there.
-            let mut part = tokio::fs::File::open(&part_path).await?;
-            hash_prefix(&mut hasher, &mut part, prefix_len).await?;
-            resume_chunks = (prefix_len / CHUNK as u64) as u32;
-        }
-    }
+    // Resume decision (shared with the routed path): a partial file from
+    // an interrupted attempt continues only when its recorded identity -
+    // len and whole-file sha256, both from the previous header - matches
+    // this transfer's header.
+    let (resume_chunks, mut hasher) =
+        decide_resume(&part_path, &meta_path, header.len, &header.sha256, total_chunks).await?;
     ack_and_replay(socket, peer, hs, TAG_RESUME, resume_chunks, &mut history, &mut wire, true).await?;
     if resume_chunks > 0 {
-        eprintln!(
-            "# ↩️  resuming {name:?} at chunk {resume_chunks}/{total_chunks} - asking the sender to skip ahead"
-        );
+        tracing::info!(?name, resume_chunks, total_chunks, "resuming: asking the sender to skip ahead");
     }
 
     // Cumulative acks with history replay keep the sender's nonce stream
     // moving across lost acks; see receive_chunks.
-    let mut file = if resume_chunks > 0 {
-        tokio::io::BufWriter::with_capacity(
-            64 * 1024,
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&part_path)
-                .await?,
-        )
-    } else {
-        tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(&part_path).await?)
-    };
+    let mut file = open_writer(&part_path, resume_chunks).await?;
     let meta_state = ResumeMeta {
         len: header.len,
         sha256: header.sha256.clone(),
@@ -2061,26 +2111,20 @@ async fn receive_stream(
     inner.sync_all().await?;
     drop(inner);
 
-    if received != header.len {
-        // Leave the part file + sidecar: the next attempt picks up here.
-        eprintln!(
-            "# ⚠️  transfer incomplete: {received}/{} bytes (path too lossy); partial kept for resume",
-            header.len
-        );
-        return Ok((who.to_string(), part_path, false));
+    let (final_path, complete) = finalize_transfer(
+        received,
+        header.len,
+        &header.sha256,
+        hasher,
+        &part_path,
+        &meta_path,
+        final_path,
+        who,
+    )
+    .await?;
+    if !complete {
+        return Ok((who.to_string(), final_path, false));
     }
-
-    // Whole-file integrity: the streamed bytes plus (on resume) the seeded
-    // prefix must hash to the header's digest.
-    let digest = hex::encode(hasher.finalize());
-    if digest != header.sha256 {
-        eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
-        return Ok((who.to_string(), part_path, false));
-    }
-    let final_path = unique_final_path(final_path).await;
-    tokio::fs::rename(&part_path, &final_path).await?;
-    tokio::fs::remove_file(&meta_path).await.ok();
-    eprintln!("# ✅ {who} -> {final_path:?} ({received} bytes)");
 
     // -> FIN, then linger: answer every datagram the sender replays with
     // (ack history + FIN) until it goes quiet, so its FIN wait always
@@ -2115,7 +2159,6 @@ async fn receive_stream(
     }
     Ok((who.to_string(), final_path, true))
 }
-
 
 /// The receive side of a file transfer over a routed session (mesh node
 /// mode): the sender runs the usual [`send_stream`] datagram protocol, and
@@ -2191,51 +2234,23 @@ where
         return Err(TunnelError::TransferTooLarge(header.len));
     }
     let total_chunks = total_chunks as u32;
-    eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
+    tracing::info!(%who, file = %name.display(), len = header.len, "incoming transfer");
 
-    // Same resume decision as the exclusive path: a partial file continues
-    // only when its recorded (len, sha256) matches this transfer's header.
-    let mut resume_chunks = 0u32;
-    let mut hasher = sha2::Sha256::new();
-    let saved_meta = tokio::fs::read(&meta_path)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
-    if let Some(meta) = &saved_meta {
-        let prefix_len = meta.chunks.min(total_chunks as u64) * CHUNK as u64;
-        if meta.len == header.len
-            && meta.sha256 == header.sha256
-            && prefix_len > 0
-            && prefix_len <= header.len
-            && tokio::fs::metadata(&part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
-        {
-            let mut part = tokio::fs::File::open(&part_path).await?;
-            hash_prefix(&mut hasher, &mut part, prefix_len).await?;
-            resume_chunks = (prefix_len / CHUNK as u64) as u32;
-        }
-    }
+    // Same resume decision as the exclusive path (shared helper): a
+    // partial file continues only when its recorded (len, sha256) matches
+    // this transfer's header.
+    let (resume_chunks, mut hasher) =
+        decide_resume(&part_path, &meta_path, header.len, &header.sha256, total_chunks).await?;
     // -> TAG_RESUME with the resume point.
     let mut frame = vec![TAG_RESUME];
     frame.extend_from_slice(&resume_chunks.to_be_bytes());
     stream.write_all(&frame).await?;
     stream.flush().await?;
     if resume_chunks > 0 {
-        eprintln!(
-            "# ↩️  resuming {name:?} at chunk {resume_chunks}/{total_chunks} - asking the sender to skip ahead"
-        );
+        tracing::info!(?name, resume_chunks, total_chunks, "resuming: asking the sender to skip ahead");
     }
 
-    let mut file = if resume_chunks > 0 {
-        tokio::io::BufWriter::with_capacity(
-            64 * 1024,
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&part_path)
-                .await?,
-        )
-    } else {
-        tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(&part_path).await?)
-    };
+    let mut file = open_writer(&part_path, resume_chunks).await?;
     let mut meta_state = Some((
         meta_path.clone(),
         ResumeMeta {
@@ -2331,43 +2346,59 @@ where
     inner.sync_all().await?;
     drop(inner);
 
-    if received != header.len {
-        eprintln!(
-            "# ⚠️  transfer incomplete: {received}/{} bytes; partial kept for resume",
-            header.len
-        );
-        return Ok((who.to_string(), part_path, false));
+    let (final_path, complete) = finalize_transfer(
+        received,
+        header.len,
+        &header.sha256,
+        hasher,
+        &part_path,
+        &meta_path,
+        final_path,
+        who,
+    )
+    .await?;
+    if !complete {
+        return Ok((who.to_string(), final_path, false));
     }
-    let digest = hex::encode(hasher.finalize());
-    if digest != header.sha256 {
-        eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
-        return Ok((who.to_string(), part_path, false));
-    }
-    let final_path = unique_final_path(final_path).await;
-    tokio::fs::rename(&part_path, &final_path).await?;
-    tokio::fs::remove_file(&meta_path).await.ok();
-    eprintln!("# ✅ {who} -> {final_path:?} ({received} bytes)");
 
     // -> FIN, then linger re-acking on a timer. The sender may have missed
     // the final cumulative ack; its retransmit is a replay the routed pump
     // drops (the nonce was consumed), so waiting for input here would stall
-    // it - the timer heals a lost ack without needing one.
-    stream.write_all(&[TAG_FIN]).await?;
-    stream.flush().await?;
+    // it - the timer heals a lost ack without needing one. The linger is
+    // hard-bounded (fin_until) and the re-acks are timer-paced: a past
+    // deadline must exit the loop, not spin re-acking in a hot loop that
+    // floods the peer and never returns.
+    // The file is ON DISK by this point: a vanished peer (write error)
+    // is a completed transfer, never a failure.
+    if stream.write_all(&[TAG_FIN]).await.is_err() {
+        return Ok((who.to_string(), final_path, true));
+    }
+    let _ = stream.flush().await;
     let ack_total = total_chunks.to_be_bytes();
     let fin_until = tokio::time::Instant::now() + FIN_LINGER;
+    let mut next_reack = tokio::time::Instant::now() + REACK_EVERY;
     loop {
+        let now = tokio::time::Instant::now();
+        if now >= fin_until {
+            break;
+        }
         let mut sink = [0u8; BUF];
-        match timeout_at(fin_until, stream.read(&mut sink)).await {
-            Ok(Ok(0)) => break,
+        match timeout_at(next_reack.min(fin_until), stream.read(&mut sink)).await {
+            Ok(Ok(0)) => break, // sender closed: it has our confirmation
             Ok(Ok(_)) => {}
             Ok(Err(_)) => break,
-            Err(_) => {} // timer: re-ack anyway
+            Err(_) => {} // timer
         }
-        stream
+        next_reack = tokio::time::Instant::now() + REACK_EVERY;
+        // A write error here means the peer is gone: done, not failed.
+        if stream
             .write_all(&[TAG_ACK, ack_total[0], ack_total[1], ack_total[2], ack_total[3]])
-            .await?;
-        stream.flush().await?;
+            .await
+            .is_err()
+        {
+            break;
+        }
+        let _ = stream.flush().await;
     }
     Ok((who.to_string(), final_path, true))
 }
@@ -2375,6 +2406,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Peer-supplied names: the contract is "reduce to a bare filename,
+    /// refuse what cannot be one" - traversal components collapse to the
+    /// final component (the file can only ever land inside out_dir),
+    /// component/control names are refused outright, and plain names
+    /// survive intact.
+    #[test]
+    fn sanitize_name_table() {
+        let ok = |n: &str| sanitize_name(n).ok().map(|p| p.to_string_lossy().into_owned());
+        let err = |n: &str| sanitize_name(n).is_err();
+
+        // Traversal collapses to the last component: join(out_dir, result)
+        // can never escape out_dir.
+        assert_eq!(ok("../etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(ok("a/../../x").as_deref(), Some("x"));
+        assert_eq!(ok("/etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(ok("a/b").as_deref(), Some("b"));
+
+        // Names that ARE path components cannot be filenames.
+        assert!(err(".."));
+        assert!(err("."));
+        assert!(err(""));
+
+        // On unix a backslash is a legal filename character (only a
+        // component on Windows): sanitize keeps it.
+        assert_eq!(ok(r"notes\backup.bin").as_deref(), Some(r"notes\backup.bin"));
+
+        // Plain names survive unchanged.
+        assert_eq!(ok("report.pdf").as_deref(), Some("report.pdf"));
+        assert_eq!(ok("dots.in.name.v2.tar.gz").as_deref(), Some("dots.in.name.v2.tar.gz"));
+        // Unicode names are files, not attacks.
+        assert_eq!(ok("résumé.txt").as_deref(), Some("résumé.txt"));
+    }
+
 
     /// The republish timer keeps a node discoverable past the advert TTL:
     /// half the TTL, floored so small TTLs (tests, impatient operators)
@@ -2695,6 +2759,97 @@ mod tests {
         let _ = tokio::fs::remove_file(&src_path).await;
         let _ = tokio::fs::remove_dir_all(&out_dir).await;
         let _ = total;
+    }
+
+    /// The routed receive path speaks the same protocol as the datagram
+    /// one, just on a byte stream: header JSON, chunk seqs, cumulative
+    /// acks (re-acked on a timer), FIN. This drives it over an in-memory
+    /// duplex end to end and checks the file and the ack stream.
+    #[tokio::test]
+    async fn receive_routed_file_roundtrip_over_duplex() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut data = vec![0u8; 2 * 32 * CHUNK + 999];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 249) as u8;
+        }
+        use sha2::Digest;
+        let sha_bytes: [u8; 32] = sha2::Sha256::digest(&data).into();
+        let sha = hex::encode(sha_bytes);
+        let header = TransferHeader {
+            name: "routed.bin".into(),
+            len: data.len() as u64,
+            sha256: sha.clone(),
+        };
+        let out_dir = std::env::temp_dir().join(format!("noscat-routed-{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&out_dir).await.unwrap();
+
+        let (mut cli, mut srv) = tokio::io::duplex(64 * 1024);
+        let out2 = out_dir.clone();
+        let receiver = tokio::spawn(async move {
+            receive_routed_file("peer", &mut srv, &out2, u64::MAX).await
+        });
+
+        // <- TAG_HEADER + JSON header (arbitrary write sizes; the receiver
+        // accumulates until the JSON parses).
+        cli.write_all(&[TAG_HEADER]).await.unwrap();
+        cli.write_all(serde_json::to_vec(&header).unwrap().as_slice()).await.unwrap();
+
+        // The receiver answers TAG_RESUME (0 here) before chunks flow.
+        let mut res = [0u8; 5];
+        cli.read_exact(&mut res).await.unwrap();
+        assert_eq!(res[0], TAG_RESUME);
+        assert_eq!(u32::from_be_bytes(res[1..5].try_into().unwrap()), 0);
+
+        // -> chunks; <- cumulative acks (window boundaries + the timer).
+        let total = data.len().div_ceil(CHUNK);
+        let mut acked = 0u32;
+        for seq in 0..total {
+            let start = seq * CHUNK;
+            let end = (start + CHUNK).min(data.len());
+            let mut frame = vec![TAG_CHUNK];
+            frame.extend_from_slice(&(seq as u32).to_be_bytes());
+            frame.extend_from_slice(&data[start..end]);
+            cli.write_all(&frame).await.unwrap();
+            cli.flush().await.unwrap();
+            if (seq as u32 + 1) % WINDOW as u32 == 0 || seq + 1 == total {
+                // The 500 ms re-ack timer interleaves smaller cumulative
+                // acks with the window ones: read until one covers every
+                // chunk written so far (a sender does the same).
+                let want = (seq + 1) as u32;
+                while acked < want {
+                    let mut ack = [0u8; 5];
+                    timeout(Duration::from_secs(5), cli.read_exact(&mut ack))
+                        .await
+                        .expect("ack arrived")
+                        .unwrap();
+                    assert_eq!(ack[0], TAG_ACK);
+                    let cumulative = u32::from_be_bytes(ack[1..5].try_into().unwrap());
+                    assert!(cumulative > acked, "cumulative acks only move forward");
+                    acked = cumulative;
+                }
+            }
+        }
+        cli.write_all(&[TAG_FIN]).await.unwrap();
+        cli.flush().await.unwrap();
+        // A real sender closes the session once the receiver's FIN
+        // confirmation arrives: read it, then drop (EOF ends the
+        // receiver's linger immediately).
+        let mut fin_back = [0u8; 1];
+        timeout(Duration::from_secs(10), cli.read_exact(&mut fin_back))
+            .await
+            .expect("receiver FIN")
+            .unwrap();
+        assert_eq!(fin_back[0], TAG_FIN);
+        drop(cli);
+
+        let (who, path, complete) = receiver.await.unwrap().unwrap();
+        assert_eq!(who, "peer");
+        assert!(complete);
+        assert_eq!(path, out_dir.join("routed.bin"));
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), data);
+        let _ = acked;
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
     }
 
     /// A sidecar recording a *different* file (stale sha256 - e.g. the source

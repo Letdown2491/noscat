@@ -202,6 +202,21 @@ pub async fn publish_advert(
     Ok(())
 }
 
+/// Fetch the freshest advert for each key, all concurrently. Rosters repeat
+/// this pattern (FFI `mesh_members`, the CLI roster, the pairing watcher):
+/// an offline member costs its own [`FETCH_WAIT`], not the batch's. Order
+/// matches `keys`.
+pub async fn fetch_adverts_concurrent(
+    relays: &[String],
+    keys: Vec<nostr::prelude::PublicKey>,
+) -> Vec<Option<Advert>> {
+    futures_util::future::join_all(
+        keys.iter()
+            .map(|pk| async { fetch_advert_for(relays, None, Some(*pk)).await.ok().flatten() }),
+    )
+    .await
+}
+
 /// Fetch the freshest advert matching a Noise key and/or npub from the relays.
 ///
 /// Subscribes, waits up to [`FETCH_WAIT`] for a valid, unexpired advert, then
@@ -365,7 +380,7 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
                         advert.endpoints, advert.expires_at
                     );
                 }
-                Err(e) => eprintln!("# ignoring invalid advert from {relay_url}: {e}"),
+                Err(e) => tracing::warn!(%relay_url, "ignoring invalid advert: {e}"),
             }
         }
     }

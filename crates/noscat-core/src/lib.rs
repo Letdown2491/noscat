@@ -65,3 +65,31 @@ pub fn default_device_name() -> String {
     }
     "noscat".to_string()
 }
+
+#[cfg(test)]
+mod pairing_target_tests {
+    use super::*;
+
+    fn ok(s: &str) -> String {
+        parse_pairing_target(s).unwrap().to_string()
+    }
+
+    #[test]
+    fn pairing_target_accepts_bare_and_uris() {
+        let hex_key = "4f95c6e4a7a6c6d5a2d34a8cb3e5e4e5a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let parsed = parse_pairing_target(hex_key).unwrap().to_string();
+        assert_eq!(parsed, parsed.to_lowercase());
+
+        // The QR/deep-link forms all resolve to the same key.
+        let base = ok(hex_key);
+        assert_eq!(ok(&format!("noscat:{hex_key}")), base);
+        assert_eq!(ok(&format!("NOSCAT:{hex_key}")), base);
+        assert_eq!(ok(&format!("noscat:{hex_key}?relay=wss%3A%2F%2Frelay.example")), base);
+        assert_eq!(ok(&format!("noscat:{hex_key}/")), base);
+        assert_eq!(ok(&format!("  {hex_key}  ")), base);
+
+        assert!(parse_pairing_target("noscat:").is_err());
+        assert!(parse_pairing_target("not-a-key").is_err());
+        assert!(parse_pairing_target("noscat:not-a-key").is_err());
+    }
+}
