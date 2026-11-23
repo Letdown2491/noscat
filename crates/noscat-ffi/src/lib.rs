@@ -42,8 +42,8 @@ pub struct ClientConfig {
     pub identity_secret: Option<String>,
     /// Relay URLs; None uses the defaults.
     pub relays: Option<Vec<String>>,
-    /// The tailnet device directory to scope tunnels to, if any.
-    pub tailnet_dir: Option<String>,
+    /// The mesh device directory to scope tunnels to, if any.
+    pub mesh_dir: Option<String>,
     /// Friendly device name shown to peers (published in the advert).
     /// None = no name (UIs fall back to generic labels).
     pub device_name: Option<String>,
@@ -105,30 +105,30 @@ pub fn identity_from_secret(secret: String) -> Result<Identity, NoscatError> {
     })
 }
 
-/// A member device of a tailnet group: how the UI's device list shows it.
+/// A member device of a mesh group: how the UI's device list shows it.
 #[derive(uniffi::Record)]
-pub struct TailnetMember {
+pub struct MeshMember {
     /// The device's npub (bech32), the dial target for tunnels.
     pub npub: String,
-    /// True for the device that owns (created) the tailnet.
+    /// True for the device that owns (created) the mesh.
     pub is_owner: bool,
     /// The device's friendly name from its advert, when it is serving and
     /// published one. None = show a generic label.
     pub name: Option<String>,
 }
 
-/// List the member devices of a tailnet device directory, with each
+/// List the member devices of a mesh device directory, with each
 /// member's friendly name resolved from its current advert (concurrently;
 /// members that are offline simply come back unnamed). The directory is
-/// an enrolled tailnet device (identity.nsec + MLS state), imported onto the
-/// device; membership is what authorizes tailnet-scoped tunnels.
+/// an enrolled mesh device (identity.nsec + MLS state), imported onto the
+/// device; membership is what authorizes mesh-scoped tunnels.
 #[uniffi::export]
-pub fn tailnet_members(dir: String) -> Result<Vec<TailnetMember>, NoscatError> {
+pub fn mesh_members(dir: String) -> Result<Vec<MeshMember>, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(NoscatError::fail)?;
-    let device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+    let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
     let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
         .iter()
@@ -151,22 +151,22 @@ pub fn tailnet_members(dir: String) -> Result<Vec<TailnetMember>, NoscatError> {
         Ok(members
             .into_iter()
             .zip(names)
-            .map(|(m, name)| TailnetMember { name, ..m })
+            .map(|(m, name)| MeshMember { name, ..m })
             .collect())
     })
 }
 
-/// Prepare to join a tailnet over the relays: open (creating if needed) this
-/// device's tailnet device directory and publish its MLS key package. With
+/// Prepare to join a mesh over the relays: open (creating if needed) this
+/// device's mesh device directory and publish its MLS key package. With
 /// `owner_npub`, the request is addressed to that owner alone (the one whose
 /// QR the user scanned); the returned npub is this device's address.
 #[uniffi::export]
-pub fn tailnet_prepare(dir: String, owner_npub: Option<String>) -> Result<String, NoscatError> {
+pub fn mesh_prepare(dir: String, owner_npub: Option<String>) -> Result<String, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(NoscatError::fail)?;
-    let device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+    let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
     let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
         .iter()
@@ -184,22 +184,22 @@ pub fn tailnet_prepare(dir: String, owner_npub: Option<String>) -> Result<String
     Ok(device.identity.npub())
 }
 
-/// Join the tailnet: wait up to `timeout_secs` for the owner's gift-wrapped
+/// Join the mesh: wait up to `timeout_secs` for the owner's gift-wrapped
 /// invitation on the relays and process it. With `owner_npub`, invitations
-/// from anyone else are ignored (the phone only joins the tailnet it
+/// from anyone else are ignored (the phone only joins the mesh it
 /// targeted). Returns the member list on success; a timeout error means the
 /// owner has not invited this npub yet.
 #[uniffi::export]
-pub fn tailnet_join(
+pub fn mesh_join(
     dir: String,
     timeout_secs: u64,
     owner_npub: Option<String>,
-) -> Result<Vec<TailnetMember>, NoscatError> {
+) -> Result<Vec<MeshMember>, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(NoscatError::fail)?;
-    let mut device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
     let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
         .iter()
@@ -215,7 +215,7 @@ pub fn tailnet_join(
     rt.block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            device.join_tailnet(&relays, expected),
+            device.join_mesh(&relays, expected),
         )
         .await
         .map_err(|_| NoscatError::Failed("no invitation arrived in time".into()))?
@@ -227,12 +227,12 @@ pub fn tailnet_join(
 /// Keep the membership current: merge the owner's epoch commits (invites,
 /// removals) that arrive while we listen, then return the member list.
 #[uniffi::export]
-pub fn tailnet_sync(dir: String, wait_secs: u64) -> Result<Vec<TailnetMember>, NoscatError> {
+pub fn mesh_sync(dir: String, wait_secs: u64) -> Result<Vec<MeshMember>, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(NoscatError::fail)?;
-    let mut device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
     let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
         .iter()
@@ -240,14 +240,14 @@ pub fn tailnet_sync(dir: String, wait_secs: u64) -> Result<Vec<TailnetMember>, N
         .collect();
     rt.block_on(async move {
         device
-            .sync_tailnet(&relays, std::time::Duration::from_secs(wait_secs))
+            .sync_mesh(&relays, std::time::Duration::from_secs(wait_secs))
             .await
             .map_err(NoscatError::fail)?;
         members_of(device)
     })
 }
 
-fn members_of(device: noscat_core::tailnet::Device) -> Result<Vec<TailnetMember>, NoscatError> {
+fn members_of(device: noscat_core::mesh::Device) -> Result<Vec<MeshMember>, NoscatError> {
     use nostr::nips::nip19::ToBech32;
     let mut out = Vec::new();
     for m in device.list_members().map_err(NoscatError::fail)? {
@@ -255,7 +255,7 @@ fn members_of(device: noscat_core::tailnet::Device) -> Result<Vec<TailnetMember>
             .map_err(NoscatError::fail)?
             .to_bech32()
             .map_err(NoscatError::fail)?;
-        out.push(TailnetMember { npub, is_owner: m.is_owner, name: None });
+        out.push(MeshMember { npub, is_owner: m.is_owner, name: None });
     }
     Ok(out)
 }
@@ -289,7 +289,7 @@ impl NoscatClient {
             listen: Some(
                 std::net::SocketAddr::from(([0, 0, 0, 0], config.listen_port.unwrap_or(41641))),
             ),
-            tailnet_dir: config.tailnet_dir.as_ref().map(std::path::PathBuf::from),
+            mesh_dir: config.mesh_dir.as_ref().map(std::path::PathBuf::from),
             device_name: config.device_name,
             advert_ttl_secs: 3600,
         })
@@ -397,7 +397,7 @@ impl NoscatClient {
         self.lock().send_chat(&target_npub, &text);
     }
 
-    /// Node mode (requires a tailnet-scoped client: membership is the
+    /// Node mode (requires a mesh-scoped client: membership is the
     /// authorization). Advertises and accepts any number of inbound peers
     /// until the client is dropped: files are saved into out_dir, and raw
     /// inbound tunnels are bridged to 127.0.0.1:bridge_port when given.

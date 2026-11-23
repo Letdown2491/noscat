@@ -1,7 +1,7 @@
 //! noscat-client: the UI-facing layer of the noscat stack.
 //!
 //! Everything a graphical client needs and a terminal does not: an owned
-//! async runtime, identity/relay/tailnet configuration resolved once, and an
+//! async runtime, identity/relay/mesh configuration resolved once, and an
 //! event stream instead of stderr prints. The primitives are small:
 //!
 //! - [`Client::connect`] - dial a peer by npub, get the tunnel as a plain
@@ -67,9 +67,9 @@ pub struct ClientConfig {
     pub relays: Option<Vec<String>>,
     /// The UDP listen address for serve-side tunnels.
     pub listen: Option<SocketAddr>,
-    /// A tailnet device directory: tunnels are scoped to the group's epoch
+    /// A mesh device directory: tunnels are scoped to the group's epoch
     /// PSK, so only members can connect or be dialed.
-    pub tailnet_dir: Option<PathBuf>,
+    pub mesh_dir: Option<PathBuf>,
     /// Friendly device name published in the advert (peers display it).
     /// `None` keeps the advert unnamed; UIs then fall back to labels.
     pub device_name: Option<String>,
@@ -83,7 +83,7 @@ impl Default for ClientConfig {
             identity: IdentitySource::Ephemeral,
             relays: None,
             listen: None,
-            tailnet_dir: None,
+            mesh_dir: None,
             device_name: None,
             advert_ttl_secs: 3600,
         }
@@ -205,8 +205,8 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedStream<
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {    #[error("identity: {0}")]
     Identity(String),
-    #[error("tailnet: {0}")]
-    Tailnet(String),
+    #[error("mesh: {0}")]
+    Mesh(String),
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -219,10 +219,10 @@ struct Inner {
     npub: String,
     psk: Option<[u8; 32]>,
     device_name: Option<String>,
-    /// Tailnet device directory, when scoped to one. Read on every tunnel:
+    /// Mesh device directory, when scoped to one. Read on every tunnel:
     /// the epoch PSK changes when members join or are removed, and long
     /// running peers must pick up the new secret without a restart.
-    tailnet_dir: Option<PathBuf>,
+    mesh_dir: Option<PathBuf>,
     relays: Vec<String>,
     listen: SocketAddr,
     ttl: u64,
@@ -235,13 +235,13 @@ impl Inner {
         let _ = self.events.send(ev);
     }
 
-    /// The tailnet PSK as of *now*: re-derived from the device directory so
+    /// The mesh PSK as of *now*: re-derived from the device directory so
     /// an epoch change (a join or removal elsewhere) applies to the next
     /// tunnel without a client restart. Falls back to the cached secret
     /// when the directory cannot be read.
     fn fresh_psk(&self) -> Option<[u8; 32]> {
-        match &self.tailnet_dir {
-            Some(dir) => match noscat_core::tailnet::Device::open(dir)
+        match &self.mesh_dir {
+            Some(dir) => match noscat_core::mesh::Device::open(dir)
                 .and_then(|d| d.tunnel_psk())
             {
                 Ok(psk) => <[u8; 32]>::try_from(psk).ok().or(self.psk),
@@ -367,16 +367,16 @@ impl Client {
                 }
             }
         };
-        let psk = match &config.tailnet_dir {
+        let psk = match &config.mesh_dir {
             Some(dir) => {
-                let device = noscat_core::tailnet::Device::open(dir)
-                    .map_err(|e| ClientError::Tailnet(e.to_string()))?;
+                let device = noscat_core::mesh::Device::open(dir)
+                    .map_err(|e| ClientError::Mesh(e.to_string()))?;
                 let psk = device
                     .tunnel_psk()
-                    .map_err(|e| ClientError::Tailnet(e.to_string()))?;
+                    .map_err(|e| ClientError::Mesh(e.to_string()))?;
                 Some(
                     <[u8; 32]>::try_from(psk)
-                        .map_err(|_| ClientError::Tailnet("unexpected PSK length".into()))?,
+                        .map_err(|_| ClientError::Mesh("unexpected PSK length".into()))?,
                 )
             }
             None => None,
@@ -389,7 +389,7 @@ impl Client {
                 identity,
                 psk,
                 device_name: config.device_name,
-                tailnet_dir: config.tailnet_dir,
+                mesh_dir: config.mesh_dir,
                 relays: config.relays.unwrap_or_else(|| {
                     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
                 }),
@@ -440,8 +440,8 @@ impl Client {
             inner.psk.as_ref(),
             inner.device_name.as_deref(),
         ))?;
-        if let Some(dir) = &inner.tailnet_dir {
-            listener.set_tailnet_dir(dir.clone());
+        if let Some(dir) = &inner.mesh_dir {
+            listener.set_mesh_dir(dir.clone());
         }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {
@@ -471,12 +471,12 @@ impl Client {
         Ok(addr)
     }
 
-    /// Tailnet node mode: listen for any number of inbound peers and
+    /// Mesh node mode: listen for any number of inbound peers and
     /// dispatch each one by what it sends. A file transfer (the sender's
     /// TAG_HEADER first frame) is received into `out_dir`; any other stream
     /// is bridged to `bridge_to` when configured, dropped otherwise.
     /// Returns the advertised UDP address; the node runs until the client
-    /// is dropped. Call this on a tailnet-scoped client: membership is the
+    /// is dropped. Call this on a mesh-scoped client: membership is the
     /// authorization for everything inbound.
     pub fn up(&self, out_dir: PathBuf, bridge_to: Option<SocketAddr>) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
@@ -488,8 +488,8 @@ impl Client {
             inner.psk.as_ref(),
             inner.device_name.as_deref(),
         ))?;
-        if let Some(dir) = &inner.tailnet_dir {
-            listener.set_tailnet_dir(dir.clone());
+        if let Some(dir) = &inner.mesh_dir {
+            listener.set_mesh_dir(dir.clone());
         }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {
@@ -609,8 +609,8 @@ impl Client {
             inner.psk.as_ref(),
             inner.device_name.as_deref(),
         ))?;
-        if let Some(dir) = &inner.tailnet_dir {
-            listener.set_tailnet_dir(dir.clone());
+        if let Some(dir) = &inner.mesh_dir {
+            listener.set_mesh_dir(dir.clone());
         }
         let addr = listener.local_addr();
         inner.emit(Event::Listening { npub: inner.identity.npub(), addr });
@@ -645,8 +645,8 @@ impl Client {
             inner.psk.as_ref(),
             inner.device_name.as_deref(),
         ))?;
-        if let Some(dir) = &inner.tailnet_dir {
-            listener.set_tailnet_dir(dir.clone());
+        if let Some(dir) = &inner.mesh_dir {
+            listener.set_mesh_dir(dir.clone());
         }
         let addr = listener.local_addr();
         inner.emit(Event::Listening {

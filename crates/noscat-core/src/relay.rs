@@ -158,15 +158,15 @@ pub async fn fetch_advert_for(
     Ok(found)
 }
 
-/// Fetch a device's published MLS key package (tailnet kind 30443) by author.
+/// Fetch a device's published MLS key package (mesh kind 30443) by author.
 ///
 /// `None` means "nothing arrived in time" - usually the device has not run
-/// `noscat tailnet publish` yet.
+/// `noscat mesh publish` yet.
 pub async fn fetch_key_package(
     relays: &[String],
     device: PublicKey,
 ) -> Result<Option<Event>, RelayError> {
-    use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
+    use crate::mesh::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
 
     let filter = Filter::new()
         .kind(Kind::Custom(KEY_PACKAGE_KIND))
@@ -226,9 +226,9 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
     Ok(())
 }
 
-/// Subscribe to tailnet key packages (kind 30443) on the relays and forward
+/// Subscribe to mesh key packages (kind 30443) on the relays and forward
 /// each event's author to the returned channel; the stream lives until the
-/// receiver is dropped. This is how the tailnet owner notices a device asking
+/// receiver is dropped. This is how the mesh owner notices a device asking
 /// to join: the device publishes its key package tagged to the owner's npub,
 /// and this subscription only surfaces events addressed to `target` - a
 /// device that scanned a different owner's QR never reaches us.
@@ -236,7 +236,7 @@ pub async fn watch_key_packages(
     relays: &[String],
     target: PublicKey,
 ) -> Result<tokio::sync::mpsc::Receiver<PublicKey>, RelayError> {
-    use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
+    use crate::mesh::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
 
     let client = connect_client(relays).await?;
     let filter = Filter::new()

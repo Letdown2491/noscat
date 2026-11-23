@@ -111,14 +111,14 @@ pub async fn watch_traversal(
     Ok(())
 }
 
-/// Watch for gift-wrapped tailnet messages (kind 30444 rumors: MLS commits
+/// Watch for gift-wrapped mesh messages (kind 30444 rumors: MLS commits
 /// and Welcomes). Delivers (sender, rumor content) on `tx`.
-pub async fn watch_tailnet(
+pub async fn watch_mesh(
     identity: Identity,
     relays: Vec<String>,
     tx: mpsc::Sender<(PublicKey, String)>,
 ) -> Result<(), TraversalError> {
-    use crate::tailnet::TAILNET_KIND;
+    use crate::mesh::MESH_KIND;
 
     let client = crate::relay::connect_client(&relays).await?;
     let filter = Filter::new().kind(Kind::GiftWrap).pubkey(identity.public_key());
@@ -133,7 +133,7 @@ pub async fn watch_tailnet(
             tracing::debug!("ignoring undecryptable gift wrap");
             continue;
         };
-        if u16::from(unwrapped.rumor.kind) != TAILNET_KIND {
+        if u16::from(unwrapped.rumor.kind) != MESH_KIND {
             continue;
         }
         if tx.send((unwrapped.sender, unwrapped.rumor.content)).await.is_err() {

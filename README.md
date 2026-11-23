@@ -52,8 +52,8 @@ and a man page.
 1. **Tunnels** (netcat mode): identity → relay advert → discovery → Noise-XK handshake
    over UDP → stdio bridge, with STUN reflexive discovery and NIP-59 gift-wrapped
    (kind-21059) endpoint signaling + UDP hole punching.
-2. **Tailnet** (owned devices): an MLS group per tailnet on OpenMLS -
-   `tailnet create/publish/invite/join`. Devices publish MLS key packages
+2. **Mesh** (owned devices): an MLS group per mesh on OpenMLS -
+   `mesh create/publish/invite/join`. Devices publish MLS key packages
    (kind 30443); invitations are NIP-59 gift-wrapped Welcomes (kind 30444).
 3. **File transfer**: `send`/`receive` over the same tunnels, with an ACK +
    retransmit layer so large files survive socket-buffer overflow; a clean
@@ -69,8 +69,8 @@ and a man page.
     is derived from the identity secret via HKDF (a deliberate, documented deviation
     from FIPS's direct secp256k1 static; see the module docs).
   - `stun` - hand-rolled RFC 5389 Binding requests (no extra dependency).
-  - `traversal` - gift-wrapped candidate exchange and tailnet message watching.
-  - `tailnet` - MLS group management; `export_secret` derives the epoch tunnel PSK.
+  - `traversal` - gift-wrapped candidate exchange and mesh message watching.
+  - `mesh` - MLS group management; `export_secret` derives the epoch tunnel PSK.
   - `tunnel` - the data plane: one UDP datagram = one Noise message; session
     primitives (`dial_session`/`serve_session`/`bind_listener`) plus
     `TunnelStream` (the tunnel as a plain byte stream) for API consumers;
@@ -115,9 +115,9 @@ to `~/Downloads` (or `--out`), and bridges raw inbound tunnels to a local
 service with `--to`:
 
 ```
-# requires a tailnet: membership is the authorization for inbound connections
-noscat up --tailnet
-noscat up --tailnet --out ~/incoming --to 127.0.0.1:22
+# requires a mesh: membership is the authorization for inbound connections
+noscat up --mesh
+noscat up --mesh --out ~/incoming --to 127.0.0.1:22
 ```
 
 With `--to`, any inbound stream that is not a file transfer is forwarded to
@@ -129,16 +129,16 @@ accepted.
 
 ```
 # On the owner (device A), once:
-noscat tailnet create
+noscat mesh create
 
 # On the joiner (device B):
-noscat tailnet publish     # publishes its MLS key package
+noscat mesh publish     # publishes its MLS key package
 
 # Back on the owner:
-noscat tailnet invite <B's npub>
+noscat mesh invite <B's npub>
 
 # On the joiner:
-noscat tailnet join
+noscat mesh join
 ```
 
 The device directory defaults to `~/.noscat/device`; pass `--dir <path>` to
@@ -151,35 +151,35 @@ per device) and remove them:
 
 ```
 # On the owner:
-noscat tailnet members   # who is in, at which epoch
-noscat tailnet remove <B's npub>
+noscat mesh members   # who is in, at which epoch
+noscat mesh remove <B's npub>
 
 # On the other members (picks up the owner's commit from the relays):
-noscat tailnet sync
+noscat mesh sync
 ```
 
 Both devices now derive the same epoch PSK. Removing a device ratchets the
 MLS epoch: the removed device's PSK goes stale immediately, so its handshakes
 fail cryptographically even if it keeps trying. Scope any tunnel to the group
-with `--tailnet` - the handshake becomes `Noise_XKpsk0`, so only members
-of the same tailnet can complete it:
+with `--mesh` - the handshake becomes `Noise_XKpsk0`, so only members
+of the same mesh can complete it:
 
 ```
-noscat serve --tailnet
-echo hi | noscat pipe <A's npub> --tailnet
+noscat serve --mesh
+echo hi | noscat pipe <A's npub> --mesh
 ```
 
 ### Port forwarding
 
 Expose any TCP service on one device; dial it by npub from another - like
-`ssh -L`, but the tunnel is Nostr-native and (with `--tailnet`) members-only:
+`ssh -L`, but the tunnel is Nostr-native and (with `--mesh`) members-only:
 
 ```
 # On the device with the service (A) - expose an SSH server, web app, anything:
-noscat expose --to 127.0.0.1:22 --tailnet
+noscat expose --to 127.0.0.1:22 --mesh
 
 # On another device (B) - localhost:2222 now *is* A's port 22:
-noscat forward <A's npub> --port 2222 --tailnet
+noscat forward <A's npub> --port 2222 --mesh
 ssh -p 2222 localhost
 ```
 
@@ -194,10 +194,10 @@ the device dial the target.
 
 ```
 # Receiver (A):
-noscat receive --out ./incoming --tailnet
+noscat receive --out ./incoming --mesh
 
 # Sender (B):
-noscat send ./report.pdf <A's npub> --tailnet
+noscat send ./report.pdf <A's npub> --mesh
 ```
 
 Transfers are resumable: an interrupted attempt leaves `report.pdf.noscat-part`

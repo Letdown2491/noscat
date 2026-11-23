@@ -10,7 +10,7 @@ This NIP specifies **noscat**, a protocol for establishing peer-to-peer data
 tunnels between a user's own devices, using Nostr purely as the control
 plane. Two devices discover each other through relay-stored adverts,
 establish a direct Noise-protected UDP transport out-of-band, and scope
-membership to a user's device set ("tailnet") with an MLS (RFC 9420) group
+membership to a user's device set ("mesh") with an MLS (RFC 9420) group
 whose epoch secret doubles as the tunnel handshake PSK.
 
 Nostr relays carry only discovery metadata and MLS control messages. Data
@@ -58,7 +58,7 @@ Everything runs in userspace; no root, no coordinator, no account.
 |---|---|---|
 | Endpoint advert | `37195` | public (parameterized replaceable) |
 | MLS key package | `30443` | public (parameterized replaceable) |
-| Tailnet message (Welcome / commit) | `30444` | inside a NIP-59 gift wrap |
+| Mesh message (Welcome / commit) | `30444` | inside a NIP-59 gift wrap |
 | Tunnel data | - | Noise XK over UDP, direct |
 
 ## Endpoint adverts (kind 37195)
@@ -93,13 +93,13 @@ to relay-reflected candidates for NAT traversal (out of scope here).
 
 ## Tailnets
 
-A **tailnet** is one MLS group whose GroupId is the owner's npub (32 raw
+A **mesh** is one MLS group whose GroupId is the owner's npub (32 raw
 bytes). It is the unit of membership and authorization for the tunnels
 between a user's devices.
 
 ### Policy extension (0xffa0)
 
-The group context of a tailnet SHALL carry exactly one custom extension of
+The group context of a mesh SHALL carry exactly one custom extension of
 type `0xffa0` (private-use range, RFC 9420 §13.6). Its extension data is
 JSON:
 
@@ -120,14 +120,14 @@ group context extensions.
 ### Key packages (kind 30443)
 
 A device publishes a parameterized replaceable event, kind `30443`, with `d`
-tag `"noscat-tailnet-kp-v1"` and content being the **hex-encoded
+tag `"noscat-mesh-kp-v1"` and content being the **hex-encoded
 TLS-serialized MLS KeyPackage** (the bundle's private init keys stay in the
 publisher's local storage - only the publisher can decrypt the Welcome later).
 
 The event is public but reveals only the publisher's intent to join *some*
-tailnet. The owner fetches it, commits an Add, and sends the Welcome.
+mesh. The owner fetches it, commits an Add, and sends the Welcome.
 
-### Tailnet messages (kind 30444, gift-wrapped)
+### Mesh messages (kind 30444, gift-wrapped)
 
 All group-control messages travel as NIP-59 gift wraps. The gift-wrapped
 **rumor** is an unsigned event of kind `30444`, authored by the sender's real
@@ -150,7 +150,7 @@ Receivers:
 1. Unwrap the gift wrap (NIP-59), then decrypt/verify the MLS message
    locally.
 2. If the message contains a Welcome and the receiver is not yet in a
-   tailnet, it joins from the Welcome and merges the accompanying commit.
+   mesh, it joins from the Welcome and merges the accompanying commit.
 3. If the message contains only a commit, the receiver processes it: the
    sender credential MUST pass the policy extension check, then the commit
    is merged.
@@ -163,7 +163,7 @@ device join a group it may have since been removed from.
 
 ### Epoch PSK and tunnel binding
 
-Every member derives the tailnet's current tunnel key with the MLS exporter:
+Every member derives the mesh's current tunnel key with the MLS exporter:
 
 ```
 psk = MLS-Exporter("noscat/tunnel-psk-v1", "", 32)
@@ -184,7 +184,7 @@ device: it is locked out by the ratchet itself.
 
 ## File transfer framing
 
-File transfer (`send`/`receive`) rides any established session - tailnet-
+File transfer (`send`/`receive`) rides any established session - mesh-
 scoped or not - as a small tagged protocol on top of the Noise transport.
 One Noise message = one UDP datagram, and the session's Noise nonces advance
 strictly sequentially and never appear on the wire; every reliability
@@ -311,7 +311,7 @@ noscat:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6
 Rules:
 
 - The only required payload is the peer's npub (bech32, per Nostr NIP-19).
-  Everything else a client needs to dial - relays, tailnet, endpoints -
+  Everything else a client needs to dial - relays, mesh, endpoints -
   comes from the scanner's own configuration and the peer's published
   advert; the QR never carries endpoints or keys.
 - Producers MUST emit the scheme prefix in lowercase. Parsers MUST accept
@@ -339,14 +339,14 @@ authenticates the scanner to the holder just as any other dial would.
 5. `join` / `sync`: subscribe to gift wraps addressed to the device's npub;
    process per the receiver rules above.
 6. `serve`/`pipe`/`connect`: resolve the peer's advert, establish the Noise
-   session (XKpsk0 when a tailnet is in scope), and pump bytes.
+   session (XKpsk0 when a mesh is in scope), and pump bytes.
 7. `send`/`receive`: run the file-transfer framing above over the session;
    interrupted transfers resume from the receiver's durable point.
 
 ## Security Considerations
 
 - **Relay visibility.** Adverts and key packages are public but contain no
-  secrets: a Noise static public key and an MLS key package. Tailnet
+  secrets: a Noise static public key and an MLS key package. Mesh
   messages are double-wrapped (NIP-59): relays see only an ephemeral sender
   and the receiver npub.
 - **Policy enforcement is cooperative.** The `0xffa0` check runs at
@@ -385,6 +385,6 @@ authenticates the scanner to the holder just as any other dial would.
 
 A complete userspace implementation in Rust lives at
 <https://github.com/Letdown2491/noscat> (crates `noscat-core`:
-`tailnet.rs`, `advert.rs`, `noise.rs`, `traversal.rs`, `tunnel.rs` - the
+`mesh.rs`, `advert.rs`, `noise.rs`, `traversal.rs`, `tunnel.rs` - the
 last of which implements the transfer framing above). It builds on
 OpenMLS 0.8 and nostr-tools-compatible kinds (Marmot's key-package slot).

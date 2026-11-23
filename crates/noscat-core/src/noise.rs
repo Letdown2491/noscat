@@ -12,9 +12,9 @@
 use snow::{Builder, HandshakeState, TransportState};
 
 /// The Noise pattern the data plane speaks. Both ends are noscat. With a
-/// tailnet PSK, `psk0` is appended: the group's epoch secret is mixed into
+/// mesh PSK, `psk0` is appended: the group's epoch secret is mixed into
 /// the handshake's first key derivation, so only group members can complete
-/// the handshake at all (see `crate::tailnet`).
+/// the handshake at all (see `crate::mesh`).
 pub const NOISE_PATTERN: &str = "Noise_XK_25519_ChaChaPoly_SHA256";
 pub const NOISE_PSK_PATTERN: &str = "Noise_XKpsk0_25519_ChaChaPoly_SHA256";
 
@@ -173,11 +173,11 @@ mod tests {
         assert_eq!(&buf_s[..n], b"pong");
     }
 
-    /// The tailnet binding: with a PSK, only holders of the group's epoch
+    /// The mesh binding: with a PSK, only holders of the group's epoch
     /// secret complete the handshake. A stranger with a valid-looking Noise
     /// key of its own fails at msg 1.
     #[test]
-    fn psk_binds_handshake_to_the_tailnet() {
+    fn psk_binds_handshake_to_the_mesh() {
         let server_secret = [1u8; 32];
         let client_secret = [2u8; 32];
         let server_static = noise_static_from_identity(&server_secret).expect("derive");

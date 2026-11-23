@@ -193,7 +193,7 @@ async fn punch_loop(socket: Arc<UdpSocket>, candidates: Arc<Mutex<Vec<SocketAddr
     }
 }
 
-/// An established, tailnet-scoped (when a PSK was used) session with a peer,
+/// An established, mesh-scoped (when a PSK was used) session with a peer,
 /// from either side of the handshake. `finish` aborts the signaling tasks and
 /// hands back the transport parts for whichever pump consumes them.
 /// An established tunnel: the transport parts for one Noise session over one
@@ -310,8 +310,8 @@ async fn accept_handshake(
 /// Serve one session: bind, advertise candidates, watch for traversal
 /// signaling, and return when the first peer completes the handshake.
 ///
-/// With a `psk` (the tailnet's epoch secret), the handshake is bound to the
-/// group: only members of the same tailnet can complete it.
+/// With a `psk` (the mesh's epoch secret), the handshake is bound to the
+/// group: only members of the same mesh can complete it.
 /// Serve one tunnel on `listen`: bind UDP, publish the advert, watch for the
 /// peer's traversal signals, punch, and await the first handshake opener.
 /// This is the session-level primitive under [`serve`] - callers who want the
@@ -388,10 +388,10 @@ pub async fn serve_session(
 
 /// Dial a peer by npub: gather candidates (advert + gift-wrapped traversal
 /// exchange), punch UDP holes, and complete the handshake. With a `psk` (the
-/// tailnet's epoch secret), only members of the same tailnet can connect.
+/// mesh's epoch secret), only members of the same mesh can connect.
 /// Dial a peer by npub: gather candidates (advert + gift-wrapped traversal
 /// exchange), punch UDP holes, and complete the handshake. With a `psk` (the
-/// tailnet's epoch secret), only members of the same tailnet can connect.
+/// mesh's epoch secret), only members of the same mesh can connect.
 /// Session-level primitive under [`pipe`]; see [`serve_session`].
 pub async fn dial_session(
     identity: &Identity,
@@ -741,8 +741,8 @@ pub async fn pipe(
     pump(tokio::io::stdin(), tokio::io::stdout(), socket, peer, hs, &mut src).await
 }
 
-/// Expose a local TCP service to tailnet peers: each tunnel is spliced to a
-/// fresh connection to `to`. Runs forever; with a `psk`, only tailnet
+/// Expose a local TCP service to mesh peers: each tunnel is spliced to a
+/// fresh connection to `to`. Runs forever; with a `psk`, only mesh
 /// members can connect at all.
 ///
 /// Concurrent sessions are first-class: one shared UDP socket on `listen`
@@ -794,10 +794,10 @@ pub struct TunnelListener {
     noise_priv: [u8; 32],
     psk: Option<[u8; 32]>,
     /// When set, the PSK is re-derived from this device directory on every
-    /// accepted handshake: a tailnet epoch change (a device joined or was
+    /// accepted handshake: a mesh epoch change (a device joined or was
     /// removed elsewhere) must take effect for the next peer, not after a
     /// node restart. `psk` is the fallback for a failed re-derivation.
-    tailnet_dir: Option<std::path::PathBuf>,
+    mesh_dir: Option<std::path::PathBuf>,
     relays: Vec<String>,
     accept_rx: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     /// Established sessions: source addr -> that session's tunnel datagrams.
@@ -812,10 +812,10 @@ impl TunnelListener {
         self.socket.local_addr().expect("bound socket")
     }
 
-    /// Point the listener at a tailnet device directory: accepted handshakes
-    /// re-derive the epoch PSK from it (see the `tailnet_dir` field).
-    pub fn set_tailnet_dir(&mut self, dir: std::path::PathBuf) {
-        self.tailnet_dir = Some(dir);
+    /// Point the listener at a mesh device directory: accepted handshakes
+    /// re-derive the epoch PSK from it (see the `mesh_dir` field).
+    pub fn set_mesh_dir(&mut self, dir: std::path::PathBuf) {
+        self.mesh_dir = Some(dir);
     }
 }
 
@@ -945,7 +945,7 @@ pub async fn bind_listener(
         socket,
         noise_priv,
         psk: psk.cloned(),
-        tailnet_dir: None,
+        mesh_dir: None,
         relays: relays.to_vec(),
         accept_rx,
         sessions,
@@ -1039,11 +1039,11 @@ impl TunnelListener {
                 Some(m) => m,
                 None => return Err(TunnelError::NoHandshake),
             };
-            // Fresh PSK per handshake: the tailnet's epoch secret changes when
+            // Fresh PSK per handshake: the mesh's epoch secret changes when
             // members are added or removed, and a node that was already
             // serving must not keep rejecting peers with a stale one.
-            let psk = match &self.tailnet_dir {
-                Some(dir) => match crate::tailnet::Device::open(dir)
+            let psk = match &self.mesh_dir {
+                Some(dir) => match crate::mesh::Device::open(dir)
                     .and_then(|d| d.tunnel_psk())
                 {
                     Ok(psk) => Some(
@@ -1051,7 +1051,7 @@ impl TunnelListener {
                             .map_err(|_| TunnelError::Io(std::io::Error::other("bad PSK length")))?,
                     ),
                     Err(e) => {
-                        tracing::warn!("tailnet PSK reload failed: {e}; using the last known");
+                        tracing::warn!("mesh PSK reload failed: {e}; using the last known");
                         self.psk
                     }
                 },
@@ -1130,7 +1130,7 @@ impl TunnelListener {
 
 /// Forward a local TCP port over tunnels to `target`: every connection to
 /// the local listener dials `target` (a fresh tunnel per connection) and
-/// splices the traffic through, encrypted. With a `psk`, only tailnet
+/// splices the traffic through, encrypted. With a `psk`, only mesh
 /// members of the same group can be dialed.
 ///
 /// The listener binds `bind` - loopback unless the caller says otherwise:
@@ -1923,7 +1923,7 @@ async fn receive_stream(
 }
 
 
-/// The receive side of a file transfer over a routed session (tailnet node
+/// The receive side of a file transfer over a routed session (mesh node
 /// mode): the sender runs the usual [`send_stream`] datagram protocol, and
 /// its TAG frames surface here as decrypted bytes on `stream`.
 ///

@@ -8,14 +8,14 @@
 //!   (`dial_session`/`serve_session`/`bind_listener`) for API consumers, plus
 //!   [`TunnelStream`] for the tunnel as a plain byte stream, and the
 //!   netcat/file-transfer operations on top.
-//! - `tailnet` - MLS group control plane per tailnet (Marmot component model).
+//! - `mesh` - MLS group control plane per mesh (Marmot component model).
 
 pub mod advert;
 pub mod identity;
 pub mod noise;
 pub mod relay;
 pub mod stun;
-pub mod tailnet;
+pub mod mesh;
 pub mod traversal;
 pub mod tunnel;
 

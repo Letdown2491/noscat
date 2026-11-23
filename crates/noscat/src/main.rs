@@ -54,10 +54,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Restrict the tunnel to this tailnet's device directory (MLS group
+        /// Restrict the tunnel to this mesh's device directory (MLS group
         /// membership becomes the authorization) [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
     },
     /// Pipe stdio into a tunnel to a peer by npub.
     Pipe {
@@ -69,10 +69,10 @@ enum Command {
         /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
-        /// Restrict the tunnel to this tailnet's device directory (MLS group
+        /// Restrict the tunnel to this mesh's device directory (MLS group
         /// membership becomes the authorization) [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
     },
     /// Send a file over a tunnel to a peer by npub.
     Send {
@@ -86,10 +86,10 @@ enum Command {
         /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
-        /// Restrict the tunnel to this tailnet's device directory
+        /// Restrict the tunnel to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
     },
     /// Receive one file over a tunnel, into --out (default: cwd).
     Receive {
@@ -105,16 +105,16 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Restrict the tunnel to this tailnet's device directory
+        /// Restrict the tunnel to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
     },
-    /// Expose a local TCP service to tailnet peers over tunnels.
-    /// Run the persistent tailnet node: advertise, accept any number of
+    /// Expose a local TCP service to mesh peers over tunnels.
+    /// Run the persistent mesh node: advertise, accept any number of
     /// inbound peers, auto-receive files, bridge raw tunnels.
     Up {
         /// Directory to save inbound files into (default: ~/Downloads).
@@ -135,10 +135,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Tailnet device directory - REQUIRED: membership authorizes inbound
+        /// Mesh device directory - REQUIRED: membership authorizes inbound
         /// [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
         /// Advert lifetime in seconds [default: 3600]
         #[arg(long, default_value = "3600")]
         ttl: u64,
@@ -156,10 +156,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Restrict the tunnels to this tailnet's device directory
+        /// Restrict the tunnels to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
@@ -181,14 +181,17 @@ enum Command {
         /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
-        /// Restrict the tunnels to this tailnet's device directory
+        /// Restrict the tunnels to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        tailnet: Option<String>,
+        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        mesh: Option<String>,
     },
-    /// Tailnet: a device's MLS group for owned-device meshing (spike).
+    /// Mesh: a device's MLS group for owned-device meshing (spike).
+    /// (Renamed from `tailnet`, whose subcommands still work via the
+    /// alias below for muscle memory.)
+    #[command(alias = "tailnet")]
     #[command(subcommand)]
-    Tailnet(TailnetCommand),
+    Mesh(MeshCommand),
     /// Emit shell completions (hidden; used by packaging).
     #[command(hide = true)]
     Completions {
@@ -198,8 +201,8 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum TailnetCommand {
-    /// Create a tailnet owned by this device's directory.
+enum MeshCommand {
+    /// Create a mesh owned by this device's directory.
     Create {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
@@ -213,14 +216,14 @@ enum TailnetCommand {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
-        /// The tailnet owner's npub: the request is addressed to them alone.
+        /// The mesh owner's npub: the request is addressed to them alone.
         #[arg(long)]
         owner: Option<String>,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Invite a device (by npub) into this device's tailnet.
+    /// Invite a device (by npub) into this device's mesh.
     Invite {
         /// The device directory of *this* (owner) device.
         #[arg(long, default_value_os_t = default_device_dir())]
@@ -231,25 +234,25 @@ enum TailnetCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Wait for a gift-wrapped invitation and join the tailnet.
+    /// Wait for a gift-wrapped invitation and join the mesh.
     Join {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
-        /// The tailnet owner's npub: invitations from anyone else are ignored.
+        /// The mesh owner's npub: invitations from anyone else are ignored.
         #[arg(long)]
         owner: Option<String>,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// List the tailnet's members and epoch.
+    /// List the mesh's members and epoch.
     Members {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
     },
-    /// Remove a device (by npub) from this tailnet (owner only).
+    /// Remove a device (by npub) from this mesh (owner only).
     Remove {
         /// The device directory of *this* (owner) device.
         #[arg(long, default_value_os_t = default_device_dir())]
@@ -260,7 +263,7 @@ enum TailnetCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Merge pending tailnet commits addressed to this device (run after an
+    /// Merge pending mesh commits addressed to this device (run after an
     /// owner invited or removed someone).
     Sync {
         /// Device directory holding the identity and MLS state.
@@ -273,7 +276,7 @@ enum TailnetCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Print the tailnet's current epoch tunnel PSK (hex).
+    /// Print the mesh's current epoch tunnel PSK (hex).
     Psk {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
@@ -281,8 +284,8 @@ enum TailnetCommand {
     },
 }
 
-// The default tailnet device directory, next to the shared identity.
-// `--tailnet` with no value (empty path) also resolves to this.
+// The default mesh device directory, next to the shared identity.
+// `--mesh` with no value (empty path) also resolves to this.
 fn default_device_dir() -> std::path::PathBuf {
     // unix shells set HOME; Windows-native environments set USERPROFILE.
     std::env::var("HOME")
@@ -322,8 +325,8 @@ fn main() -> anyhow::Result<()> {
         ))
     }
 
-    // The default tailnet device directory, next to the shared identity.
-    // `--tailnet` with no value (empty path) also resolves to this.
+    // The default mesh device directory, next to the shared identity.
+    // `--mesh` with no value (empty path) also resolves to this.
     fn default_device_dir() -> std::path::PathBuf {
         // unix shells set HOME; Windows-native environments set USERPROFILE.
         std::env::var("HOME")
@@ -332,37 +335,37 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| std::path::PathBuf::from(".noscat").join("device"))
     }
 
-    // The tailnet's epoch PSK, if the operator scoped the tunnel to a group.
-    fn tailnet_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
-        let device = noscat_core::tailnet::Device::open(dir)?;
+    // The mesh's epoch PSK, if the operator scoped the tunnel to a group.
+    fn mesh_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+        let device = noscat_core::mesh::Device::open(dir)?;
         let psk = device.tunnel_psk().map_err(|e| anyhow::anyhow!("{e}"))?;
         let psk: [u8; 32] = psk
             .try_into()
             .map_err(|_| anyhow::anyhow!("unexpected PSK length"))?;
-        eprintln!("# 🔐 tunnel bound to tailnet (epoch PSK loaded from {})", dir.display());
+        eprintln!("# 🔐 tunnel bound to mesh (psk) (epoch PSK loaded from {})", dir.display());
         Ok(psk)
     }
 
     // Build the shared client for the data-plane commands: identity, relays,
-    // tailnet scope, and listen address are resolved once, up front.
+    // mesh scope, and listen address are resolved once, up front.
     fn make_client(
         identity: IdentitySource,
         relays: Vec<String>,
-        tailnet: Option<String>,
+        mesh: Option<String>,
         listen: Option<std::net::SocketAddr>,
         ttl: u64,
         name: Option<String>,
     ) -> anyhow::Result<(Client, std::sync::mpsc::Receiver<Event>)> {
-        // `--tailnet` with no value is an empty string: the default device dir.
-        let tailnet = tailnet.map(|d| if d.is_empty() { default_device_dir() } else { std::path::PathBuf::from(d) });
-        if let Some(dir) = &tailnet {
-            tailnet_psk(dir)?;
+        // `--mesh` with no value is an empty string: the default device dir.
+        let mesh = mesh.map(|d| if d.is_empty() { default_device_dir() } else { std::path::PathBuf::from(d) });
+        if let Some(dir) = &mesh {
+            mesh_psk(dir)?;
         }
         let mut client = Client::start(ClientConfig {
             identity,
             relays: Some(relays_or_default(relays)),
             listen,
-            tailnet_dir: tailnet,
+            mesh_dir: mesh,
             device_name: name,
             advert_ttl_secs: ttl,
         })
@@ -371,8 +374,8 @@ fn main() -> anyhow::Result<()> {
         Ok((client, rx))
     }
 
-    // Resolve a --tailnet value (empty string = default device directory).
-    fn tailnet_dir_path(value: &str) -> std::path::PathBuf {
+    // Resolve a --mesh value (empty string = default device directory).
+    fn mesh_dir_path(value: &str) -> std::path::PathBuf {
         if value.is_empty() {
             default_device_dir()
         } else {
@@ -381,12 +384,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Watch the relays for devices publishing key packages (asking to join
-    // this tailnet) and invite them once the operator confirms. Runs on its
+    // this mesh) and invite them once the operator confirms. Runs on its
     // own thread + runtime for the life of the `up` process; every failure
     // is non-fatal (the node keeps serving regardless).
     fn spawn_pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
         std::thread::Builder::new()
-            .name("tailnet-pairing".into())
+            .name("mesh-pairing".into())
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -406,9 +409,9 @@ fn main() -> anyhow::Result<()> {
     async fn pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
         use nostr::nips::nip19::ToBech32;
 
-        // Only the tailnet owner answers join requests; a member device's
+        // Only the mesh owner answers join requests; a member device's
         // `up` just serves its tunnels.
-        let (members, own_npub) = match noscat_core::tailnet::Device::open(&device_dir) {
+        let (members, own_npub) = match noscat_core::mesh::Device::open(&device_dir) {
             Ok(device) => match device.list_members() {
                 Ok(members) => (members, device.identity.public_key()),
                 Err(e) => {
@@ -422,7 +425,7 @@ fn main() -> anyhow::Result<()> {
             }
         };
         if !members.iter().any(|m| m.is_owner) {
-            eprintln!("# this device is not the tailnet owner; join requests are answered by the owner device");
+            eprintln!("# this device is not the mesh owner; join requests are answered by the owner device");
             return;
         }
         // Only key packages tagged to this device's npub surface here: a
@@ -435,13 +438,13 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
         };
-        eprintln!("# 🤝 watching for devices asking to join this tailnet");
+        eprintln!("# 🤝 watching for devices asking to join this mesh");
 
         while let Some(author) = rx.recv().await {
             // Refresh membership per request: earlier confirmations added
             // members, and the author may already be one of them.
             let members =
-                match noscat_core::tailnet::Device::open(&device_dir).and_then(|d| d.list_members())
+                match noscat_core::mesh::Device::open(&device_dir).and_then(|d| d.list_members())
                 {
                     Ok(members) => members,
                     Err(e) => {
@@ -453,7 +456,7 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            eprintln!("# 🤝 device {author} wants to join this tailnet");
+            eprintln!("# 🤝 device {author} wants to join this mesh");
             let npub = match author.to_bech32() {
                 Ok(npub) => npub,
                 Err(_) => continue,
@@ -463,7 +466,7 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            let mut device = match noscat_core::tailnet::Device::open(&device_dir) {
+            let mut device = match noscat_core::mesh::Device::open(&device_dir) {
                 Ok(device) => device,
                 Err(e) => {
                     eprintln!("# pairing: cannot open device dir: {e}");
@@ -471,7 +474,7 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             match device.invite(author, &relays).await {
-                Ok(()) => eprintln!("# ✅ invited {npub} into the tailnet"),
+                Ok(()) => eprintln!("# ✅ invited {npub} into the mesh"),
                 Err(e) => eprintln!("# pairing: invite failed: {e}"),
             }
         }
@@ -481,7 +484,7 @@ fn main() -> anyhow::Result<()> {
     // declines: a backgrounded `up` (no tty) never lets anyone in.
     fn confirm(npub: &str) -> bool {
         use std::io::Write;
-        eprint!("# accept {npub} into this tailnet? [y/N] ");
+        eprint!("# accept {npub} into this mesh? [y/N] ");
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
@@ -492,7 +495,7 @@ fn main() -> anyhow::Result<()> {
 
     // Narrate one client event on stderr - the same shape the core's
     // run-to-completion operations used to print.
-    /// The tailnet roster plus a noise-key -> npub map, for the `up` chat
+    /// The mesh roster plus a noise-key -> npub map, for the `up` chat
     /// REPL: incoming chats address peers by their Noise static key until an
     /// advert lookup resolves them, and `to <prefix>` needs real npubs.
     struct PeerBook {
@@ -534,7 +537,7 @@ fn main() -> anyhow::Result<()> {
                 if let Some((npub, _, _)) = self.roster.iter().find(|(_, owner, _)| *owner) {
                     return Ok(npub.clone());
                 }
-                bail!("this device is not the tailnet owner");
+                bail!("this device is not the mesh owner");
             }
             let mut npub_hits: Vec<String> = self
                 .roster
@@ -595,7 +598,7 @@ fn main() -> anyhow::Result<()> {
         }));
         let b = book.clone();
         std::thread::spawn(move || {
-            let members = noscat_core::tailnet::Device::open(&device_dir)
+            let members = noscat_core::mesh::Device::open(&device_dir)
                 .and_then(|d| d.list_members())
                 .unwrap_or_default();
             let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -676,7 +679,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    /// Reply to tailnet chats from the `up` terminal: `to <prefix>` picks a
+    /// Reply to mesh chats from the `up` terminal: `to <prefix>` picks a
     /// peer (a roster npub prefix, `owner`, or the noise-key prefix from an
     /// incoming message's reply hint), every other non-empty line goes to
     /// them as a chat message. Bare `to` lists the roster.
@@ -792,7 +795,7 @@ fn main() -> anyhow::Result<()> {
             relays,
             ttl,
             identity,
-            tailnet,
+            mesh,
         } => {
             let identity = identity
                 .map(IdentitySource::File)
@@ -801,7 +804,7 @@ fn main() -> anyhow::Result<()> {
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, Some(listen), ttl, None)?;
             spawn_printer(rx, None);
             client.serve_stdio()?;
         }
@@ -809,22 +812,22 @@ fn main() -> anyhow::Result<()> {
             target,
             relays,
             identity,
-            tailnet,
+            mesh,
         } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             spawn_printer(rx, None);
             client.pipe_stdio(&target)?;
         }
-        Command::Send { path, target, relays, identity, tailnet } => {
+        Command::Send { path, target, relays, identity, mesh } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             client.send_file(path, &target);
             // wait for the transfer's terminal event
             for ev in rx {
@@ -838,7 +841,7 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev, None);
             }
         }
-        Command::Receive { out, listen, relays, identity, tailnet, ttl } => {
+        Command::Receive { out, listen, relays, identity, mesh, ttl } => {
             let identity = identity
                 .map(IdentitySource::File)
                 .or_else(default_identity)
@@ -846,7 +849,7 @@ fn main() -> anyhow::Result<()> {
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, Some(listen), ttl, None)?;
             // Report readiness up front: receive_file blocks on the sender's
             // handshake, and without this the user stares at silence.
             print_event(Event::Listening { npub: client.npub().to_string(), addr: listen }, None);
@@ -862,17 +865,17 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev, None);
             }
         }
-        Command::Up { out, to, listen, relays, identity, tailnet, ttl, name } => {
-            // Authorization comes from tailnet membership; without it any npub
+        Command::Up { out, to, listen, relays, identity, mesh, ttl, name } => {
+            // Authorization comes from mesh membership; without it any npub
             // that scans the QR could push files to this machine.
-            let Some(tailnet) = tailnet else {
-                anyhow::bail!("up requires --tailnet: tailnet membership authorizes inbound connections (create one with `noscat tailnet create`)");
+            let Some(mesh) = mesh else {
+                anyhow::bail!("up requires --mesh: mesh membership authorizes inbound connections (create one with `noscat mesh create`)");
             };
-            let device_dir = tailnet_dir_path(&tailnet);
-            // In tailnet mode this node IS its tailnet device: one identity
+            let device_dir = mesh_dir_path(&mesh);
+            // In mesh mode this node IS its mesh device: one identity
             // for the pairing QR, the invitations, and the tunnels. (The
             // phone does the same once it has joined.)
-            let device = noscat_core::tailnet::Device::open(&device_dir)?;
+            let device = noscat_core::mesh::Device::open(&device_dir)?;
             let identity = IdentitySource::Secret(device.identity.secret_hex());
             let device_name = name.unwrap_or_else(noscat_core::default_device_name);
             let listen: std::net::SocketAddr = listen
@@ -884,10 +887,10 @@ fn main() -> anyhow::Result<()> {
                     .map(|h| std::path::PathBuf::from(h).join("Downloads"))
                     .unwrap_or_else(|_| std::path::PathBuf::from("."))
             });
-            // Pairing: when this device owns the tailnet, it watches the
+            // Pairing: when this device owns the mesh, it watches the
             // relays for devices asking to join (their published key
             // packages) and invites them on confirmation.
-            let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl, Some(device_name))?;
+            let (client, rx) = make_client(identity, relays.clone(), Some(mesh), Some(listen), ttl, Some(device_name))?;
             let peers = spawn_peer_book(device_dir.clone(), relays_or_default(relays.clone()));
             spawn_printer(rx, Some(peers.clone()));
             spawn_pairing_watcher(device_dir.clone(), relays_or_default(relays));
@@ -899,7 +902,7 @@ fn main() -> anyhow::Result<()> {
                 std::thread::park();
             }
         }
-        Command::Expose { to, listen, relays, identity, tailnet, ttl } => {
+        Command::Expose { to, listen, relays, identity, mesh, ttl } => {
             let identity = identity
                 .map(IdentitySource::File)
                 .or_else(default_identity)
@@ -910,7 +913,7 @@ fn main() -> anyhow::Result<()> {
             let to: std::net::SocketAddr = to
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --to address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, Some(listen), ttl, None)?;
             client.expose(to)?;
             eprintln!("# 🔗 exposing tcp/{to} over tunnels");
             for ev in rx {
@@ -921,13 +924,13 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev, None);
             }
         }
-        Command::Forward { target, port, bind, relays, identity, tailnet } => {
+        Command::Forward { target, port, bind, relays, identity, mesh } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let local = std::net::SocketAddr::new(bind, port);
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
+            let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
             client.forward(&target, local)?;
             eprintln!("# 🐈 forwarding tcp/{local} over tunnels to {target}");
             for ev in rx {
@@ -938,20 +941,20 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev, None);
             }
         }
-        Command::Tailnet(cmd) => {
+        Command::Mesh(cmd) => {
             let rt = tokio::runtime::Runtime::new()?;
             match cmd {
-                TailnetCommand::Create { dir, relays: _ } => {
-                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
-                    device.create_tailnet()?;
+                MeshCommand::Create { dir, relays: _ } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
+                    device.create_mesh()?;
                     eprintln!(
-                        "# ✅ tailnet created; owner is {} (dir: {})",
+                        "# ✅ mesh created; owner is {} (dir: {})",
                         device.identity.npub(),
                         dir.display()
                     );
                 }
-                TailnetCommand::Publish { dir, owner, relays } => {
-                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Publish { dir, owner, relays } => {
+                    let device = noscat_core::mesh::Device::open(&dir)?;
                     let target = match &owner {
                         Some(npub) => Some(nostr::prelude::PublicKey::parse(npub)
                             .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?),
@@ -960,24 +963,24 @@ fn main() -> anyhow::Result<()> {
                     rt.block_on(device.publish_key_package(&relays_or_default(relays), target))?;
                     eprintln!("# 📢 key package published as {}", device.identity.npub());
                 }
-                TailnetCommand::Invite { dir, device: npub, relays } => {
-                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Invite { dir, device: npub, relays } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
                     let invitee = nostr::prelude::PublicKey::parse(&npub)
                         .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
                     rt.block_on(device.invite(invitee, &relays_or_default(relays)))?;
-                    eprintln!("# ✅ invited {npub} into the tailnet");
+                    eprintln!("# ✅ invited {npub} into the mesh");
                 }
-                TailnetCommand::Join { dir, owner, relays } => {
-                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Join { dir, owner, relays } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
                     let expected = match &owner {
                         Some(npub) => Some(nostr::prelude::PublicKey::parse(npub)
                             .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?),
                         None => None,
                     };
-                    rt.block_on(device.join_tailnet(&relays_or_default(relays), expected))?;
+                    rt.block_on(device.join_mesh(&relays_or_default(relays), expected))?;
                 }
-                TailnetCommand::Members { dir } => {
-                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Members { dir } => {
+                    let device = noscat_core::mesh::Device::open(&dir)?;
                     for m in device.list_members()? {
                         println!(
                             "{} epoch={} {}",
@@ -987,23 +990,23 @@ fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
-                TailnetCommand::Remove { dir, device: npub, relays } => {
-                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Remove { dir, device: npub, relays } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
                     let removed = nostr::prelude::PublicKey::parse(&npub)
                         .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?;
                     rt.block_on(device.remove_member(removed, &relays_or_default(relays)))?;
-                    eprintln!("# ✅ removed {npub} from the tailnet (epoch ratcheted)");
+                    eprintln!("# ✅ removed {npub} from the mesh (epoch ratcheted)");
                 }
-                TailnetCommand::Sync { dir, for_secs, relays } => {
-                    let mut device = noscat_core::tailnet::Device::open(&dir)?;
-                    let merged = rt.block_on(device.sync_tailnet(
+                MeshCommand::Sync { dir, for_secs, relays } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
+                    let merged = rt.block_on(device.sync_mesh(
                         &relays_or_default(relays),
                         std::time::Duration::from_secs(for_secs),
                     ))?;
                     eprintln!("# ✅ synced: {merged} commit(s) merged");
                 }
-                TailnetCommand::Psk { dir } => {
-                    let device = noscat_core::tailnet::Device::open(&dir)?;
+                MeshCommand::Psk { dir } => {
+                    let device = noscat_core::mesh::Device::open(&dir)?;
                     println!("{}", hex::encode(device.tunnel_psk()?));
                 }
             }
