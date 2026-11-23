@@ -258,7 +258,10 @@ fn main() -> anyhow::Result<()> {
     // ~/.noscat/identity.hex unless --identity overrides it. The client
     // creates the file on first use.
     fn default_identity() -> Option<IdentitySource> {
-        let home = std::env::var("HOME").ok()?;
+        // unix shells set HOME; Windows-native environments set USERPROFILE.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
         Some(IdentitySource::File(
             std::path::PathBuf::from(home).join(".noscat").join("identity.hex"),
         ))
@@ -304,7 +307,21 @@ fn main() -> anyhow::Result<()> {
     fn print_event(ev: Event) {
         match ev {
             Event::Listening { npub, addr } => {
-                eprintln!("# 🐈 serving as {npub} on udp/{addr} - waiting for a peer… (Ctrl-C to quit)")
+                eprintln!("# 🐈 serving as {npub} on udp/{addr} - waiting for a peer… (Ctrl-C to quit)");
+                // The pairing QR: scanning it hands the scanner this node's
+                // npub (noscat:<npub>, see docs/nip-noscat.md). Colors are
+                // inverted: most terminals are dark-background, so dark QR
+                // modules render as background and the code stays scannable.
+                if let Ok(code) = qrcode::QrCode::new(format!("noscat:{npub}")) {
+                    let qr = code
+                        .render::<qrcode::render::unicode::Dense1x2>()
+                        .dark_color(qrcode::render::unicode::Dense1x2::Light)
+                        .light_color(qrcode::render::unicode::Dense1x2::Dark)
+                        .quiet_zone(true)
+                        .build();
+                    eprintln!("{qr}");
+                    eprintln!("# scan to pair, or paste the npub above");
+                }
             }
             Event::TunnelUp { peer, addr } => {
                 eprintln!("# 🔗 tunnel up with {peer} (udp/{addr})")
@@ -446,6 +463,9 @@ fn main() -> anyhow::Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
             let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            // Report readiness up front: receive_file blocks on the sender's
+            // handshake, and without this the user stares at silence.
+            print_event(Event::Listening { npub: client.npub().to_string(), addr: listen });
             client.receive_file(out);
             for ev in rx {
                 match &ev {

@@ -23,6 +23,7 @@ secp256k1 = { version = "0.30", default-features = false, features = ["alloc", "
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.9"
+qrcode = { version = "0.14", default-features = false }
 openmls = "0.8.1"
 openmls_basic_credential = "0.5"
 openmls_rust_crypto = { version = "0.5.1", features = ["test-utils"] }

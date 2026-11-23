@@ -392,16 +392,26 @@ impl Client {
     /// Blocks until the session closes.
     pub fn serve_stdio(&self) -> Result<(), ClientError> {
         let inner = self.inner.clone();
-        inner.rt.block_on(async {
-            let session =
-                tunnel::serve_session(&inner.identity, inner.listen, &inner.relays, inner.ttl, inner.psk.as_ref()).await?;
-            let addr = session.local_addr();
-            inner.emit(Event::Listening { npub: inner.identity.npub(), addr });
-            let (socket, peer, hs, who) = session.finish().await;
+        // Bind, advertise, and report readiness FIRST: the caller must see
+        // the npub before the possibly long wait for the first peer.
+        let listener = inner.rt.block_on(tunnel::bind_listener(
+            &inner.identity,
+            inner.listen,
+            &inner.relays,
+            inner.ttl,
+            inner.psk.as_ref(),
+        ))?;
+        let addr = listener.local_addr();
+        inner.emit(Event::Listening { npub: inner.identity.npub(), addr });
+        let inner2 = inner.clone();
+        inner.rt.block_on(async move {
+            let mut listener = listener;
+            let session = listener.accept().await?;
+            let (socket, peer, hs, who, _data_rx) = session.finish().await;
             let stream = TunnelStream::new(socket, peer, hs, TunnelInlet::Exclusive, who.clone());
-            inner.emit(Event::TunnelUp { peer: who.clone(), addr: peer });
+            inner2.emit(Event::TunnelUp { peer: who.clone(), addr: peer });
             let res = Inner::bridge_stdio(stream).await;
-            inner.emit(Event::TunnelClosed {
+            inner2.emit(Event::TunnelClosed {
                 peer: who,
                 error: res.as_ref().err().map(|e| e.to_string()),
             });

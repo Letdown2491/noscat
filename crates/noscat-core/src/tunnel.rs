@@ -1154,10 +1154,13 @@ struct ResumeMeta {
 }
 
 /// Transfer message tags: first byte of every plaintext payload.
-const TAG_HEADER: u8 = 1;
-const TAG_CHUNK: u8 = 2;
-const TAG_ACK: u8 = 3;
-const TAG_FIN: u8 = 4;
+/// Transfer frame tags. These ride inside the encrypted stream: over an
+/// exclusive session the transfer code drives them on the raw socket, over a
+/// routed session ([`receive_routed_file`]) they surface as decrypted bytes.
+pub const TAG_HEADER: u8 = 1;
+pub const TAG_CHUNK: u8 = 2;
+pub const TAG_ACK: u8 = 3;
+pub const TAG_FIN: u8 = 4;
 /// Header reply carrying the receiver's resume point: tag + u32 "next
 /// expected seq" (how many complete chunks it already holds on disk).
 const TAG_RESUME: u8 = 5;
@@ -1557,8 +1560,7 @@ where
 }
 
 /// Strip any path components from a peer-supplied filename.
-fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {
-    let name = Path::new(name)
+fn sanitize_name(name: &str) -> Result<PathBuf, TunnelError> {    let name = Path::new(name)
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| TunnelError::UnsafePath(PathBuf::from(name)))?;

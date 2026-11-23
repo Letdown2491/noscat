@@ -22,6 +22,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 nostr = { workspace = true }
 hex = { workspace = true }
+qrcode = { workspace = true }
 
 [lints]
 workspace = true
