@@ -9,6 +9,11 @@ use noscat_client::{Client, ClientConfig, Event, IdentitySource};
     about = "like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
 )]
 struct Cli {
+    /// Re-enable info-level tracing logs (relay reconnects, mesh syncs,
+    /// traversal punches). Warnings and errors always print; RUST_LOG
+    /// overrides both defaults.
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -150,6 +155,10 @@ enum Command {
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = noscat_core::advert::ADVERT_TTL_SECS)]
         ttl: u64,
+        /// Accept every join request without asking (headless owners).
+        /// Requests land on disk either way (`mesh requests`).
+        #[arg(long)]
+        auto_accept_joins: bool,
     },
     Expose {
         /// The local service to expose, e.g. `127.0.0.1:8000`.
@@ -308,6 +317,40 @@ enum MeshCommand {
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
     },
+    /// Re-print this device's pairing QR (the `up --mesh` banner scrolls
+    /// away; the QR is also saved to <dir>/pairing-qr.txt).
+    Qr {
+        /// Device directory holding the identity.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+    },
+    /// List devices that asked to join this mesh and are still unanswered.
+    Requests {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+    },
+    /// Invite a device that asked to join (see `mesh requests`).
+    Accept {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+        /// The requesting device's npub (or a hex prefix of it) as shown
+        /// by `mesh requests`.
+        device: String,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
+    /// Drop a pending join request without inviting (the requester can
+    /// ask again by re-publishing its key package).
+    Decline {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+        /// The requesting device's npub (or a hex prefix of it).
+        device: String,
+    },
 }
 
 // The default mesh device directory, next to the shared identity.
@@ -446,15 +489,145 @@ fn read_from_clipboard_tool(tool: &str, args: &[&str]) -> anyhow::Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+use nostr::nips::nip19::ToBech32 as _;
+
+/// Render the pairing QR (`noscat:<npub>`) for terminals: inverted colors
+/// so dark modules render as background on the usual dark terminal.
+fn render_pairing_qr(npub: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(format!("noscat:{npub}")).ok()?;
+    Some(
+        code.render::<qrcode::render::unicode::Dense1x2>()
+            .dark_color(qrcode::render::unicode::Dense1x2::Light)
+            .light_color(qrcode::render::unicode::Dense1x2::Dark)
+            .quiet_zone(true)
+            .build(),
+    )
+}
+
+/// One device asking to join, journaled under <device>/join-requests/ so a
+/// prompt that scrolled away (or an owner who was afk) is recoverable via
+/// `mesh requests` / `mesh accept`.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct JoinRequest {
+    /// Bech32 npub, for display.
+    npub: String,
+    /// Hex of the same key (file name + member matching).
+    key: String,
+    first_seen: u64,
+    last_seen: u64,
+    /// How many key packages arrived for this device (republishes).
+    count: u64,
+}
+
+fn join_requests_dir(device_dir: &std::path::Path) -> std::path::PathBuf {
+    device_dir.join("join-requests")
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn record_join_request(device_dir: &std::path::Path, key: &nostr::prelude::PublicKey) {
+    let dir = join_requests_dir(device_dir);
+    let path = dir.join(format!("{}.json", key.to_hex()));
+    let mut req = match std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<JoinRequest>(&b).ok())
+    {
+        Some(mut r) => {
+            r.last_seen = now_secs();
+            r.count += 1;
+            r
+        }
+        None => JoinRequest {
+            npub: key.to_bech32().unwrap_or_default(),
+            key: key.to_hex(),
+            first_seen: now_secs(),
+            last_seen: now_secs(),
+            count: 1,
+        },
+    };
+    req.npub = key.to_bech32().unwrap_or_else(|_| req.key.clone());
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = noscat_core::fsutil::write_atomic(&path, serde_json::to_vec_pretty(&req).unwrap_or_default().as_slice());
+}
+
+fn clear_join_request(device_dir: &std::path::Path, key_hex: &str) {
+    let _ = std::fs::remove_file(join_requests_dir(device_dir).join(format!("{key_hex}.json")));
+}
+
+fn pending_join_requests(device_dir: &std::path::Path) -> Vec<JoinRequest> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(join_requests_dir(device_dir)) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        if let Ok(r) = serde_json::from_slice::<JoinRequest>(&bytes) {
+            out.push(r);
+        }
+    }
+    out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    out
+}
+
+fn age_str(unix_secs: u64) -> String {
+    let s = now_secs().saturating_sub(unix_secs);
+    if s < 60 {
+        format!("{s}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else if s < 86400 {
+        format!("{}h ago", s / 3600)
+    } else {
+        format!("{}d ago", s / 86400)
+    }
+}
+
+/// Resolve a `mesh accept`/`mesh decline` argument against the pending
+/// journal: full npub (or noscat: URI), full hex, or a hex prefix.
+fn resolve_join_request(arg: &str, pending: &[JoinRequest]) -> anyhow::Result<JoinRequest> {
+    let arg = arg.trim();
+    // Full-form first (npub, hex, noscat: URI all parse).
+    if let Ok(key) = nostr::prelude::PublicKey::parse(arg) {
+        let hex = key.to_hex();
+        if let Some(r) = pending.iter().find(|r| r.key == hex) {
+            return Ok(r.clone());
+        }
+        anyhow::bail!("{arg} is not a pending join request (see `noscat mesh requests`)");
+    }
+    // Prefix of a pending request's hex.
+    let matches: Vec<&JoinRequest> = pending
+        .iter()
+        .filter(|r| r.key.starts_with(arg) || r.npub.ends_with(arg))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => anyhow::bail!("no pending join request matches \"{arg}\" (see `noscat mesh requests`)"),
+        _ => anyhow::bail!("\"{arg}\" matches more than one pending request; use more characters"),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    // Default to our own logs only: nostr_sdk logs every relay reconnect as
-    // ERROR (rate limits included), which drowns the chat REPL. RUST_LOG
-    // restores the full firehose.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("noscat=info,noscat_core=info,nostr_sdk=off")
-    });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
     let cli = Cli::parse();
+    // Default to warnings only: the event narration (the `#` lines) tells
+    // the story, and info logs scrolled the pairing QR and join prompts off
+    // screen within minutes. `--verbose` restores the info level; RUST_LOG
+    // overrides everything. nostr_sdk logs every relay reconnect as ERROR
+    // (rate limits included), which drowns the chat REPL - kept off.
+    let default_filter = if cli.verbose {
+        "noscat=info,noscat_core=info,nostr_sdk=off"
+    } else {
+        "noscat=warn,noscat_core=warn,nostr_sdk=off"
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     fn relays_or_default(relays: Vec<String>) -> Vec<String> {
         if relays.is_empty() {
@@ -543,7 +716,7 @@ fn main() -> anyhow::Result<()> {
     // this mesh) and invite them once the operator confirms. Runs on its
     // own thread + runtime for the life of the `up` process; every failure
     // is non-fatal (the node keeps serving regardless).
-    fn spawn_pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
+    fn spawn_pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>, auto_accept: bool) {
         std::thread::Builder::new()
             .name("mesh-pairing".into())
             .spawn(move || {
@@ -557,12 +730,16 @@ fn main() -> anyhow::Result<()> {
                         return;
                     }
                 };
-                rt.block_on(pairing_watcher(device_dir, relays));
+                rt.block_on(pairing_watcher(device_dir, relays, auto_accept));
             })
             .ok();
     }
 
-    async fn pairing_watcher(device_dir: std::path::PathBuf, relays: Vec<String>) {
+    async fn pairing_watcher(
+        device_dir: std::path::PathBuf,
+        relays: Vec<String>,
+        auto_accept: bool,
+    ) {
         use nostr::nips::nip19::ToBech32;
 
         // Only the mesh owner answers join requests; a member device's
@@ -595,6 +772,24 @@ fn main() -> anyhow::Result<()> {
             }
         };
         eprintln!("# 🤝 watching for devices asking to join this mesh");
+        // Anything that arrived while no owner was watching is still on
+        // disk: surface it so the prompt is not the only chance.
+        let members_now = noscat_core::mesh::Device::open(&device_dir)
+            .and_then(|d| d.list_members())
+            .unwrap_or_default();
+        let pending = pending_join_requests(&device_dir)
+            .into_iter()
+            .filter(|r| !members_now.iter().any(|m| m.npub == r.key))
+            .collect::<Vec<_>>();
+        if !pending.is_empty() {
+            eprintln!(
+                "# {} unanswered join request(s) already on disk: `noscat mesh requests`",
+                pending.len()
+            );
+        }
+        if auto_accept {
+            eprintln!("# --auto-accept-joins: every request is invited without asking");
+        }
 
         while let Some(author) = rx.recv().await {
             // Refresh membership per request: earlier confirmations added
@@ -617,8 +812,13 @@ fn main() -> anyhow::Result<()> {
                 Ok(npub) => npub,
                 Err(_) => continue,
             };
-            if !confirm(&npub) {
-                eprintln!("# declined {npub}");
+            // Journal BEFORE asking: an owner who misses the prompt (or
+            // the whole session) can still accept via `mesh requests`.
+            record_join_request(&device_dir, &author);
+            let accepted = auto_accept || confirm(&npub);
+            if !accepted {
+                eprintln!("# declined {npub} (dropped from `mesh requests`; it returns if the device asks again)");
+                clear_join_request(&device_dir, &author.to_hex());
                 continue;
             }
 
@@ -630,8 +830,11 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             match device.invite(author, &relays).await {
-                Ok(()) => eprintln!("# ✅ invited {npub} into the mesh"),
-                Err(e) => eprintln!("# pairing: invite failed: {e}"),
+                Ok(()) => {
+                    eprintln!("# ✅ invited {npub} into the mesh");
+                    clear_join_request(&device_dir, &author.to_hex());
+                }
+                Err(e) => eprintln!("# pairing: invite failed: {e} (kept in `mesh requests`)"),
             }
         }
     }
@@ -813,7 +1016,11 @@ fn main() -> anyhow::Result<()> {
         book
     }
 
-    fn print_event(ev: Event, peers: Option<&std::sync::Mutex<PeerBook>>) {
+    fn print_event(
+        ev: Event,
+        peers: Option<&std::sync::Mutex<PeerBook>>,
+        qr_file: Option<&std::path::Path>,
+    ) {
         match ev {
             Event::Listening { npub, addr } => {
                 eprintln!("# 🐈 serving as {npub} on udp/{addr} - waiting for a peer… (Ctrl-C to quit)");
@@ -821,14 +1028,19 @@ fn main() -> anyhow::Result<()> {
                 // npub (noscat:<npub>, see docs/nip-noscat.md). Colors are
                 // inverted: most terminals are dark-background, so dark QR
                 // modules render as background and the code stays scannable.
-                if let Ok(code) = qrcode::QrCode::new(format!("noscat:{npub}")) {
-                    let qr = code
-                        .render::<qrcode::render::unicode::Dense1x2>()
-                        .dark_color(qrcode::render::unicode::Dense1x2::Light)
-                        .light_color(qrcode::render::unicode::Dense1x2::Dark)
-                        .quiet_zone(true)
-                        .build();
+                if let Some(qr) = render_pairing_qr(&npub) {
                     eprintln!("{qr}");
+                    // The QR scrolls away with the logs: save a copy next
+                    // to the device state and leave one durable pointer
+                    // line in the scrollback (`mesh qr` re-renders).
+                    if let Some(path) = qr_file {
+                        if std::fs::write(path, format!("{qr}\n")).is_ok() {
+                            eprintln!(
+                                "# pairing QR saved to {} (re-print: `noscat mesh qr`)",
+                                path.display()
+                            );
+                        }
+                    }
                     eprintln!("# scan to pair, or paste the npub above");
                 }
             }
@@ -984,7 +1196,7 @@ fn wait_transfer(rx: std::sync::mpsc::Receiver<Event>) -> anyhow::Result<()> {
             Event::TransferFailed { error, .. } => Some(error.clone()),
             _ => None,
         };
-        print_event(ev, None);
+        print_event(ev, None, None);
         if let Some(error) = failed {
             anyhow::bail!("transfer failed: {error}");
         }
@@ -995,10 +1207,11 @@ fn wait_transfer(rx: std::sync::mpsc::Receiver<Event>) -> anyhow::Result<()> {
 fn spawn_printer(
         rx: std::sync::mpsc::Receiver<Event>,
         peers: Option<std::sync::Arc<std::sync::Mutex<PeerBook>>>,
+        qr_file: Option<std::path::PathBuf>,
     ) {
         std::thread::spawn(move || {
             for ev in rx {
-                print_event(ev, peers.as_deref());
+                print_event(ev, peers.as_deref(), qr_file.as_deref());
             }
         });
     }
@@ -1069,7 +1282,7 @@ fn spawn_printer(
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
             let (client, rx) = make_client(identity, relays, mesh, Some(listen), ttl, None)?;
-            spawn_printer(rx, None);
+            spawn_printer(rx, None, None);
             client.serve_stdio()?;
         }
         Command::Pipe {
@@ -1087,7 +1300,7 @@ fn spawn_printer(
                 noscat_core::advert::ADVERT_TTL_SECS,
                 None,
             )?;
-            spawn_printer(rx, None);
+            spawn_printer(rx, None, None);
             client.pipe_stdio(&target)?;
         }
         Command::Send { path, target, relays, identity, mesh } => {
@@ -1122,13 +1335,17 @@ fn spawn_printer(
             let (client, rx) = make_client(identity, relays, mesh, Some(listen), ttl, None)?;
             // Report readiness up front: receive_file blocks on the sender's
             // handshake, and without this the user stares at silence.
-            print_event(Event::Listening { npub: client.npub().to_string(), addr: listen }, None);
+            print_event(
+                Event::Listening { npub: client.npub().to_string(), addr: listen },
+                None,
+                None,
+            );
             client.receive_file(out);
             wait_transfer(rx)?;
         }
         // --identity does not apply here: in mesh mode this command IS its
         // mesh device, so the identity comes from the device directory.
-        Command::Up { out, to, listen, relays, identity: _, mesh, ttl, name } => {
+        Command::Up { out, to, listen, relays, identity: _, mesh, ttl, name, auto_accept_joins } => {
             // Authorization comes from mesh membership; without it any npub
             // that scans the QR could push files to this machine.
             let Some(mesh) = mesh else {
@@ -1155,8 +1372,12 @@ fn spawn_printer(
             // packages) and invites them on confirmation.
             let (client, rx) = make_client(identity, relays.clone(), Some(mesh), Some(listen), ttl, Some(device_name))?;
             let peers = spawn_peer_book(device_dir.clone(), relays_or_default(relays.clone()));
-            spawn_printer(rx, Some(peers.clone()));
-            spawn_pairing_watcher(device_dir.clone(), relays_or_default(relays));
+            spawn_printer(
+                rx,
+                Some(peers.clone()),
+                Some(device_dir.join("pairing-qr.txt")),
+            );
+            spawn_pairing_watcher(device_dir.clone(), relays_or_default(relays), auto_accept_joins);
             client.up(out_dir, to)?;
             spawn_chat_repl(client.clone(), peers);
             // The node runs on the client's background tasks; park forever
@@ -1181,7 +1402,7 @@ fn spawn_printer(
                     Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
                     _ => {}
                 }
-                print_event(ev, None);
+                print_event(ev, None, None);
             }
         }
         Command::Forward { target, port, bind, relays, identity, mesh } => {
@@ -1203,7 +1424,7 @@ fn spawn_printer(
                     Event::ForwardStopped { error: Some(e), .. } => anyhow::bail!("{e}"),
                     _ => {}
                 }
-                print_event(ev, None);
+                print_event(ev, None, None);
             }
         }
         Command::Mesh(cmd) => {
@@ -1338,6 +1559,52 @@ fn spawn_printer(
                 MeshCommand::Psk { dir } => {
                     let device = noscat_core::mesh::Device::open(&dir)?;
                     println!("{}", hex::encode(device.tunnel_psk()?));
+                }
+                MeshCommand::Qr { dir } => {
+                    let device = noscat_core::mesh::Device::open(&dir)?;
+                    let npub = device.identity.npub();
+                    println!("{npub}");
+                    if let Some(qr) = render_pairing_qr(&npub) {
+                        println!("{qr}");
+                    }
+                }
+                MeshCommand::Requests { dir } => {
+                    let device = noscat_core::mesh::Device::open(&dir)?;
+                    let members = device.list_members()?;
+                    let pending: Vec<JoinRequest> = pending_join_requests(&dir)
+                        .into_iter()
+                        .filter(|r| !members.iter().any(|m| m.npub == r.key))
+                        .collect();
+                    if pending.is_empty() {
+                        eprintln!("# no pending join requests");
+                    } else {
+                        for r in &pending {
+                            println!(
+                                "{}  asked {} (last {} x{})",
+                                r.npub,
+                                age_str(r.first_seen),
+                                age_str(r.last_seen),
+                                r.count
+                            );
+                        }
+                        eprintln!("# accept: `noscat mesh accept <npub>`; decline: `noscat mesh decline <npub>`");
+                    }
+                }
+                MeshCommand::Accept { dir, device, relays } => {
+                    let pending = pending_join_requests(&dir);
+                    let req = resolve_join_request(&device, &pending)?;
+                    let key = nostr::prelude::PublicKey::parse(&req.key)
+                        .map_err(|e| anyhow::anyhow!("bad journal entry: {e}"))?;
+                    let mut dev = noscat_core::mesh::Device::open(&dir)?;
+                    rt.block_on(dev.invite(key, &relays_or_default(relays)))?;
+                    clear_join_request(&dir, &req.key);
+                    eprintln!("# ✅ invited {} into the mesh", req.npub);
+                }
+                MeshCommand::Decline { dir, device } => {
+                    let pending = pending_join_requests(&dir);
+                    let req = resolve_join_request(&device, &pending)?;
+                    clear_join_request(&dir, &req.key);
+                    eprintln!("# declined {} (it returns if the device asks again)", req.npub);
                 }
             }
         }

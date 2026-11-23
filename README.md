@@ -138,6 +138,24 @@ noscat up --mesh
 noscat up --mesh --out ~/incoming --to 127.0.0.1:22
 ```
 
+The startup banner prints the pairing QR once; it also gets saved to
+`<device-dir>/pairing-qr.txt`, and `noscat mesh qr` re-renders it any time -
+no need to scroll back or restart. Logs are warnings-only by default so the
+QR and the join prompts stay readable; `--verbose` (or `RUST_LOG`) restores
+the info firehose.
+
+Devices asking to join are answered interactively as they arrive, but every
+request is also journaled, so a prompt that scrolled away is never lost:
+
+```
+noscat mesh requests          # who is waiting (and since when)
+noscat mesh accept <npub>     # invite now
+noscat mesh decline <npub>    # drop it (returns if they ask again)
+```
+
+Headless owners can skip the prompt entirely: `noscat up --mesh
+--auto-accept-joins`.
+
 With `--to`, any inbound stream that is not a file transfer is forwarded to
 that TCP address (SSH, a web server, anything); peers dial it with
 `noscat pipe <npub>`. Without it, raw tunnels are dropped and only files are

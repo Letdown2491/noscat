@@ -1745,6 +1745,8 @@ dependencies = [
  "noscat-core",
  "nostr",
  "qrcode",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

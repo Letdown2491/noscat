@@ -23,6 +23,8 @@ tracing-subscriber = { workspace = true }
 nostr = { workspace = true }
 hex = { workspace = true }
 qrcode = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 futures-util = { workspace = true }
 
 [lints]
