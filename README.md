@@ -111,8 +111,8 @@ Also available: `noscat keygen`, `noscat advertise`, `noscat watch`.
 
 One command that stays running and does everything: prints its npub and a
 scannable pairing QR, accepts any number of inbound peers, saves inbound files
-to `~/Downloads` (or `--out`), and bridges raw inbound tunnels to a local
-service with `--to`:
+to `~/Downloads` (or `--out`), bridges raw inbound tunnels to a local
+service with `--to`, and gives you a chat terminal:
 
 ```
 # requires a mesh: membership is the authorization for inbound connections
@@ -125,7 +125,11 @@ that TCP address (SSH, a web server, anything); peers dial it with
 `noscat pipe <npub>`. Without it, raw tunnels are dropped and only files are
 accepted.
 
-### Tailnets (devices you own)
+One networking note: if a peer's handshake times out from anywhere, check that
+the node's UDP port (41641 by default) accepts inbound datagrams - on
+firewalld, `firewall-cmd --add-port=41641/udp` (plus `--permanent` to keep it).
+
+### Meshes (devices you own)
 
 ```
 # On the owner (device A), once:
@@ -205,6 +209,29 @@ plus a sidecar recording how many chunks were acked, and the next
 `send` of the same file picks up where the last one stopped - the sender is
 told to skip ahead, and the finished file is verified against the sender's
 sha256 before it lands under its real name.
+
+### Chat
+
+`noscat up` includes a terminal chat: incoming messages print as
+`# 💬 <peer>: <text>`, and you reply by picking a peer and typing lines:
+
+```
+to                       # list the mesh's devices
+to <npub prefix>         # pick a peer (a prefix works; 'to owner' too)
+hello from the laptop    # every following line goes to them
+```
+
+The Android app's Chat tab is the same protocol: messages are one-shot
+tunnels carrying a chat tag; delivery is confirmed when the peer echoes
+the tunnel's half-close (the phone shows "delivered" then). Peers are
+displayed by their friendly device name when known (see below).
+
+### Device names
+
+Each device can publish a friendly name with its advert: `up --name`, the
+mesh app sends the phone's model, and the CLI defaults to the hostname.
+Names show up in the chat terminal, the roster (`mesh members`), and the
+Android device list; nothing depends on them (addresses stay npub-keyed).
 
 ## Development
 

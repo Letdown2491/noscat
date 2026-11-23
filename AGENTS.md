@@ -48,11 +48,11 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo -v "$PWD:/work:Z" -w /work
 ## Layout
 
 - `crates/noscat-core` - the data plane: Noise XK tunnels, UDP traversal, adverts
-  (kind 37195), tailnets (MLS), file transfer framing.
+  (kind 37195), meshes (MLS), file transfer framing.
 - `crates/noscat-client` - the reusable client: identity/relay config resolution,
   event stream, `serve`/`pipe`/`expose`/`forward`/`send`/`receive` operations.
 - `crates/noscat-ffi` - UniFFI bridge for mobile apps (Kotlin now, Swift later):
-  `NoscatClient`, `Event` callback, identity/tailnet helpers. The Android app
+  `NoscatClient`, `Event` callback, identity/mesh helpers. The Android app
   (`~/Documents/noscat-android`) consumes the published crate.
 - `crates/noscat` - the CLI: a thin skin over the client.
 - `docs/nip-noscat.md` - the wire protocol spec (the interop contract).

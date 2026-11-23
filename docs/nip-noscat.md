@@ -91,7 +91,7 @@ Endpoints are candidates only: peers race them with a STUN-like
 transaction-id handshake and keep the first that authenticates, falling back
 to relay-reflected candidates for NAT traversal (out of scope here).
 
-## Tailnets
+## Meshes
 
 A **mesh** is one MLS group whose GroupId is the owner's npub (32 raw
 bytes). It is the unit of membership and authorization for the tunnels
@@ -355,7 +355,7 @@ authenticates the scanner to the holder just as any other dial would.
   produce the removed device's ratchet and can only lock itself out. Future
   work may add `RequiredCapabilities`-style enforcement or an
   external-commit path so even this is impossible.
-- **Single-owner tailnets.** This draft specifies owner-only administration.
+- **Single-owner meshes.** This draft specifies owner-only administration.
   Multi-owner or quorum policies can extend the `0xffa0` JSON with a rule
   list; the extension format is versioned by the `d`-tag slot name.
 - **Replay.** Old commits replayed from relays are rejected by the epoch

@@ -56,7 +56,7 @@ enum Command {
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this mesh's device directory (MLS group
         /// membership becomes the authorization) [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
     },
     /// Pipe stdio into a tunnel to a peer by npub.
@@ -71,7 +71,7 @@ enum Command {
         identity: Option<String>,
         /// Restrict the tunnel to this mesh's device directory (MLS group
         /// membership becomes the authorization) [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
     },
     /// Send a file over a tunnel to a peer by npub.
@@ -88,7 +88,7 @@ enum Command {
         identity: Option<String>,
         /// Restrict the tunnel to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
     },
     /// Receive one file over a tunnel, into --out (default: cwd).
@@ -107,7 +107,7 @@ enum Command {
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
@@ -137,7 +137,7 @@ enum Command {
         identity: Option<std::path::PathBuf>,
         /// Mesh device directory - REQUIRED: membership authorizes inbound
         /// [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
         /// Advert lifetime in seconds [default: 3600]
         #[arg(long, default_value = "3600")]
@@ -158,7 +158,7 @@ enum Command {
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnels to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
@@ -183,13 +183,10 @@ enum Command {
         identity: Option<String>,
         /// Restrict the tunnels to this mesh's device directory
         /// [default: ~/.noscat/device].
-        #[arg(long, alias = "tailnet", num_args = 0..=1, default_missing_value = "")]
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         mesh: Option<String>,
     },
     /// Mesh: a device's MLS group for owned-device meshing (spike).
-    /// (Renamed from `tailnet`, whose subcommands still work via the
-    /// alias below for muscle memory.)
-    #[command(alias = "tailnet")]
     #[command(subcommand)]
     Mesh(MeshCommand),
     /// Emit shell completions (hidden; used by packaging).
