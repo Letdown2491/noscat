@@ -1870,6 +1870,237 @@ async fn receive_stream(
 }
 
 
+/// The receive side of a file transfer over a routed session (tailnet node
+/// mode): the sender runs the usual [`send_stream`] datagram protocol, and
+/// its TAG frames surface here as decrypted bytes on `stream`.
+///
+/// The routed pump cannot replay ack history for a lost ack datagram
+/// (replayed chunks fail the receiver's nonce checks and are dropped
+/// silently), so this side acks on a short timer as well as on window
+/// boundaries - a lost ack is healed by the next tick rather than a resync.
+pub async fn receive_routed_file<S>(
+    who: &str,
+    stream: &mut S,
+    out_dir: &Path,
+) -> Result<(String, PathBuf), TunnelError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use sha2::Digest as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// How often to repeat the cumulative ack while waiting for chunks: a
+    /// re-ack is a fresh nonce the sender consumes in order, so one lost ack
+    /// datagram costs a tick, not the transfer.
+    const REACK_EVERY: Duration = Duration::from_millis(500);
+
+    // <- TAG_HEADER, then the JSON header. Datagram boundaries are lost on a
+    // byte stream, so accumulate until the JSON parses completely.
+    let mut tag = [0u8; 1];
+    stream
+        .read_exact(&mut tag)
+        .await
+        .map_err(|_| TunnelError::TransferStalled)?;
+    if tag[0] != TAG_HEADER {
+        return Err(TunnelError::TransferStalled);
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let header: TransferHeader = loop {
+        let mut chunk = [0u8; 256];
+        let n = timeout_at(
+            tokio::time::Instant::now() + IDLE_TIMEOUT,
+            stream.read(&mut chunk),
+        )
+        .await
+        .map_err(|_| TunnelError::TransferStalled)??;
+        if n == 0 {
+            return Err(TunnelError::TransferStalled);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        match serde_json::from_slice::<TransferHeader>(&buf) {
+            Ok(h) => break h,
+            // Truncated JSON: keep reading.
+            Err(e) if e.is_eof() => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let name = sanitize_name(&header.name)?;
+    let final_path = out_dir.join(&name);
+    let part_path = out_dir.join(format!("{}.noscat-part", name.display()));
+    let meta_path = out_dir.join(format!("{}.noscat-part.meta", name.display()));
+    let total_chunks = header.len.div_ceil(CHUNK as u64);
+    if total_chunks > u32::MAX as u64 {
+        return Err(TunnelError::TransferTooLarge(header.len));
+    }
+    let total_chunks = total_chunks as u32;
+    eprintln!("# 📥 {who} is sending {} ({} bytes)…", name.display(), header.len);
+
+    // Same resume decision as the exclusive path: a partial file continues
+    // only when its recorded (len, sha256) matches this transfer's header.
+    let mut resume_chunks = 0u32;
+    let mut hasher = sha2::Sha256::new();
+    let saved_meta = std::fs::read(&meta_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ResumeMeta>(&bytes).ok());
+    if let Some(meta) = &saved_meta {
+        let prefix_len = meta.chunks.min(total_chunks as u64) * CHUNK as u64;
+        if meta.len == header.len
+            && meta.sha256 == header.sha256
+            && prefix_len > 0
+            && prefix_len <= header.len
+            && tokio::fs::metadata(&part_path).await.map(|m| m.len() >= prefix_len).unwrap_or(false)
+        {
+            let mut part = tokio::fs::File::open(&part_path).await?;
+            let mut prefix = vec![0u8; prefix_len as usize];
+            part.read_exact(&mut prefix).await?;
+            hasher.update(&prefix);
+            resume_chunks = (prefix_len / CHUNK as u64) as u32;
+        }
+    }
+    // -> TAG_RESUME with the resume point.
+    let mut frame = vec![TAG_RESUME];
+    frame.extend_from_slice(&resume_chunks.to_be_bytes());
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+    if resume_chunks > 0 {
+        eprintln!(
+            "# ↩️  resuming {name:?} at chunk {resume_chunks}/{total_chunks} - asking the sender to skip ahead"
+        );
+    }
+
+    let mut file = if resume_chunks > 0 {
+        tokio::io::BufWriter::with_capacity(
+            64 * 1024,
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&part_path)
+                .await?,
+        )
+    } else {
+        tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(&part_path).await?)
+    };
+    let mut meta_state = Some((
+        meta_path.clone(),
+        ResumeMeta {
+            len: header.len,
+            sha256: header.sha256.clone(),
+            chunks: resume_chunks as u64,
+        },
+    ));
+
+    // <- chunks, -> cumulative acks. Over a routed stream every read is
+    // exact: tag (1), seq (4), then the chunk's known span (CHUNK for all
+    // but the last, from the header). The re-ack timer repeats the
+    // cumulative ack so a lost ack datagram cannot stall the sender.
+    let mut received = resume_chunks as u64 * CHUNK as u64;
+    let mut next_reack = tokio::time::Instant::now() + REACK_EVERY;
+    loop {
+        let mut tagb = [0u8; 1];
+        match timeout_at(next_reack, stream.read(&mut tagb)).await {
+            // Re-ack timer fired.
+            Err(_) => {
+                let ack = (received.div_ceil(CHUNK as u64) as u32).to_be_bytes();
+                stream
+                    .write_all(&[TAG_ACK, ack[0], ack[1], ack[2], ack[3]])
+                    .await?;
+                stream.flush().await?;
+                next_reack = tokio::time::Instant::now() + REACK_EVERY;
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Ok(Ok(0)) => return Err(TunnelError::TransferStalled),
+            Ok(Ok(_)) => {}
+        }
+        if tagb[0] == TAG_FIN {
+            break;
+        }
+        if tagb[0] != TAG_CHUNK {
+            continue;
+        }
+        let mut seqb = [0u8; 4];
+        timeout_at(
+            tokio::time::Instant::now() + IDLE_TIMEOUT,
+            stream.read_exact(&mut seqb),
+        )
+        .await
+        .map_err(|_| TunnelError::TransferStalled)??;
+        let seq = u32::from_be_bytes(seqb);
+        if seq >= total_chunks {
+            return Err(TunnelError::TransferTooLarge(header.len));
+        }
+        let start = seq as u64 * CHUNK as u64;
+        let span = (header.len - start).min(CHUNK as u64) as usize;
+        let mut data = vec![0u8; span];
+        timeout_at(
+            tokio::time::Instant::now() + IDLE_TIMEOUT,
+            stream.read_exact(&mut data),
+        )
+        .await
+        .map_err(|_| TunnelError::TransferStalled)??;
+        hasher.update(&data);
+        file.write_all(&data).await?;
+        received += span as u64;
+        let cumulative = (seq + 1).to_be_bytes();
+        stream
+            .write_all(&[TAG_ACK, cumulative[0], cumulative[1], cumulative[2], cumulative[3]])
+            .await?;
+        stream.flush().await?;
+        if (seq + 1) % WINDOW == 0 || (header.len > 0 && received >= header.len) {
+            file.flush().await?;
+            if let Some((meta_path, meta)) = meta_state.as_mut() {
+                meta.chunks = seq as u64 + 1;
+                let _ = tokio::fs::write(meta_path, serde_json::to_string(meta)?).await;
+            }
+        }
+        if header.len > 0 && received >= header.len {
+            break;
+        }
+    }
+    file.flush().await?;
+    let inner = file.into_inner();
+    inner.sync_all().await?;
+    drop(inner);
+
+    if received != header.len {
+        eprintln!(
+            "# ⚠️  transfer incomplete: {received}/{} bytes; partial kept for resume",
+            header.len
+        );
+        return Ok((who.to_string(), part_path));
+    }
+    let digest = hex::encode(hasher.finalize());
+    if digest != header.sha256 {
+        eprintln!("# ⚠️  sha256 mismatch ({digest} != {}); keeping the partial", header.sha256);
+        return Ok((who.to_string(), part_path));
+    }
+    tokio::fs::rename(&part_path, &final_path).await?;
+    tokio::fs::remove_file(&meta_path).await.ok();
+    eprintln!("# ✅ {who} -> {final_path:?} ({received} bytes)");
+
+    // -> FIN, then linger re-acking on a timer. The sender may have missed
+    // the final cumulative ack; its retransmit is a replay the routed pump
+    // drops (the nonce was consumed), so waiting for input here would stall
+    // it - the timer heals a lost ack without needing one.
+    stream.write_all(&[TAG_FIN]).await?;
+    stream.flush().await?;
+    let ack_total = total_chunks.to_be_bytes();
+    let fin_until = tokio::time::Instant::now() + FIN_LINGER;
+    loop {
+        let mut sink = [0u8; BUF];
+        match timeout_at(fin_until, stream.read(&mut sink)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {} // timer: re-ack anyway
+        }
+        stream
+            .write_all(&[TAG_ACK, ack_total[0], ack_total[1], ack_total[2], ack_total[3]])
+            .await?;
+        stream.flush().await?;
+    }
+    Ok((who.to_string(), final_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

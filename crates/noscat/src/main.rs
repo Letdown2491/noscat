@@ -112,6 +112,31 @@ enum Command {
         ttl: u64,
     },
     /// Expose a local TCP service to tailnet peers over tunnels.
+    /// Run the persistent tailnet node: advertise, accept any number of
+    /// inbound peers, auto-receive files, bridge raw tunnels.
+    Up {
+        /// Directory to save inbound files into (default: ~/Downloads).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Bridge raw inbound tunnels to this local service, e.g. 127.0.0.1:22.
+        #[arg(long)]
+        to: Option<std::net::SocketAddr>,
+        /// UDP address to listen on [default: 0.0.0.0:41641]
+        #[arg(long, default_value = "0.0.0.0:41641")]
+        listen: String,
+        /// Relay URLs (repeatable; defaults to the public set)
+        #[arg(long)]
+        relays: Vec<String>,
+        /// Identity file override (default: ~/.noscat/identity.hex).
+        #[arg(long)]
+        identity: Option<std::path::PathBuf>,
+        /// Tailnet device directory - REQUIRED: membership authorizes inbound.
+        #[arg(long)]
+        tailnet: Option<std::path::PathBuf>,
+        /// Advert lifetime in seconds [default: 3600]
+        #[arg(long, default_value = "3600")]
+        ttl: u64,
+    },
     Expose {
         /// The local service to expose, e.g. `127.0.0.1:8000`.
         #[arg(long)]
@@ -476,6 +501,34 @@ fn main() -> anyhow::Result<()> {
                     _ => {}
                 }
                 print_event(ev);
+            }
+        }
+        Command::Up { out, to, listen, relays, identity, tailnet, ttl } => {
+            // Authorization comes from tailnet membership; without it any npub
+            // that scans the QR could push files to this machine.
+            let Some(tailnet) = tailnet else {
+                anyhow::bail!("up requires --tailnet <dir>: tailnet membership authorizes inbound connections (create one with `noscat tailnet create --dir <dir>`)");
+            };
+            let identity = identity
+                .map(IdentitySource::File)
+                .or_else(default_identity)
+                .unwrap_or(IdentitySource::Ephemeral);
+            let listen: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
+            let out_dir = out.unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+            let (client, rx) = make_client(identity, relays, Some(tailnet), Some(listen), ttl)?;
+            spawn_printer(rx);
+            client.up(out_dir, to)?;
+            // The node runs on the client's background tasks; park forever
+            // (park can return spuriously, so loop) until Ctrl-C.
+            loop {
+                std::thread::park();
             }
         }
         Command::Expose { to, listen, relays, identity, tailnet, ttl } => {

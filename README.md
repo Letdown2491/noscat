@@ -104,6 +104,24 @@ and later runs reuse it, so your npub is stable. Pass `--identity` to override
 
 Also available: `noscat keygen`, `noscat advertise`, `noscat watch`.
 
+### The node: `noscat up`
+
+One command that stays running and does everything: prints its npub and a
+scannable pairing QR, accepts any number of inbound peers, saves inbound files
+to `~/Downloads` (or `--out`), and bridges raw inbound tunnels to a local
+service with `--to`:
+
+```
+# requires a tailnet: membership is the authorization for inbound connections
+noscat up --tailnet ./device-a
+noscat up --tailnet ./device-a --out ~/incoming --to 127.0.0.1:22
+```
+
+With `--to`, any inbound stream that is not a file transfer is forwarded to
+that TCP address (SSH, a web server, anything); peers dial it with
+`noscat pipe <npub>`. Without it, raw tunnels are dropped and only files are
+accepted.
+
 ### Tailnets (devices you own)
 
 ```

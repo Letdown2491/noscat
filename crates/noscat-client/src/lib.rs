@@ -128,9 +128,58 @@ pub enum Event {
     },
 }
 
+/// A stream with one byte pushed back in front of it: the node dispatcher
+/// consumes the first byte to sniff the stream type, and the bridge path
+/// needs it back as the first byte of the raw payload.
+struct PrefixedStream<S> {
+    first: Option<u8>,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(first: u8, inner: S) -> Self {
+        Self { first: Some(first), inner }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(b) = self.first.take() {
+            buf.put_slice(&[b]);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("identity: {0}")]
+pub enum ClientError {    #[error("identity: {0}")]
     Identity(String),
     #[error("tailnet: {0}")]
     Tailnet(String),
@@ -370,10 +419,92 @@ impl Client {
         Ok(addr)
     }
 
+    /// Tailnet node mode: listen for any number of inbound peers and
+    /// dispatch each one by what it sends. A file transfer (the sender's
+    /// TAG_HEADER first frame) is received into `out_dir`; any other stream
+    /// is bridged to `bridge_to` when configured, dropped otherwise.
+    /// Returns the advertised UDP address; the node runs until the client
+    /// is dropped. Call this on a tailnet-scoped client: membership is the
+    /// authorization for everything inbound.
+    pub fn up(&self, out_dir: PathBuf, bridge_to: Option<SocketAddr>) -> Result<SocketAddr, ClientError> {
+        let inner = self.inner.clone();
+        let listener = inner.rt.block_on(tunnel::bind_listener(
+            &inner.identity,
+            inner.listen,
+            &inner.relays,
+            inner.ttl,
+            inner.psk.as_ref(),
+        ))?;
+        let addr = listener.local_addr();
+        inner.emit(Event::Listening {
+            npub: inner.identity.npub(),
+            addr,
+        });
+        let rt = inner.rt.handle().clone();
+        rt.spawn(async move {
+            let mut listener = listener;
+            loop {
+                let session = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        inner.emit(Event::Stopped {
+                            what: "node",
+                            error: Some(e.to_string()),
+                        });
+                        return;
+                    }
+                };
+                let inner = inner.clone();
+                let out_dir = out_dir.clone();
+                tokio::spawn(async move {
+                    let (socket, peer, hs, who, data_rx) = session.finish().await;
+                    let mut stream =
+                        TunnelStream::new(socket, peer, hs, TunnelInlet::Routed(data_rx), who.clone());
+                    inner.emit(Event::TunnelUp { peer: who.clone(), addr: peer });
+                    use tokio::io::AsyncReadExt as _;
+                    let mut tag = [0u8; 1];
+                    if stream.read_exact(&mut tag).await.is_err() {
+                        return;
+                    }
+                    if tag[0] == tunnel::TAG_HEADER {
+                        // Hand the sniffed byte back so the receiver reads
+                        // the same TAG_HEADER framing the sender wrote.
+                        let mut prefixed = PrefixedStream::new(tag[0], stream);
+                        match tunnel::receive_routed_file(&who, &mut prefixed, &out_dir).await {
+                            Ok((who, path)) => {
+                                inner.emit(Event::TransferDone { peer: who, path })
+                            }
+                            Err(e) => inner.emit(Event::TransferFailed {
+                                peer: who,
+                                path: None,
+                                error: e.to_string(),
+                            }),
+                        }
+                    } else if let Some(to) = bridge_to {
+                        let mut prefixed = PrefixedStream::new(tag[0], stream);
+                        match tokio::net::TcpStream::connect(to).await {
+                            Ok(mut tcp) => {
+                                // Bridge ends are routine (peer closed, target
+                                // closed); failures carry no event.
+                                let _ =
+                                    tokio::io::copy_bidirectional(&mut prefixed, &mut tcp).await;
+                            }
+                            Err(e) => inner.emit(Event::Stopped {
+                                what: "bridge",
+                                error: Some(format!("{to}: {e}")),
+                            }),
+                        }
+                    }
+                    // No bridge target: raw streams are dropped silently;
+                });
+            }
+        });
+        Ok(addr)
+    }
+
     /// Netcat mode, dial side: bridge this process's stdio over a tunnel to
     /// `target`. Blocks until the session closes.
-    pub fn pipe_stdio(&self, target: &str) -> Result<(), ClientError> {
-        let inner = self.inner.clone();
+    pub fn pipe_stdio(&self, target: &str) -> Result<(), ClientError> {        let inner = self.inner.clone();
         let target = target.to_string();
         inner.rt.block_on(async {
             let (stream, peer) = inner.dial(&target).await?;
