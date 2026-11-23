@@ -18,7 +18,7 @@ use crate::identity::Identity;
 /// [`note_relay_failure`]) rather than hammering.
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.primal.net",
-    "wss://relay.damus.io",
+    "wss://relay.nostr.com",
     "wss://nostr.mom",
 ];
 
