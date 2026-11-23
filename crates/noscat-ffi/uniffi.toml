@@ -1,0 +1,3 @@
+# uniffi-bindgen configuration: per-language bindings settings.
+[bindings.kotlin]
+package_name = "uniffi.noscat"

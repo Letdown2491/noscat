@@ -37,7 +37,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo -v "$PWD:/work:Z" -w /work
    The stored HTTPS credential lacks the `workflow` scope.
 4. **Versioning for releases**: bump the workspace version in Cargo.toml before
    tagging; the crates.io publish step refuses a tag/workspace mismatch and is
-   idempotent on reruns.
+   idempotent on reruns. The crates.io token allowlists `noscat`, `noscat-core`,
+   `noscat-client`, `noscat-ffi` - a new crate name needs a dashboard update
+   before its first publish.
 5. **Several noscat-core tests are network-dependent** (they talk to the public
    relays). A lone spurious failure in one of those is usually relay flakiness;
    rerun with `--no-fail-fast` and check which test failed before assuming a
@@ -49,6 +51,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo -v "$PWD:/work:Z" -w /work
   (kind 37195), tailnets (MLS), file transfer framing.
 - `crates/noscat-client` - the reusable client: identity/relay config resolution,
   event stream, `serve`/`pipe`/`expose`/`forward`/`send`/`receive` operations.
+- `crates/noscat-ffi` - UniFFI bridge for mobile apps (Kotlin now, Swift later):
+  `NoscatClient`, `Event` callback, identity/tailnet helpers. The Android app
+  (`~/Documents/noscat-android`) consumes the published crate.
 - `crates/noscat` - the CLI: a thin skin over the client.
 - `docs/nip-noscat.md` - the wire protocol spec (the interop contract).
 - `packaging/` - nfpm, AUR prep, bottle script; `.github/workflows/release.yml` -

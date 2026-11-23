@@ -239,8 +239,10 @@ jobs:
           publish_if_missing noscat-core
           sleep 15 # let crates.io index noscat-core before dependents land
           publish_if_missing noscat-client
-          sleep 15 # let crates.io index noscat-client before noscat lands
+          sleep 15 # let crates.io index noscat-client before dependents land
           publish_if_missing noscat
+          sleep 15 # let crates.io index noscat before the ffi bridge lands
+          publish_if_missing noscat-ffi
 
       - name: Attach everything to the release
         uses: softprops/action-gh-release@v2

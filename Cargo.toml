@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/noscat-core", "crates/noscat", "crates/noscat-client"]
+members = ["crates/noscat-core", "crates/noscat", "crates/noscat-client", "crates/noscat-ffi"]
 
 [workspace.package]
 version = "0.1.3"
