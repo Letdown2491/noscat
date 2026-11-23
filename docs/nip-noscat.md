@@ -358,7 +358,11 @@ authenticates the scanner to the holder just as any other dial would.
    Welcome gift-wrapped to the invitee and the bare commit to all other
    members.
 5. `join` / `sync`: subscribe to gift wraps addressed to the device's npub;
-   process per the receiver rules above.
+   process per the receiver rules above. `sync` first fetches stored gift
+   wraps from the relays (they persist for their expiration) and merges
+   them oldest-epoch first, so a device that missed a live commit catches
+   up instead of staying stranded at the old epoch; replays of
+   already-merged commits MUST be skipped, never fatal.
 6. `serve`/`pipe`/`connect`: resolve the peer's advert, establish the Noise
    session (XKpsk0 when a mesh is in scope), and pump bytes.
 7. `send`/`receive`: run the file-transfer framing above over the session;

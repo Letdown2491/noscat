@@ -634,8 +634,12 @@ impl Client {
     /// TAG_HEADER first frame) is received into `out_dir`; any other stream
     /// is bridged to `bridge_to` when configured, dropped otherwise.
     /// Returns the advertised UDP address; the node runs until the client
-    /// is dropped. Call this on a mesh-scoped client: membership is the
-    /// authorization for everything inbound.
+    /// is dropped.
+    ///
+    /// Requires a mesh-scoped client (a `mesh_dir` in the config) and
+    /// errors otherwise: membership is the authorization for everything
+    /// inbound - the advert is public, so without the group's epoch PSK
+    /// anyone who learns the npub could complete a handshake.
     pub fn up(&self, out_dir: PathBuf, bridge_to: Option<SocketAddr>) -> Result<SocketAddr, ClientError> {
         let inner = self.inner.clone();
         // Mesh scoping is the authorization for a node that accepts inbound

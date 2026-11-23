@@ -47,7 +47,7 @@ and a man page.
 ## Status
 
 **Working** - three layers, each verified live across containers over public relays
-(`wss://relay.primal.net`, `wss://nostr.mom`):
+(`wss://relay.primal.net`, `wss://relay.nostr.com`, `wss://nostr.mom`):
 
 1. **Tunnels** (netcat mode): identity → relay advert → discovery → Noise-XK handshake
    over UDP → stdio bridge, with STUN reflexive discovery and NIP-59 gift-wrapped
@@ -102,8 +102,10 @@ echo hello | noscat pipe <A's npub>
 Everything B types lands on A's stdout, encrypted, peer-to-peer; relays carry only the
 discovery. Every data-plane command shares one node identity per machine:
 the first run generates it and stores it at `~/.noscat/identity.hex` (mode 0600),
-and later runs reuse it, so your npub is stable. Pass `--identity` to override
-(a file for serve/receive/expose, hex or `nsec1...` for pipe/send/forward).
+and later runs reuse it, so your npub is stable. Pass `--identity <file>` to
+use another identity file. For scripting, `NOSCAT_IDENTITY` (hex or `nsec1...`)
+carries a secret without putting it on argv, where `ps` and shell history
+would leak it - secrets are never accepted as a command-line flag.
 
 Also available: `noscat keygen`, `noscat advertise`, `noscat watch`.
 
@@ -141,8 +143,8 @@ noscat mesh publish     # publishes its MLS key package
 # Back on the owner:
 noscat mesh invite <B's npub>
 
-# On the joiner:
-noscat mesh join
+# On the joiner (scan the owner's QR or copy their npub):
+noscat mesh join --owner <A's npub>
 ```
 
 The device directory defaults to `~/.noscat/device`; pass `--dir <path>` to
@@ -158,7 +160,9 @@ per device) and remove them:
 noscat mesh members   # who is in, at which epoch
 noscat mesh remove <B's npub>
 
-# On the other members (picks up the owner's commit from the relays):
+# On the other members (picks up the owner's commit from the relays -
+# live, plus a backfill of commits published while the device was
+# offline, so a missed invite or removal still lands):
 noscat mesh sync
 ```
 

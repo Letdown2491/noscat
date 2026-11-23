@@ -273,7 +273,9 @@ enum MeshCommand {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
-        /// How long to listen for commits (seconds).
+        /// How long to listen for commits (seconds). Stored commits are
+        /// backfilled first (catching up on anything published while this
+        /// device was offline), then the live listen runs.
         #[arg(long, default_value_t = 10)]
         for_secs: u64,
         /// Relay URLs (repeatable; defaults to the public set).
