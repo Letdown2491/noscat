@@ -193,13 +193,23 @@ fn parse_endpoints(endpoints: &[Endpoint]) -> Vec<SocketAddr> {    endpoints
 
 /// Keep blasting punch markers at the candidate list. To everyone else this is
 /// junk; to the peer it opens (and keeps open) the NAT mapping we handshake on.
-async fn punch_loop(socket: Arc<UdpSocket>, candidates: Arc<Mutex<Vec<SocketAddr>>>) {
+async fn punch_loop(
+    socket: Arc<UdpSocket>,
+    candidates: Arc<Mutex<Vec<SocketAddr>>>,
+    punch_now: Arc<tokio::sync::Notify>,
+) {
     loop {
         let targets = candidates.lock().expect("candidates lock").clone();
         for addr in targets {
             let _ = socket.send_to(PUNCH, addr).await;
         }
-        sleep(PUNCH_EVERY).await;
+        // Wake early when a traversal invite delivers fresh candidates
+        // (the mapping must open now, not at the next tick), otherwise
+        // sweep at the regular cadence.
+        match timeout(PUNCH_EVERY, punch_now.notified()).await {
+            Ok(_) => continue,
+            Err(_) => {}
+        }
     }
 }
 
@@ -358,7 +368,9 @@ pub async fn serve_session(
         let _ = crate::traversal::watch_traversal(watch_identity, watch_relays, tx).await;
     });
     let peer_candidates: Arc<Mutex<Vec<SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
+    let punch_now = Arc::new(tokio::sync::Notify::new());
     let reply_candidates = peer_candidates.clone();
+    let reply_punch_now = punch_now.clone();
     let reply_identity = identity.clone();
     let reply_noise = noise_pub;
     let reply_endpoints = endpoints.clone();
@@ -368,6 +380,10 @@ pub async fn serve_session(
             tracing::info!(%sender, ?payload.endpoints, "traversal request received");
             *reply_candidates.lock().expect("candidates lock") =
                 parse_endpoints(&payload.endpoints);
+            // Punch toward the new candidates immediately: behind a
+            // default-deny firewall the peer's packets may not open our
+            // mapping for us - our own outbound punch does.
+            reply_punch_now.notify_one();
             let _ = crate::traversal::send_traversal(
                 &reply_identity,
                 sender,
@@ -378,7 +394,7 @@ pub async fn serve_session(
             .await;
         }
     });
-    let puncher = tokio::spawn(punch_loop(socket.clone(), peer_candidates));
+    let puncher = tokio::spawn(punch_loop(socket.clone(), peer_candidates, punch_now));
 
     let hs = noise::responder(&noise_priv, psk)?;
     let mut session = match accept_handshake(hs, &socket, relays).await {
@@ -943,6 +959,8 @@ pub async fn bind_listener(
         let _ = crate::traversal::watch_traversal(watch_identity, watch_relays, tx).await;
     });
     let c_candidates = candidates.clone();
+    let punch_now = Arc::new(tokio::sync::Notify::new());
+    let c_punch_now = punch_now.clone();
     let reply_identity = identity.clone();
     let reply_noise = noise_pub;
     let reply_endpoints = endpoints.clone();
@@ -961,6 +979,10 @@ pub async fn bind_listener(
                     tracing::warn!("candidate table full; ignoring traversal request");
                 }
             }
+            // Punch toward the new candidates immediately: behind a
+            // default-deny firewall the peer's packets may not open our
+            // mapping for us - our own outbound punch does.
+            c_punch_now.notify_one();
             let _ = crate::traversal::send_traversal(
                 &reply_identity,
                 sender,
@@ -976,11 +998,11 @@ pub async fn bind_listener(
     // candidate that has not grown into an established session yet. The
     // dialer's own punch + msg1 opened the mapping in one direction; this
     // opens it in ours, which stricter NATs need before msg2 can land.
+    // Woken early by a traversal invite so the mapping opens now.
     let p_socket = socket.clone();
     let p_sessions = sessions.clone();
     tokio::spawn(async move {
         loop {
-            sleep(PUNCH_EVERY).await;
             let targets: Vec<SocketAddr> = {
                 let established = p_sessions.lock().expect("sessions lock");
                 candidates
@@ -993,6 +1015,10 @@ pub async fn bind_listener(
             };
             for addr in targets {
                 let _ = p_socket.send_to(PUNCH, addr).await;
+            }
+            match timeout(PUNCH_EVERY, punch_now.notified()).await {
+                Ok(_) => continue,
+                Err(_) => {}
             }
         }
     });
@@ -2686,5 +2712,33 @@ mod tests {
 
         let _ = tokio::fs::remove_file(&src_path).await;
         let _ = tokio::fs::remove_dir_all(&out_dir).await;
+    }
+
+    /// A traversal invite's candidates are punched immediately: the wake
+    /// (Notify) fires the punch loop ahead of its regular sweep. Behind a
+    /// default-deny firewall that outbound punch is what opens the
+    /// serve-side mapping - waiting a sweep costs seconds on every dial.
+    #[tokio::test]
+    async fn punch_loop_punches_immediately_on_invite() {
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let candidates = Arc::new(Mutex::new(Vec::new()));
+        let punch_now = Arc::new(tokio::sync::Notify::new());
+        let puncher = tokio::spawn(punch_loop(sock.clone(), candidates.clone(), punch_now.clone()));
+        // The puncher's first sweep hits an empty list and parks.
+
+        // The "invite": candidates recorded, punch loop woken.
+        candidates.lock().unwrap().push(peer_addr);
+        punch_now.notify_one();
+
+        // The marker arrives well inside one PUNCH_EVERY sweep.
+        let mut buf = [0u8; 64];
+        let (n, _) = timeout(Duration::from_millis(500), peer.recv_from(&mut buf))
+            .await
+            .expect("punch must arrive before the next regular sweep")
+            .unwrap();
+        assert_eq!(&buf[..n], PUNCH);
+        puncher.abort();
     }
 }
