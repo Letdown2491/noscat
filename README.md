@@ -44,6 +44,22 @@ brew install Letdown2491/tap/noscat
 Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell>`)
 and a man page.
 
+## Clients
+
+The CLI is not the only way to use noscat - the same protocol crate powers
+native GUI clients:
+
+- **[noscat-android](https://github.com/Letdown2491/noscat-android)** - native
+  Kotlin (Compose) app over a Rust UniFFI bridge: chat, file send/receive,
+  port forwards, and mesh join by invite.
+- **[noscat-desktop](https://github.com/Letdown2491/noscat-desktop)** - pure
+  Rust desktop app (GPUI), embedding `noscat-client` directly with no FFI
+  layer: feature parity with the Android client plus expose/serve.
+
+Both repos contain no protocol code - the wire format lives in this
+workspace and is specified in the draft NIP above, so the clients are
+interoperable by construction.
+
 ## Status
 
 **Working** - three layers, each verified live across containers over public relays
