@@ -219,6 +219,7 @@ sha256 before it lands under its real name.
 to                       # list the mesh's devices
 to <npub prefix>         # pick a peer (a prefix works; 'to owner' too)
 hello from the laptop    # every following line goes to them
+clip                     # share your clipboard: it becomes theirs
 ```
 
 The Android app's Chat tab is the same protocol: messages are one-shot

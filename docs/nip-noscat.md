@@ -293,6 +293,27 @@ wire. On the next HEADER:
 Senders SHOULD refuse transfers whose chunk count would exceed
 `u32::MAX` (about 5 TiB at 1200-byte chunks).
 
+## One-shot streams
+
+A node (`up`) dispatches each accepted session by its first plaintext byte
+(stream-type tag) before any other interpretation:
+
+| Tag | Name | Payload | Semantics |
+|---|---|---|---|
+| `0x01` | HEADER | (see File transfer framing) | a file transfer; the session becomes the transfer protocol above |
+| `0x06` | CHAT | UTF-8 text | a one-shot chat message |
+| `0x07` | CLIP | UTF-8 text | a clipboard share |
+| any other | raw | unconstrained | bridged to the node's configured local service, if any; dropped otherwise |
+
+For CHAT and CLIP the sender writes the tag followed by the UTF-8 payload,
+then half-closes its end (FIN). The receiver reads to that FIN, delivers the
+text (display, clipboard), and echoes its own FIN as the delivery
+confirmation - the sender's wait for that FIN is what a UI reports as
+"delivered". Receivers MUST tolerate any payload size by reading to the FIN
+rather than a fixed length, and MUST treat invalid UTF-8 as a failed delivery.
+There is exactly one one-shot stream per session; a new message dials a new
+session.
+
 ## Pairing QR codes
 
 Client UIs exchange peer addresses with QR codes. The QR payload is a URI
@@ -342,6 +363,12 @@ authenticates the scanner to the holder just as any other dial would.
    session (XKpsk0 when a mesh is in scope), and pump bytes.
 7. `send`/`receive`: run the file-transfer framing above over the session;
    interrupted transfers resume from the receiver's durable point.
+8. `up` (node): dispatch accepted sessions by stream-type tag per One-shot
+   streams above (file / chat / clipboard / raw bridge), and answer join
+   requests: watch kind-30443 key packages, confirm each requester, then
+   commit the Add and send the Welcome gift-wrapped to that requester alone.
+9. `chat` / `clipboard`: dial a fresh session, write the one-shot tag plus
+   UTF-8 payload, half-close, and treat the peer's echoed FIN as delivery.
 
 ## Security Considerations
 

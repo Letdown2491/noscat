@@ -1,4 +1,4 @@
-.TH NOSCAT 1 "2026" "noscat 0.1.3" "User Commands"
+.TH NOSCAT 1 "2026" "noscat 0.3.0" "User Commands"
 .SH NAME
 noscat \- like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts
 .SH SYNOPSIS
@@ -48,14 +48,18 @@ Prints the npub and pairing QR immediately; Ctrl-C quits.
 (default 0.0.0.0:41641).
 .TP
 .B up
-The persistent tailnet node: prints its npub and pairing QR, accepts any
-number of inbound peers, saves inbound files into
+The persistent mesh node: prints its npub and pairing QR, accepts any number
+of inbound peers, saves inbound files into
 .B \-\-out
-(default: ~/Downloads), and bridges raw inbound tunnels to
+(default: ~/Downloads), bridges raw inbound tunnels to
 .B \-\-to <addr>
-(when given). Requires
-.B \-\-tailnet:
-membership is the authorization for inbound connections. Runs until Ctrl-C.
+(when given), and runs a terminal chat. Requires
+.B \-\-mesh:
+membership is the authorization for inbound connections. The mesh owner also
+answers join requests: devices publishing key packages are shown, and each is
+invited once confirmed with
+.BR y .
+Answers other than y (including EOF) decline. Runs until Ctrl-C.
 .TP
 .BI pipe " target"
 Pipe stdio into a tunnel to a peer by npub. Local stdin EOF sends a FIN; the
@@ -74,7 +78,7 @@ Receive one file over a tunnel into
 (default: the current directory). Prints the npub and pairing QR immediately.
 .TP
 .BI "expose \-\-to " addr
-Expose a local TCP service to tailnet peers over tunnels: each tunnel is
+Expose a local TCP service to mesh peers over tunnels: each tunnel is
 spliced to a fresh connection to the target address. Serves concurrent
 sessions from one shared UDP port. Runs until interrupted.
 .TP
@@ -85,8 +89,8 @@ The listener binds 127.0.0.1 by default; pass
 .B \-\-bind <ip>
 to expose it further - anyone who can reach it can make this process dial the
 target. Each connection dials its own tunnel.
-.SH TAILNETS
-A tailnet is one MLS group per owner's set of devices (OpenMLS). Membership is
+.SH MESHES
+A mesh is one MLS group per owner's set of devices (OpenMLS). Membership is
 authorization: the group's epoch secret becomes the tunnel PSK, so scoped
 tunnels only complete for current members. Removing a device ratchets the
 epoch and locks it out immediately.
@@ -97,40 +101,63 @@ pass
 .B \-\-dir <path>
 to keep several devices on one machine.
 .TP
-.B tailnet create
-Create a tailnet owned by this device's directory (once, on the owner).
+.B mesh create
+Create a mesh owned by this device's directory (once, on the owner).
 .TP
-.B tailnet publish
-Publish this device's MLS key package so the owner can invite it.
+.B mesh publish [\-\-owner <npub>]
+Publish this device's MLS key package as a join request. With
+.BR \-\-owner ,
+the request is addressed to that owner alone; with
+.BR \-\-mesh ,
+the device also watches for the resulting invitation.
 .TP
-.B tailnet invite <npub>
-Invite a device into this (owner's) tailnet.
+.B mesh invite <npub>
+Invite a device into this (owner's) mesh.
 .TP
-.B tailnet join
-Wait for a gift-wrapped invitation and join the tailnet.
+.B mesh join [\-\-owner <npub>]
+Wait for a gift-wrapped invitation and join the mesh; with
+.BR \-\-owner ,
+invitations from anyone else are ignored.
 .TP
-.B tailnet members
-List the tailnet's members and epoch.
+.B mesh members
+List the mesh's members and epoch.
 .TP
-.B tailnet remove <npub>
-Remove a device from this (owner's) tailnet; the epoch ratchets.
+.B mesh remove <npub>
+Remove a device from this (owner's) mesh; the epoch ratchets.
 .TP
-.B tailnet sync
-Merge pending tailnet commits addressed to this device (run after an owner
+.B mesh sync
+Merge pending mesh commits addressed to this device (run after an owner
 invited or removed someone).
 .TP
-.B tailnet psk
-Print the tailnet's current epoch tunnel PSK (hex).
+.B mesh psk
+Print the mesh's current epoch tunnel PSK (hex).
+.SH CHAT
+The
+.B up
+node runs a terminal chat on stdin: type
+.B to
+to list the mesh's devices,
+.BI to " <prefix>"
+to pick one, then every following line is delivered to them as a chat
+message. The special line
+.B clip
+shares the local clipboard with the selected peer - it becomes the clipboard
+on the receiving device (Android or another
+.BR up ).
+Incoming messages print as
+.BR "# 💬 <peer>: <text>" .
 .SH OPTIONS
 .B \-\-relay <url>
-is repeatable on most commands and overrides the default relays
-(wss://nos.lol, wss://relay.primal.net, wss://nostr.mom).
+is repeatable on most commands and overrides the default relays.
 .B \-\-identity
 overrides the default shared identity file
 (~/.noscat/identity.hex, auto-created on first use).
-.B \-\-tailnet [<dir>]
-scopes the tunnel to a tailnet (MLS membership becomes the authorization);
+.B \-\-mesh [<dir>]
+scopes the tunnel to a mesh (MLS membership becomes the authorization);
 the value is optional and defaults to ~/.noscat/device.
+.B \-\-name <name>
+publishes a friendly device name with the advert (up defaults to the
+hostname).
 .B \-\-listen <addr>
 binds UDP listeners. Use
 .B \-\-help
@@ -159,16 +186,16 @@ Client:
 The node (scan its QR with a peer to learn its npub):
 .PP
 .nf
-    noscat tailnet create
-    noscat up \-\-tailnet
-    noscat up \-\-tailnet \-\-out ~/incoming \-\-to 127.0.0.1:22
+    noscat mesh create
+    noscat up \-\-mesh
+    noscat up \-\-mesh \-\-out ~/incoming \-\-to 127.0.0.1:22
 .fi
 .PP
-Tailnet-scoped file transfer:
+Mesh-scoped file transfer:
 .PP
 .nf
-    noscat receive \-\-out ./incoming \-\-tailnet
-    noscat send ./report.pdf <A's npub> \-\-tailnet
+    noscat receive \-\-out ./incoming \-\-mesh
+    noscat send ./report.pdf <A's npub> \-\-mesh
 .fi
 .SH AUTHORS
 Letdown2491 and noscat contributors. MIT licensed;

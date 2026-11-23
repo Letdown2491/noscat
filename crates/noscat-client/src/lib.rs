@@ -139,6 +139,12 @@ pub enum Event {
         peer: String,
         text: String,
     },
+    /// A peer shared their clipboard: `text` should become the local
+    /// clipboard contents.
+    Clipboard {
+        peer: String,
+        text: String,
+    },
     /// Sending a chat message failed (the UI keeps its optimistic copy and
     /// can mark it undelivered).
     ChatFailed {
@@ -556,6 +562,25 @@ impl Client {
                             });
                         }
                         let _ = stream.shutdown().await;
+                    } else if tag[0] == tunnel::TAG_CLIP {
+                        // One-shot clipboard share: same wire shape as chat
+                        // (text to the sender's FIN, FIN echo confirms).
+                        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                        let mut text = Vec::new();
+                        let ok = stream.read_to_end(&mut text).await.is_ok()
+                            && std::str::from_utf8(&text)
+                                .map(|t| {
+                                    inner.emit(Event::Clipboard { peer: who.clone(), text: t.to_string() });
+                                    true
+                                })
+                                .unwrap_or(false);
+                        if !ok {
+                            inner.emit(Event::ChatFailed {
+                                peer: who,
+                                error: "malformed clipboard share".into(),
+                            });
+                        }
+                        let _ = stream.shutdown().await;
                     } else if let Some(to) = bridge_to {
                         let mut prefixed = PrefixedStream::new(tag[0], stream);
                         match tokio::net::TcpStream::connect(to).await {
@@ -726,6 +751,44 @@ impl Client {
                         Err("could not send".to_string())
                     } else {
                         // The peer echoes a FIN once the message is in hand.
+                        let mut sink = Vec::new();
+                        match stream.read_to_end(&mut sink).await {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            if let Err(error) = res {
+                inner.emit(Event::ChatFailed { peer: target, error });
+            }
+        });
+    }
+
+    /// Share the local clipboard with `target`: dial a tunnel, write the
+    /// text tagged as a clipboard share, and wait for the peer's delivery
+    /// FIN. The receiver puts the text on its system clipboard. Wire shape
+    /// and failure reporting mirror [`Self::send_chat`] (failure surfaces
+    /// as [`Event::ChatFailed`]).
+    pub fn send_clipboard(&self, target: &str, text: &str) {
+        let inner = self.inner.clone();
+        let target = target.to_string();
+        let text = text.to_string();
+        let rt = inner.rt.handle().clone();
+        rt.spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let res = match inner.dial(&target).await {
+                Ok((mut stream, _)) => {
+                    let mut payload = vec![tunnel::TAG_CLIP];
+                    payload.extend_from_slice(text.as_bytes());
+                    let sent = stream.write_all(&payload).await.is_ok()
+                        && stream.flush().await.is_ok()
+                        && stream.shutdown().await.is_ok();
+                    if !sent {
+                        Err("could not send".to_string())
+                    } else {
+                        // The peer echoes a FIN once the text is in hand.
                         let mut sink = Vec::new();
                         match stream.read_to_end(&mut sink).await {
                             Ok(_) => Ok(()),

@@ -73,6 +73,8 @@ pub enum Event {
     TransferFailed { peer: String, error: String },
     /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage { peer: String, text: String },
+    /// A peer shared their clipboard: put `text` on the system clipboard.
+    Clipboard { peer: String, text: String },
     /// Sending a chat message failed.
     ChatFailed { peer: String, error: String },
     /// A background operation stopped (the listener, a forward, ...).
@@ -328,6 +330,9 @@ impl NoscatClient {
                     noscat_client::Event::ChatMessage { peer, text } => {
                         Event::ChatMessage { peer, text }
                     }
+                    noscat_client::Event::Clipboard { peer, text } => {
+                        Event::Clipboard { peer, text }
+                    }
                     noscat_client::Event::ChatFailed { peer, error } => {
                         Event::ChatFailed { peer, error }
                     }
@@ -395,6 +400,13 @@ impl NoscatClient {
     /// failure arrives as ChatFailed (delivery is FIN-confirmed otherwise).
     pub fn send_chat(&self, target_npub: String, text: String) {
         self.lock().send_chat(&target_npub, &text);
+    }
+
+    /// Share this device's clipboard text with a peer: it becomes the
+    /// clipboard on the receiving device. Returns immediately; a failure
+    /// arrives as ChatFailed, delivery is FIN-confirmed otherwise.
+    pub fn send_clipboard(&self, target_npub: String, text: String) {
+        self.lock().send_clipboard(&target_npub, &text);
     }
 
     /// Node mode (requires a mesh-scoped client: membership is the

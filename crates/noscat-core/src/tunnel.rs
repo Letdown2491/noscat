@@ -1201,6 +1201,10 @@ pub const TAG_FIN: u8 = 4;
 /// Stream-type tag (first byte) for one-shot chat messages: the payload
 /// after the tag is UTF-8 text, read to the peer's FIN.
 pub const TAG_CHAT: u8 = 6;
+/// Stream-type tag (first byte) for one-shot clipboard shares: the payload
+/// after the tag is UTF-8 text the receiver should put on its system
+/// clipboard. Wire shape is identical to chat (read to FIN, FIN echo).
+pub const TAG_CLIP: u8 = 7;
 /// Header reply carrying the receiver's resume point: tag + u32 "next
 /// expected seq" (how many complete chunks it already holds on disk).
 const TAG_RESUME: u8 = 5;
