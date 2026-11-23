@@ -113,8 +113,8 @@ service with `--to`:
 
 ```
 # requires a tailnet: membership is the authorization for inbound connections
-noscat up --tailnet ./device-a
-noscat up --tailnet ./device-a --out ~/incoming --to 127.0.0.1:22
+noscat up --tailnet
+noscat up --tailnet --out ~/incoming --to 127.0.0.1:22
 ```
 
 With `--to`, any inbound stream that is not a file transfer is forwarded to
@@ -126,17 +126,20 @@ accepted.
 
 ```
 # On the owner (device A), once:
-noscat tailnet create --dir ./device-a
+noscat tailnet create
 
 # On the joiner (device B):
-noscat tailnet publish --dir ./device-b     # publishes its MLS key package
+noscat tailnet publish     # publishes its MLS key package
 
 # Back on the owner:
-noscat tailnet invite <B's npub> --dir ./device-a
+noscat tailnet invite <B's npub>
 
 # On the joiner:
-noscat tailnet join --dir ./device-b
+noscat tailnet join
 ```
+
+The device directory defaults to `~/.noscat/device`; pass `--dir <path>` to
+keep several devices on one machine.
 
 Membership is policy-enforced MLS: the group context carries an ACL extension
 naming the owner, and every member rejects commits from anyone else - even a

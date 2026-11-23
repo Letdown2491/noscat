@@ -55,9 +55,9 @@ enum Command {
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this tailnet's device directory (MLS group
-        /// membership becomes the authorization).
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// membership becomes the authorization) [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
     },
     /// Pipe stdio into a tunnel to a peer by npub.
     Pipe {
@@ -70,9 +70,9 @@ enum Command {
         #[arg(long)]
         identity: Option<String>,
         /// Restrict the tunnel to this tailnet's device directory (MLS group
-        /// membership becomes the authorization).
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// membership becomes the authorization) [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
     },
     /// Send a file over a tunnel to a peer by npub.
     Send {
@@ -86,9 +86,10 @@ enum Command {
         /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
-        /// Restrict the tunnel to this tailnet's device directory.
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// Restrict the tunnel to this tailnet's device directory
+        /// [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
     },
     /// Receive one file over a tunnel, into --out (default: cwd).
     Receive {
@@ -104,9 +105,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Restrict the tunnel to this tailnet's device directory.
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// Restrict the tunnel to this tailnet's device directory
+        /// [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
@@ -130,9 +132,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Tailnet device directory - REQUIRED: membership authorizes inbound.
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// Tailnet device directory - REQUIRED: membership authorizes inbound
+        /// [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
         /// Advert lifetime in seconds [default: 3600]
         #[arg(long, default_value = "3600")]
         ttl: u64,
@@ -150,9 +153,10 @@ enum Command {
         /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
-        /// Restrict the tunnels to this tailnet's device directory.
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// Restrict the tunnels to this tailnet's device directory
+        /// [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
@@ -174,9 +178,10 @@ enum Command {
         /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
-        /// Restrict the tunnels to this tailnet's device directory.
-        #[arg(long)]
-        tailnet: Option<std::path::PathBuf>,
+        /// Restrict the tunnels to this tailnet's device directory
+        /// [default: ~/.noscat/device].
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        tailnet: Option<String>,
     },
     /// Tailnet: a device's MLS group for owned-device meshing (spike).
     #[command(subcommand)]
@@ -194,7 +199,7 @@ enum TailnetCommand {
     /// Create a tailnet owned by this device's directory.
     Create {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
@@ -203,7 +208,7 @@ enum TailnetCommand {
     /// Publish this device's MLS key package so the owner can invite it.
     Publish {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
@@ -212,7 +217,7 @@ enum TailnetCommand {
     /// Invite a device (by npub) into this device's tailnet.
     Invite {
         /// The device directory of *this* (owner) device.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// The invitee's npub.
         device: String,
@@ -223,7 +228,7 @@ enum TailnetCommand {
     /// Wait for a gift-wrapped invitation and join the tailnet.
     Join {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
@@ -232,13 +237,13 @@ enum TailnetCommand {
     /// List the tailnet's members and epoch.
     Members {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
     },
     /// Remove a device (by npub) from this tailnet (owner only).
     Remove {
         /// The device directory of *this* (owner) device.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// The npub of the device to remove.
         device: String,
@@ -250,7 +255,7 @@ enum TailnetCommand {
     /// owner invited or removed someone).
     Sync {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
         /// How long to listen for commits (seconds).
         #[arg(long, default_value_t = 10)]
@@ -262,9 +267,19 @@ enum TailnetCommand {
     /// Print the tailnet's current epoch tunnel PSK (hex).
     Psk {
         /// Device directory holding the identity and MLS state.
-        #[arg(long, default_value = "./noscat-device")]
+        #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
     },
+}
+
+// The default tailnet device directory, next to the shared identity.
+// `--tailnet` with no value (empty path) also resolves to this.
+fn default_device_dir() -> std::path::PathBuf {
+    // unix shells set HOME; Windows-native environments set USERPROFILE.
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|h| std::path::PathBuf::from(h).join(".noscat").join("device"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".noscat").join("device"))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -292,6 +307,16 @@ fn main() -> anyhow::Result<()> {
         ))
     }
 
+    // The default tailnet device directory, next to the shared identity.
+    // `--tailnet` with no value (empty path) also resolves to this.
+    fn default_device_dir() -> std::path::PathBuf {
+        // unix shells set HOME; Windows-native environments set USERPROFILE.
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(|h| std::path::PathBuf::from(h).join(".noscat").join("device"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".noscat").join("device"))
+    }
+
     // The tailnet's epoch PSK, if the operator scoped the tunnel to a group.
     fn tailnet_psk(dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
         let device = noscat_core::tailnet::Device::open(dir)?;
@@ -308,10 +333,12 @@ fn main() -> anyhow::Result<()> {
     fn make_client(
         identity: IdentitySource,
         relays: Vec<String>,
-        tailnet: Option<std::path::PathBuf>,
+        tailnet: Option<String>,
         listen: Option<std::net::SocketAddr>,
         ttl: u64,
     ) -> anyhow::Result<(Client, std::sync::mpsc::Receiver<Event>)> {
+        // `--tailnet` with no value is an empty string: the default device dir.
+        let tailnet = tailnet.map(|d| if d.is_empty() { default_device_dir() } else { std::path::PathBuf::from(d) });
         if let Some(dir) = &tailnet {
             tailnet_psk(dir)?;
         }
@@ -507,7 +534,7 @@ fn main() -> anyhow::Result<()> {
             // Authorization comes from tailnet membership; without it any npub
             // that scans the QR could push files to this machine.
             let Some(tailnet) = tailnet else {
-                anyhow::bail!("up requires --tailnet <dir>: tailnet membership authorizes inbound connections (create one with `noscat tailnet create --dir <dir>`)");
+                anyhow::bail!("up requires --tailnet: tailnet membership authorizes inbound connections (create one with `noscat tailnet create`)");
             };
             let identity = identity
                 .map(IdentitySource::File)
