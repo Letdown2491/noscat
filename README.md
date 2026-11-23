@@ -97,8 +97,10 @@ echo hello | noscat pipe <A's npub>
 ```
 
 Everything B types lands on A's stdout, encrypted, peer-to-peer; relays carry only the
-discovery. `--identity <file>` (serve/receive) and `--identity <nsec|hex>` (pipe/send)
-pin identities across runs; by default they are ephemeral.
+discovery. Every data-plane command shares one node identity per machine:
+the first run generates it and stores it at `~/.noscat/identity.hex` (mode 0600),
+and later runs reuse it, so your npub is stable. Pass `--identity` to override
+(a file for serve/receive/expose, hex or `nsec1...` for pipe/send/forward).
 
 Also available: `noscat keygen`, `noscat advertise`, `noscat watch`.
 

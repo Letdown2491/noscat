@@ -15,7 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate a fresh ephemeral node identity.
+    /// Generate a fresh one-off identity (rarely needed: any data-plane
+    /// command creates and stores a default identity on first use).
     Keygen {
         /// Print the secret key (hex) alongside the npub. Handle with care.
         #[arg(long)]
@@ -50,7 +51,7 @@ enum Command {
         /// Advert lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
-        /// Identity file holding the secret; created automatically on first use.
+        /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this tailnet's device directory (MLS group
@@ -65,7 +66,7 @@ enum Command {
         /// Relay URLs to search for the peer's advert (repeatable).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Use this identity instead of a fresh ephemeral one (hex or nsec).
+        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
         /// Restrict the tunnel to this tailnet's device directory (MLS group
@@ -82,7 +83,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Use this identity instead of a fresh ephemeral one (hex or nsec).
+        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
         /// Restrict the tunnel to this tailnet's device directory.
@@ -100,7 +101,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Identity file holding the secret; created automatically on first use.
+        /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnel to this tailnet's device directory.
@@ -121,7 +122,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Identity file holding the secret; created automatically on first use.
+        /// Identity file override (default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
         /// Restrict the tunnels to this tailnet's device directory.
@@ -145,7 +146,7 @@ enum Command {
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
-        /// Use this identity instead of a fresh ephemeral one (hex or nsec).
+        /// Identity override (hex or nsec; default: ~/.noscat/identity.hex).
         #[arg(long)]
         identity: Option<String>,
         /// Restrict the tunnels to this tailnet's device directory.
@@ -251,6 +252,16 @@ fn main() -> anyhow::Result<()> {
         } else {
             relays
         }
+    }
+
+    // One node identity per machine: every data-plane command shares
+    // ~/.noscat/identity.hex unless --identity overrides it. The client
+    // creates the file on first use.
+    fn default_identity() -> Option<IdentitySource> {
+        let home = std::env::var("HOME").ok()?;
+        Some(IdentitySource::File(
+            std::path::PathBuf::from(home).join(".noscat").join("identity.hex"),
+        ))
     }
 
     // The tailnet's epoch PSK, if the operator scoped the tunnel to a group.
@@ -382,10 +393,10 @@ fn main() -> anyhow::Result<()> {
             identity,
             tailnet,
         } => {
-            let identity = match identity {
-                Some(path) => IdentitySource::File(path),
-                None => IdentitySource::Ephemeral,
-            };
+            let identity = identity
+                .map(IdentitySource::File)
+                .or_else(default_identity)
+                .unwrap_or(IdentitySource::Ephemeral);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -401,7 +412,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
-                None => IdentitySource::Ephemeral,
+                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
             spawn_printer(rx);
@@ -410,7 +421,7 @@ fn main() -> anyhow::Result<()> {
         Command::Send { path, target, relays, identity, tailnet } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
-                None => IdentitySource::Ephemeral,
+                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
             client.send_file(path, &target);
@@ -427,10 +438,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Receive { out, listen, relays, identity, tailnet, ttl } => {
-            let identity = match identity {
-                Some(path) => IdentitySource::File(path),
-                None => IdentitySource::Ephemeral,
-            };
+            let identity = identity
+                .map(IdentitySource::File)
+                .or_else(default_identity)
+                .unwrap_or(IdentitySource::Ephemeral);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -448,10 +459,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Expose { to, listen, relays, identity, tailnet, ttl } => {
-            let identity = match identity {
-                Some(path) => IdentitySource::File(path),
-                None => IdentitySource::Ephemeral,
-            };
+            let identity = identity
+                .map(IdentitySource::File)
+                .or_else(default_identity)
+                .unwrap_or(IdentitySource::Ephemeral);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -472,7 +483,7 @@ fn main() -> anyhow::Result<()> {
         Command::Forward { target, port, bind, relays, identity, tailnet } => {
             let identity = match identity {
                 Some(secret) => IdentitySource::Secret(secret),
-                None => IdentitySource::Ephemeral,
+                None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let local = std::net::SocketAddr::new(bind, port);
             let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
