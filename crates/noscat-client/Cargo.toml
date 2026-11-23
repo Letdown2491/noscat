@@ -8,7 +8,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-noscat-core = { path = "../noscat-core", version = "0.1.3" }
+noscat-core = { path = "../noscat-core", version = "0.2.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 
