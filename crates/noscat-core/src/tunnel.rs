@@ -1341,10 +1341,12 @@ async fn stream_chunks(
     len: u64,
     file: &mut tokio::fs::File,
     first: u32,
+    progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
 ) -> Result<(), TunnelError> {
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
     let mut buf = [0u8; CHUNK];
+    let total_len = len; // survives the sweep block's `len = frames.len()` shadow
 
     // In-flight frames (seqs base..next): cached ciphertext, last-sent time,
     // retransmission count.
@@ -1426,6 +1428,10 @@ async fn stream_chunks(
         }
         if drained > 0 {
             tracing::debug!(drained, base, "drained queued acks");
+        }
+        if let Some(report) = progress {
+            let acked = (base.min(total) as u64) * (CHUNK as u64);
+            report(acked.min(total_len), total_len);
         }
     }
 }
@@ -1584,6 +1590,7 @@ pub async fn send_file(
     path: &Path,
     relays: &[String],
     psk: Option<&[u8; 32]>,
+    progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
 ) -> Result<(), TunnelError> {
     let name = sanitize_name(
         path.file_name()
@@ -1616,7 +1623,7 @@ pub async fn send_file(
         name.display()
     );
 
-    send_stream(&socket, peer, &mut hs, path, &name, &file_sha).await
+    send_stream(&socket, peer, &mut hs, path, &name, &file_sha, progress).await
 }
 
 /// The sender half of a file transfer over an established Noise session
@@ -1628,6 +1635,7 @@ async fn send_stream(
     path: &Path,
     name: &Path,
     file_sha: &[u8; 32],
+    progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
 ) -> Result<(), TunnelError> {
     let mut file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
@@ -1666,7 +1674,7 @@ async fn send_stream(
         );
     }
     if first < total_chunks {
-        stream_chunks(socket, peer, hs, total_chunks, len, &mut file, first).await?;
+        stream_chunks(socket, peer, hs, total_chunks, len, &mut file, first, progress).await?;
     }
 
     // -> FIN; completes when the receiver's cumulative ack reaches the
@@ -2260,7 +2268,7 @@ mod tests {
         let mut src = tokio::fs::File::open(&src_path).await.unwrap();
         let mut dst = tokio::fs::File::create(&dst_path).await.unwrap();
         let sender = tokio::spawn(async move {
-            stream_chunks(&send_sock, proxy_addr, &mut ti, total, len, &mut src, 0)
+            stream_chunks(&send_sock, proxy_addr, &mut ti, total, len, &mut src, 0, None)
                 .await
                 .unwrap();
         });
@@ -2395,7 +2403,7 @@ mod tests {
         let src_path2 = src_path.clone();
         let name2 = name.clone();
         let sender = tokio::spawn(async move {
-            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes).await
+            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None).await
         });
         let out_dir2 = out_dir.clone();
         let receiver =
@@ -2463,7 +2471,7 @@ mod tests {
         let src_path2 = src_path.clone();
         let name2 = name.clone();
         let sender = tokio::spawn(async move {
-            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes).await
+            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None).await
         });
         let out_dir2 = out_dir.clone();
         let receiver =

@@ -115,6 +115,15 @@ pub enum Event {
         peer: String,
         path: PathBuf,
     },
+    /// A file transfer is under way: `sent` of `total` bytes acked by the
+    /// peer. Emitted per percent change, only for sends (the receiver has
+    /// no ack stream of its own).
+    TransferProgress {
+        peer: String,
+        path: PathBuf,
+        sent: u64,
+        total: u64,
+    },
     /// A file transfer failed.
     TransferFailed {
         peer: String,
@@ -699,12 +708,30 @@ impl Client {
         let source = path.clone();
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
+            // One event per percent change: per-ack would cross the FFI
+            // (or flood a terminal) far too often.
+            let last_percent = std::sync::atomic::AtomicU8::new(0);
+            let progress = |sent: u64, total: u64| {
+                if total == 0 {
+                    return;
+                }
+                let percent = (sent * 100 / total).min(100) as u8;
+                if last_percent.swap(percent, std::sync::atomic::Ordering::Relaxed) != percent {
+                    inner.emit(Event::TransferProgress {
+                        peer: target.clone(),
+                        path: source.clone(),
+                        sent,
+                        total,
+                    });
+                }
+            };
             match tunnel::send_file(
                 &inner.identity,
                 &target,
                 &source,
                 &inner.relays,
                 inner.psk.as_ref(),
+                Some(&progress),
             )
             .await
             {

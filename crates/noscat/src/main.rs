@@ -513,6 +513,7 @@ fn main() -> anyhow::Result<()> {
             },
             Event::Incoming { .. } => {}
             Event::TransferDone { .. } => {}
+            Event::TransferProgress { .. } => {} // the CLI narrates completion only
             Event::TransferFailed { error, .. } => {
                 eprintln!("# ⚠️  transfer failed: {error}")
             }

@@ -59,6 +59,13 @@ pub enum Event {
     TunnelClosed { peer: String, error: Option<String> },
     /// A file transfer finished: the final verified path.
     TransferDone { peer: String, path: String },
+    /// A file transfer is under way (sends only, one event per percent).
+    TransferProgress {
+        peer: String,
+        path: String,
+        sent: u64,
+        total: u64,
+    },
     /// A file transfer failed.
     TransferFailed { peer: String, error: String },
     /// A background operation stopped (the listener, a forward, ...).
@@ -266,6 +273,14 @@ impl NoscatClient {
                     }
                     noscat_client::Event::TransferDone { peer, path } => {
                         Event::TransferDone { peer, path: path.display().to_string() }
+                    }
+                    noscat_client::Event::TransferProgress { peer, path, sent, total } => {
+                        Event::TransferProgress {
+                            peer,
+                            path: path.display().to_string(),
+                            sent,
+                            total,
+                        }
                     }
                     noscat_client::Event::TransferFailed { peer, error, .. } => {
                         Event::TransferFailed { peer, error }
