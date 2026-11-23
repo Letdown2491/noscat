@@ -336,8 +336,14 @@ impl Device {
             .map_err(|e| TailnetError::Mls(e.to_string()))
     }
 
-    /// Publish our MLS key package (kind 30443) so the owner can invite us.
-    pub async fn publish_key_package(&self, relays: &[String]) -> Result<(), TailnetError> {
+    /// Publish our MLS key package (kind 30443) so an owner can invite us.
+    /// With `target`, the package is tagged to that owner's npub: only they
+    /// see the join request, and their invitation is the one we accept.
+    pub async fn publish_key_package(
+        &self,
+        relays: &[String],
+        target: Option<PublicKey>,
+    ) -> Result<(), TailnetError> {
         let bundle = self.key_package(&self.provider, &self.signer)?;
         let bytes = bundle.key_package().tls_serialize_detached()?;
 
@@ -345,8 +351,12 @@ impl Device {
         // they are what will decrypt the owner's Welcome, so persist now.
         self.persist()?;
 
-        let event = EventBuilder::new(Kind::Custom(KEY_PACKAGE_KIND), hex::encode(bytes))
-            .tag(Tag::identifier(KEY_PACKAGE_IDENTIFIER))
+        let mut builder = EventBuilder::new(Kind::Custom(KEY_PACKAGE_KIND), hex::encode(bytes))
+            .tag(Tag::identifier(KEY_PACKAGE_IDENTIFIER));
+        if let Some(owner) = target {
+            builder = builder.tag(Tag::public_key(owner));
+        }
+        let event = builder
             .finalize(self.identity.keys())
             .map_err(|e| TailnetError::Nostr(e))?;
 
@@ -569,7 +579,14 @@ impl Device {
     }
 
     /// Wait for a gift-wrapped tailnet invitation and join it.
-    pub async fn join_tailnet(&mut self, relays: &[String]) -> Result<(), TailnetError> {
+    /// Wait for a gift-wrapped invitation and join the tailnet. With
+    /// `expected_owner`, invitations from anyone else are ignored: the phone
+    /// scanned a specific owner's QR, and only that tailnet may adopt it.
+    pub async fn join_tailnet(
+        &mut self,
+        relays: &[String],
+        expected_owner: Option<PublicKey>,
+    ) -> Result<(), TailnetError> {
         if self.group_id.is_some() {
             return Err(TailnetError::Mls(format!(
                 "{} is already in a tailnet",
@@ -583,7 +600,16 @@ impl Device {
             tx,
         ));
         eprintln!("# ⏳ waiting for a tailnet invitation (Ctrl-C to give up)…");
-        let (sender, payload) = rx.recv().await.ok_or(TailnetError::JoinTimeout)?;
+        // Gift wraps are signed, so the sender cannot be spoofed: an
+        // invitation from anyone but the expected owner is dropped unheard.
+        let (sender, payload) = loop {
+            let (sender, payload) = rx.recv().await.ok_or(TailnetError::JoinTimeout)?;
+            if expected_owner.is_some() && expected_owner != Some(sender) {
+                eprintln!("# ignoring an invitation from {sender} (not the expected owner)");
+                continue;
+            }
+            break (sender, payload);
+        };
         watch.abort();
 
         let msg: TailnetMessage = serde_json::from_str(&payload)?;

@@ -111,10 +111,11 @@ pub fn tailnet_members(dir: String) -> Result<Vec<TailnetMember>, NoscatError> {
 }
 
 /// Prepare to join a tailnet over the relays: open (creating if needed) this
-/// device's tailnet device directory and publish its MLS key package. The
-/// returned npub is the address the tailnet owner must invite.
+/// device's tailnet device directory and publish its MLS key package. With
+/// `owner_npub`, the request is addressed to that owner alone (the one whose
+/// QR the user scanned); the returned npub is this device's address.
 #[uniffi::export]
-pub fn tailnet_prepare(dir: String) -> Result<String, NoscatError> {
+pub fn tailnet_prepare(dir: String, owner_npub: Option<String>) -> Result<String, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -125,16 +126,29 @@ pub fn tailnet_prepare(dir: String) -> Result<String, NoscatError> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    rt.block_on(device.publish_key_package(&relays))
+    let target = match owner_npub {
+        Some(npub) => Some(
+            nostr::prelude::PublicKey::parse(&npub)
+                .map_err(NoscatError::fail)?,
+        ),
+        None => None,
+    };
+    rt.block_on(device.publish_key_package(&relays, target))
         .map_err(NoscatError::fail)?;
     Ok(device.identity.npub())
 }
 
 /// Join the tailnet: wait up to `timeout_secs` for the owner's gift-wrapped
-/// invitation on the relays and process it. Returns the member list on
-/// success; a timeout error means the owner has not invited this npub yet.
+/// invitation on the relays and process it. With `owner_npub`, invitations
+/// from anyone else are ignored (the phone only joins the tailnet it
+/// targeted). Returns the member list on success; a timeout error means the
+/// owner has not invited this npub yet.
 #[uniffi::export]
-pub fn tailnet_join(dir: String, timeout_secs: u64) -> Result<Vec<TailnetMember>, NoscatError> {
+pub fn tailnet_join(
+    dir: String,
+    timeout_secs: u64,
+    owner_npub: Option<String>,
+) -> Result<Vec<TailnetMember>, NoscatError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -145,10 +159,17 @@ pub fn tailnet_join(dir: String, timeout_secs: u64) -> Result<Vec<TailnetMember>
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let expected = match owner_npub {
+        Some(npub) => Some(
+            nostr::prelude::PublicKey::parse(&npub)
+                .map_err(NoscatError::fail)?,
+        ),
+        None => None,
+    };
     rt.block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            device.join_tailnet(&relays),
+            device.join_tailnet(&relays, expected),
         )
         .await
         .map_err(|_| NoscatError::Failed("no invitation arrived in time".into()))?

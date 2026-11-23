@@ -200,16 +200,20 @@ pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
 /// Subscribe to tailnet key packages (kind 30443) on the relays and forward
 /// each event's author to the returned channel; the stream lives until the
 /// receiver is dropped. This is how the tailnet owner notices a device asking
-/// to join: the device publishes its key package, the owner sees it here.
+/// to join: the device publishes its key package tagged to the owner's npub,
+/// and this subscription only surfaces events addressed to `target` - a
+/// device that scanned a different owner's QR never reaches us.
 pub async fn watch_key_packages(
     relays: &[String],
+    target: PublicKey,
 ) -> Result<tokio::sync::mpsc::Receiver<PublicKey>, RelayError> {
     use crate::tailnet::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
 
     let client = connect_client(relays).await?;
     let filter = Filter::new()
         .kind(Kind::Custom(KEY_PACKAGE_KIND))
-        .identifier(KEY_PACKAGE_IDENTIFIER);
+        .identifier(KEY_PACKAGE_IDENTIFIER)
+        .pubkey(target);
     client.subscribe(filter).await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(16);

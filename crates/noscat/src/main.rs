@@ -205,11 +205,14 @@ enum TailnetCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    /// Publish this device's MLS key package so the owner can invite it.
+    /// Publish this device's MLS key package as a join request.
     Publish {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
+        /// The tailnet owner's npub: the request is addressed to them alone.
+        #[arg(long)]
+        owner: Option<String>,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
@@ -230,6 +233,9 @@ enum TailnetCommand {
         /// Device directory holding the identity and MLS state.
         #[arg(long, default_value_os_t = default_device_dir())]
         dir: std::path::PathBuf,
+        /// The tailnet owner's npub: invitations from anyone else are ignored.
+        #[arg(long)]
+        owner: Option<String>,
         /// Relay URLs (repeatable; defaults to the public set).
         #[arg(long = "relay")]
         relays: Vec<String>,
@@ -391,9 +397,9 @@ fn main() -> anyhow::Result<()> {
 
         // Only the tailnet owner answers join requests; a member device's
         // `up` just serves its tunnels.
-        let members = match noscat_core::tailnet::Device::open(&device_dir) {
+        let (members, own_npub) = match noscat_core::tailnet::Device::open(&device_dir) {
             Ok(device) => match device.list_members() {
-                Ok(members) => members,
+                Ok(members) => (members, device.identity.public_key()),
                 Err(e) => {
                     eprintln!("# pairing watcher disabled: cannot list members: {e}");
                     return;
@@ -408,8 +414,10 @@ fn main() -> anyhow::Result<()> {
             eprintln!("# this device is not the tailnet owner; join requests are answered by the owner device");
             return;
         }
+        // Only key packages tagged to this device's npub surface here: a
+        // device asks to join by scanning this owner's QR (or pasting it).
 
-        let mut rx = match noscat_core::relay::watch_key_packages(&relays).await {
+        let mut rx = match noscat_core::relay::watch_key_packages(&relays, own_npub).await {
             Ok(rx) => rx,
             Err(e) => {
                 eprintln!("# pairing watcher disabled: {e}");
@@ -731,9 +739,14 @@ fn main() -> anyhow::Result<()> {
                         dir.display()
                     );
                 }
-                TailnetCommand::Publish { dir, relays } => {
+                TailnetCommand::Publish { dir, owner, relays } => {
                     let device = noscat_core::tailnet::Device::open(&dir)?;
-                    rt.block_on(device.publish_key_package(&relays_or_default(relays)))?;
+                    let target = match &owner {
+                        Some(npub) => Some(nostr::prelude::PublicKey::parse(npub)
+                            .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?),
+                        None => None,
+                    };
+                    rt.block_on(device.publish_key_package(&relays_or_default(relays), target))?;
                     eprintln!("# 📢 key package published as {}", device.identity.npub());
                 }
                 TailnetCommand::Invite { dir, device: npub, relays } => {
@@ -743,9 +756,14 @@ fn main() -> anyhow::Result<()> {
                     rt.block_on(device.invite(invitee, &relays_or_default(relays)))?;
                     eprintln!("# ✅ invited {npub} into the tailnet");
                 }
-                TailnetCommand::Join { dir, relays } => {
+                TailnetCommand::Join { dir, owner, relays } => {
                     let mut device = noscat_core::tailnet::Device::open(&dir)?;
-                    rt.block_on(device.join_tailnet(&relays_or_default(relays)))?;
+                    let expected = match &owner {
+                        Some(npub) => Some(nostr::prelude::PublicKey::parse(npub)
+                            .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?),
+                        None => None,
+                    };
+                    rt.block_on(device.join_tailnet(&relays_or_default(relays), expected))?;
                 }
                 TailnetCommand::Members { dir } => {
                     let device = noscat_core::tailnet::Device::open(&dir)?;
