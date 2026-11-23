@@ -120,6 +120,9 @@ enum Command {
         /// Directory to save inbound files into (default: ~/Downloads).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// Friendly device name shown to peers (default: the hostname).
+        #[arg(long)]
+        name: Option<String>,
         /// Bridge raw inbound tunnels to this local service, e.g. 127.0.0.1:22.
         #[arg(long)]
         to: Option<std::net::SocketAddr>,
@@ -342,6 +345,7 @@ fn main() -> anyhow::Result<()> {
         tailnet: Option<String>,
         listen: Option<std::net::SocketAddr>,
         ttl: u64,
+        name: Option<String>,
     ) -> anyhow::Result<(Client, std::sync::mpsc::Receiver<Event>)> {
         // `--tailnet` with no value is an empty string: the default device dir.
         let tailnet = tailnet.map(|d| if d.is_empty() { default_device_dir() } else { std::path::PathBuf::from(d) });
@@ -353,6 +357,7 @@ fn main() -> anyhow::Result<()> {
             relays: Some(relays_or_default(relays)),
             listen,
             tailnet_dir: tailnet,
+            device_name: name,
             advert_ttl_secs: ttl,
         })
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -636,6 +641,7 @@ fn main() -> anyhow::Result<()> {
                 &id,
                 parsed,
                 noise_pub,
+                None,
                 ttl,
                 &relays_or_default(relays),
             ))?;
@@ -659,7 +665,7 @@ fn main() -> anyhow::Result<()> {
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
             spawn_printer(rx);
             client.serve_stdio()?;
         }
@@ -673,7 +679,7 @@ fn main() -> anyhow::Result<()> {
                 Some(secret) => IdentitySource::Secret(secret),
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
             spawn_printer(rx);
             client.pipe_stdio(&target)?;
         }
@@ -682,7 +688,7 @@ fn main() -> anyhow::Result<()> {
                 Some(secret) => IdentitySource::Secret(secret),
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
             client.send_file(path, &target);
             // wait for the transfer's terminal event
             for ev in rx {
@@ -704,7 +710,7 @@ fn main() -> anyhow::Result<()> {
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
             // Report readiness up front: receive_file blocks on the sender's
             // handshake, and without this the user stares at silence.
             print_event(Event::Listening { npub: client.npub().to_string(), addr: listen });
@@ -720,7 +726,7 @@ fn main() -> anyhow::Result<()> {
                 print_event(ev);
             }
         }
-        Command::Up { out, to, listen, relays, identity, tailnet, ttl } => {
+        Command::Up { out, to, listen, relays, identity, tailnet, ttl, name } => {
             // Authorization comes from tailnet membership; without it any npub
             // that scans the QR could push files to this machine.
             let Some(tailnet) = tailnet else {
@@ -732,6 +738,7 @@ fn main() -> anyhow::Result<()> {
             // phone does the same once it has joined.)
             let device = noscat_core::tailnet::Device::open(&device_dir)?;
             let identity = IdentitySource::Secret(device.identity.secret_hex());
+            let device_name = name.unwrap_or_else(noscat_core::default_device_name);
             let listen: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --listen address: {e}"))?;
@@ -744,7 +751,7 @@ fn main() -> anyhow::Result<()> {
             // Pairing: when this device owns the tailnet, it watches the
             // relays for devices asking to join (their published key
             // packages) and invites them on confirmation.
-            let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl)?;
+            let (client, rx) = make_client(identity, relays.clone(), Some(tailnet), Some(listen), ttl, Some(device_name))?;
             spawn_printer(rx);
             spawn_pairing_watcher(device_dir.clone(), relays_or_default(relays));
             client.up(out_dir, to)?;
@@ -766,7 +773,7 @@ fn main() -> anyhow::Result<()> {
             let to: std::net::SocketAddr = to
                 .parse()
                 .map_err(|e| anyhow::anyhow!("bad --to address: {e}"))?;
-            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl)?;
+            let (client, rx) = make_client(identity, relays, tailnet, Some(listen), ttl, None)?;
             client.expose(to)?;
             eprintln!("# 🔗 exposing tcp/{to} over tunnels");
             for ev in rx {
@@ -783,7 +790,7 @@ fn main() -> anyhow::Result<()> {
                 None => default_identity().unwrap_or(IdentitySource::Ephemeral),
             };
             let local = std::net::SocketAddr::new(bind, port);
-            let (client, rx) = make_client(identity, relays, tailnet, None, 3600)?;
+            let (client, rx) = make_client(identity, relays, tailnet, None, 3600, None)?;
             client.forward(&target, local)?;
             eprintln!("# 🐈 forwarding tcp/{local} over tunnels to {target}");
             for ev in rx {

@@ -58,13 +58,15 @@ pub async fn publish_advert(
     identity: &Identity,
     endpoints: Vec<Endpoint>,
     noise_pub: [u8; 32],
+    name: Option<String>,
     ttl_secs: u64,
     relays: &[String],
 ) -> Result<(), RelayError> {
     if relays.is_empty() {
         return Err(RelayError::NoRelays);
     }
-    let event = Advert::event(identity, endpoints, noise_pub, ttl_secs, Timestamp::now())?;
+    let event =
+        Advert::event(identity, endpoints, noise_pub, name, ttl_secs, Timestamp::now())?;
 
     let client = connect_client(relays).await?;
     let output = client.send_event(&event).await?;

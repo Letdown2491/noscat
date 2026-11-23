@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "noscat"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "noscat-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "noscat-core",
  "snow",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "noscat-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
@@ -1791,8 +1791,9 @@ dependencies = [
 
 [[package]]
 name = "noscat-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "futures-util",
  "noscat-client",
  "noscat-core",
  "nostr",

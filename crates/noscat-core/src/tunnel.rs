@@ -322,6 +322,7 @@ pub async fn serve_session(
     relays: &[String],
     ttl_secs: u64,
     psk: Option<&[u8; 32]>,
+    name: Option<&str>,
 ) -> Result<Session, TunnelError> {
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
 
@@ -329,7 +330,7 @@ pub async fn serve_session(
     let local = socket.local_addr()?;
 
     let endpoints = discover_endpoints(&socket).await?;
-    crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
+    crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, name.map(str::to_string), ttl_secs, relays).await?;
     tracing::info!(
         npub = %identity.npub(),
         %local,
@@ -716,8 +717,9 @@ pub async fn serve(
     relays: &[String],
     ttl_secs: u64,
     psk: Option<&[u8; 32]>,
+    name: Option<&str>,
 ) -> Result<String, TunnelError> {
-    let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
+    let session = serve_session(identity, listen, relays, ttl_secs, psk, name).await?;
     let (socket, peer, hs, who) = session.finish().await;
     eprintln!("# 🔗 tunnel up with {who} - bridging stdio");
     let mut src = Datagrams::Socket(socket.clone(), peer);
@@ -754,8 +756,9 @@ pub async fn expose_tcp(
     relays: &[String],
     ttl_secs: u64,
     psk: Option<&[u8; 32]>,
+    name: Option<&str>,
 ) -> Result<(), TunnelError> {
-    let mut listener = bind_listener(identity, listen, relays, ttl_secs, psk).await?;
+    let mut listener = bind_listener(identity, listen, relays, ttl_secs, psk, name).await?;
     loop {
         let session = listener.accept().await?;
         let (socket, peer, hs, who, mut datagrams) = session.finish().await;
@@ -825,13 +828,14 @@ pub async fn bind_listener(
     relays: &[String],
     ttl_secs: u64,
     psk: Option<&[u8; 32]>,
+    name: Option<&str>,
 ) -> Result<TunnelListener, TunnelError> {
     let (noise_pub, noise_priv) = noise_keypair(identity)?;
     let socket = bind_udp(listen)?;
     let local = socket.local_addr()?;
 
     let endpoints = discover_endpoints(&socket).await?;
-    crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, ttl_secs, relays).await?;
+    crate::relay::publish_advert(identity, endpoints.clone(), noise_pub, name.map(str::to_string), ttl_secs, relays).await?;
     tracing::info!(
         npub = %identity.npub(),
         %local,
@@ -1734,8 +1738,9 @@ pub async fn receive_file(
     ttl_secs: u64,
     out_dir: &Path,
     psk: Option<&[u8; 32]>,
+    name: Option<&str>,
 ) -> Result<(String, PathBuf), TunnelError> {
-    let session = serve_session(identity, listen, relays, ttl_secs, psk).await?;
+    let session = serve_session(identity, listen, relays, ttl_secs, psk, name).await?;
     let (socket, peer, mut hs, who) = session.finish().await;
     receive_stream(&who, &socket, peer, &mut hs, out_dir).await
 }

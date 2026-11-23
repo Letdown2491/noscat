@@ -70,6 +70,9 @@ pub struct ClientConfig {
     /// A tailnet device directory: tunnels are scoped to the group's epoch
     /// PSK, so only members can connect or be dialed.
     pub tailnet_dir: Option<PathBuf>,
+    /// Friendly device name published in the advert (peers display it).
+    /// `None` keeps the advert unnamed; UIs then fall back to labels.
+    pub device_name: Option<String>,
     /// Advert lifetime in seconds.
     pub advert_ttl_secs: u64,
 }
@@ -81,6 +84,7 @@ impl Default for ClientConfig {
             relays: None,
             listen: None,
             tailnet_dir: None,
+            device_name: None,
             advert_ttl_secs: 3600,
         }
     }
@@ -214,6 +218,7 @@ struct Inner {
     identity: Identity,
     npub: String,
     psk: Option<[u8; 32]>,
+    device_name: Option<String>,
     /// Tailnet device directory, when scoped to one. Read on every tunnel:
     /// the epoch PSK changes when members join or are removed, and long
     /// running peers must pick up the new secret without a restart.
@@ -383,6 +388,7 @@ impl Client {
                 npub: identity.npub(),
                 identity,
                 psk,
+                device_name: config.device_name,
                 tailnet_dir: config.tailnet_dir,
                 relays: config.relays.unwrap_or_else(|| {
                     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
@@ -432,6 +438,7 @@ impl Client {
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
+            inner.device_name.as_deref(),
         ))?;
         if let Some(dir) = &inner.tailnet_dir {
             listener.set_tailnet_dir(dir.clone());
@@ -479,6 +486,7 @@ impl Client {
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
+            inner.device_name.as_deref(),
         ))?;
         if let Some(dir) = &inner.tailnet_dir {
             listener.set_tailnet_dir(dir.clone());
@@ -599,6 +607,7 @@ impl Client {
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
+            inner.device_name.as_deref(),
         ))?;
         if let Some(dir) = &inner.tailnet_dir {
             listener.set_tailnet_dir(dir.clone());
@@ -634,6 +643,7 @@ impl Client {
             &inner.relays,
             inner.ttl,
             inner.psk.as_ref(),
+            inner.device_name.as_deref(),
         ))?;
         if let Some(dir) = &inner.tailnet_dir {
             listener.set_tailnet_dir(dir.clone());
@@ -856,6 +866,7 @@ impl Client {
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let psk = inner.fresh_psk();
+            let name = inner.device_name.clone();
             match tunnel::receive_file(
                 &inner.identity,
                 inner.listen,
@@ -863,6 +874,7 @@ impl Client {
                 inner.ttl,
                 &out_dir,
                 psk.as_ref(),
+                name.as_deref(),
             )
             .await
             {

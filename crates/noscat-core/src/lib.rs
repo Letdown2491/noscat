@@ -21,3 +21,19 @@ pub mod tunnel;
 
 pub use advert::Advert;
 pub use identity::Identity;
+
+/// A sensible default friendly name for this device: the hostname on unix
+/// systems (Android reports "localhost" - apps should pass something better,
+/// e.g. the device model). Falls back to "noscat".
+pub fn default_device_name() -> String {
+    #[cfg(unix)]
+    {
+        if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+            let h = h.trim();
+            if !h.is_empty() && h != "localhost" {
+                return h.to_string();
+            }
+        }
+    }
+    "noscat".to_string()
+}

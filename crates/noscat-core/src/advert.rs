@@ -40,6 +40,10 @@ pub struct AdvertPayload {
     /// by this event's signature (see `crate::noise` for the derivation note).
     pub noise_pub: String,
     pub endpoints: Vec<Endpoint>,
+    /// A human-friendly device name (defaults to the hostname). Absent in
+    /// older adverts.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A parsed overlay advert.
@@ -52,6 +56,8 @@ pub struct Advert {
     pub endpoints: Vec<Endpoint>,
     /// Unix seconds after which this advert should be considered stale.
     pub expires_at: u64,
+    /// The node's friendly device name, when it published one.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,12 +86,14 @@ impl Advert {
         identity: &Identity,
         endpoints: Vec<Endpoint>,
         noise_pub: [u8; 32],
+        name: Option<String>,
         ttl_secs: u64,
         now: Timestamp,
     ) -> Result<Event, AdvertError> {
         let payload = AdvertPayload {
             noise_pub: hex::encode(noise_pub),
             endpoints,
+            name,
         };
         let expires_at = now.as_secs().saturating_add(ttl_secs);
         let json = serde_json::to_string(&payload)?;
@@ -136,6 +144,7 @@ impl Advert {
             noise_pub,
             endpoints: payload.endpoints,
             expires_at,
+            name: payload.name,
         })
     }
 }
@@ -159,6 +168,7 @@ mod tests {
             &id,
             vec![endpoint(Transport::Udp, "203.0.113.7:41641")],
             [9u8; 32],
+            Some("test cat".to_string()),
             3600,
             now,
         )
@@ -191,7 +201,7 @@ mod tests {
         let id = Identity::generate();
         let now = Timestamp::now();
         // TTL of 1 second, but claim "now" is far in the future.
-        let event = Advert::event(&id, vec![], [9u8; 32], 1, now).expect("sign advert");
+        let event = Advert::event(&id, vec![], [9u8; 32], None, 1, now).expect("sign advert");
         let later = Timestamp::from(now.as_secs() + 120);
         assert!(matches!(
             Advert::from_event(&event, later),

@@ -44,6 +44,9 @@ pub struct ClientConfig {
     pub relays: Option<Vec<String>>,
     /// The tailnet device directory to scope tunnels to, if any.
     pub tailnet_dir: Option<String>,
+    /// Friendly device name shown to peers (published in the advert).
+    /// None = no name (UIs fall back to generic labels).
+    pub device_name: Option<String>,
     /// The UDP port to listen on for inbound tunnels. None = 41641.
     pub listen_port: Option<u16>,
 }
@@ -109,16 +112,48 @@ pub struct TailnetMember {
     pub npub: String,
     /// True for the device that owns (created) the tailnet.
     pub is_owner: bool,
+    /// The device's friendly name from its advert, when it is serving and
+    /// published one. None = show a generic label.
+    pub name: Option<String>,
 }
 
-/// List the member devices of a tailnet device directory. The directory is
+/// List the member devices of a tailnet device directory, with each
+/// member's friendly name resolved from its current advert (concurrently;
+/// members that are offline simply come back unnamed). The directory is
 /// an enrolled tailnet device (identity.nsec + MLS state), imported onto the
 /// device; membership is what authorizes tailnet-scoped tunnels.
 #[uniffi::export]
 pub fn tailnet_members(dir: String) -> Result<Vec<TailnetMember>, NoscatError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(NoscatError::fail)?;
     let device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
-    members_of(device)
+    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    rt.block_on(async move {
+        let members = members_of(device)?;
+        let relays = &relays;
+        let names = members.iter().map(|m| async move {
+            let Ok(pk) = nostr::prelude::PublicKey::parse(&m.npub) else {
+                return None;
+            };
+            noscat_core::relay::fetch_advert_for(relays, None, Some(pk))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|a| a.name)
+        });
+        let names = futures_util::future::join_all(names).await;
+        Ok(members
+            .into_iter()
+            .zip(names)
+            .map(|(m, name)| TailnetMember { name, ..m })
+            .collect())
+    })
 }
 
 /// Prepare to join a tailnet over the relays: open (creating if needed) this
@@ -220,7 +255,7 @@ fn members_of(device: noscat_core::tailnet::Device) -> Result<Vec<TailnetMember>
             .map_err(NoscatError::fail)?
             .to_bech32()
             .map_err(NoscatError::fail)?;
-        out.push(TailnetMember { npub, is_owner: m.is_owner });
+        out.push(TailnetMember { npub, is_owner: m.is_owner, name: None });
     }
     Ok(out)
 }
@@ -255,6 +290,7 @@ impl NoscatClient {
                 std::net::SocketAddr::from(([0, 0, 0, 0], config.listen_port.unwrap_or(41641))),
             ),
             tailnet_dir: config.tailnet_dir.as_ref().map(std::path::PathBuf::from),
+            device_name: config.device_name,
             advert_ttl_secs: 3600,
         })
         .map_err(NoscatError::fail)?;
