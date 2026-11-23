@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use nostr::nips::nip59::GiftWrapBuilder;
+use nostr::nips::nip59::{extract_rumor, GiftWrapBuilder};
 use nostr::prelude::*;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -487,6 +487,14 @@ impl Device {
     /// commits addressed to us, enforcing the group's policy. This is how
     /// non-owner members follow the owner's epoch advances (invites,
     /// removals) and keep deriving the current tunnel PSK.
+    ///
+    /// Backfill first, then live: gift wraps are stored on the relays for
+    /// their 7-day expiry, and a member that was offline at commit time
+    /// (app closed, network switch, relay blip) would otherwise never see
+    /// that commit - its group stays at the old epoch and it derives a
+    /// stale tunnel PSK. The one-shot fetch (oldest first) closes that
+    /// gap; the live listen keeps today's semantics for messages published
+    /// while we wait.
     pub async fn sync_mesh(
         &mut self,
         relays: &[String],
@@ -495,13 +503,13 @@ impl Device {
         if self.group_id.is_none() {
             return Err(MeshError::NoMesh(self.dir.clone()));
         }
+        let mut merged = self.backfill_commits(relays).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(PublicKey, String)>(16);
         let watch = tokio::spawn(crate::traversal::watch_mesh(
             self.identity.clone(),
             relays.to_vec(),
             tx,
         ));
-        let mut merged = 0usize;
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let msg = match tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -515,30 +523,157 @@ impl Device {
                     continue;
                 }
             };
-            if payload.welcome.is_some() {
-                eprintln!("# ⚠️  got an unexpected invitation from {} (already in a mesh)", msg.0);
-                continue;
-            }
-            match self.process_commit(&payload.commit) {
-                Ok(()) => {
-                    merged += 1;
-                    eprintln!("# ⬇️  merged commit from {} (epoch {})", msg.0, self.epoch()?);
-                }
-                Err(MeshError::PolicyViolation(e)) => {
-                    eprintln!("# 🚫 commit from {} rejected: {e}", msg.0);
-                }
-                Err(e) => eprintln!("# ⚠️  commit from {} not merged: {e}", msg.0),
-            }
+            merged += self.accept_mesh_message(msg.0, &payload);
         }
         watch.abort();
         Ok(merged)
     }
 
-    /// Merge one serialized commit into our group after checking the group's
-    /// policy: MLS authenticates the commit, the policy decides if the
-    /// committer may change the membership.
-    fn process_commit(&mut self, commit_hex: &str) -> Result<(), MeshError> {
-        let mut group = self.group()?;
+    /// One-shot fetch of stored gift-wrapped mesh messages addressed to us
+    /// (the backfill for commits missed while offline), each merged oldest
+    /// first through the same enforcement as the live path. Relay fetch
+    /// failures degrade to "no backfill": the live listen still runs.
+    async fn backfill_commits(&mut self, relays: &[String]) -> usize {
+        let filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(self.identity.public_key());
+        let client = match crate::relay::connect_client(relays).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("# ⚠️  mesh backfill skipped (relays unreachable): {e}");
+                return 0;
+            }
+        };
+        let events = match client
+            .fetch_events(filter)
+            .timeout(crate::relay::FETCH_WAIT)
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => {
+                eprintln!("# ⚠️  mesh backfill fetch failed: {e}");
+                client.shutdown().await;
+                return 0;
+            }
+        };
+        client.shutdown().await;
+
+        // Unwrap and order by epoch: MLS commits chain, so replaying
+        // newest-first (relay ordering is arbitrary) would fail each one
+        // against a group context it predates. Messages whose commit does
+        // not parse sort first and fail to merge loudly - same as before.
+        let mut msgs: Vec<(u64, PublicKey, MeshMessage)> = Vec::new();
+        for event in events {
+            let Ok(unwrapped) = extract_rumor(self.identity.keys(), &event) else {
+                tracing::debug!("backfill: ignoring undecryptable gift wrap");
+                continue;
+            };
+            if u16::from(unwrapped.rumor.kind) != MESH_KIND {
+                continue;
+            }
+            let Ok(msg) = serde_json::from_str::<MeshMessage>(&unwrapped.rumor.content) else {
+                tracing::debug!("backfill: gift wrap rumor is not a mesh message");
+                continue;
+            };
+            let epoch = Self::commit_epoch(&msg.commit).unwrap_or(0);
+            msgs.push((epoch, unwrapped.sender, msg));
+        }
+        msgs.sort_by_key(|(epoch, _, _)| *epoch);
+
+        let mut merged = 0usize;
+        for (_, sender, msg) in msgs {
+            merged += self.accept_mesh_message(sender, &msg);
+        }
+        merged
+    }
+
+    /// Decode, policy-check, and merge one mesh message (live or
+    /// backfilled); returns 1 when a commit merged. All failures are
+    /// logged and contained - one bad or stale commit never aborts the
+    /// sync of the rest.
+    fn accept_mesh_message(&mut self, sender: PublicKey, payload: &MeshMessage) -> usize {
+        if payload.welcome.is_some() {
+            eprintln!("# ⚠️  got an unexpected invitation from {sender} (already in a mesh)");
+            return 0;
+        }
+        // Already merged (or older than us - relays deliver stored events
+        // to the live subscription too): skip silently, this is normal
+        // backfill-versus-live overlap.
+        match (Self::commit_epoch(&payload.commit), self.epoch()) {
+            (Ok(epoch), Ok(ours)) if epoch <= ours => return 0,
+            _ => {}
+        }
+        let mut group = match self.group() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("# ⚠️  cannot open our mesh group: {e}");
+                return 0;
+            }
+        };
+        match Self::accept_commit_on(&mut group, &self.provider, &sender, &payload.commit) {
+            Ok(merged) => {
+                if merged == 0 {
+                    return 0; // already merged: normal backfill-live overlap
+                }
+                if let Err(e) = self.persist() {
+                    eprintln!("# ⚠️  merged commit from {sender} but persist failed: {e}");
+                    return 0;
+                }
+                eprintln!("# ⬇️  merged commit from {sender} (epoch {})", self.epoch().unwrap_or(0));
+                1
+            }
+            Err(MeshError::PolicyViolation(e)) => {
+                eprintln!("# 🚫 commit from {sender} rejected: {e}");
+                0
+            }
+            Err(e) => {
+                eprintln!("# ⚠️  commit from {sender} not merged: {e}");
+                0
+            }
+        }
+    }
+
+    /// The epoch a serialized commit advances the group to: backfill orders
+    /// commits by it (they must merge oldest-first) and skips ones already
+    /// merged into our group.
+    fn commit_epoch(commit_hex: &str) -> Result<u64, MeshError> {
+        let bytes = hex::decode(commit_hex)
+            .map_err(|e| MeshError::Mls(format!("bad commit hex: {e}")))?;
+        let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
+            .map_err(|e| MeshError::Mls(e.to_string()))?;
+        let protocol: ProtocolMessage = match message.try_into() {
+            Ok(p) => p,
+            Err(_) => return Err(MeshError::Mls("not a public MLS message".into())),
+        };
+        Ok(protocol.epoch().as_u64())
+    }
+
+    /// Merge one serialized commit into an explicit group after checking
+    /// the group's policy: MLS authenticates the commit, the policy
+    /// decides if the committer may change the membership. Commits whose
+    /// epoch is not ahead of the group's are skipped (0): relays deliver
+    /// stored events to the live subscription too, so replaying an
+    /// already-merged commit is the normal overlap of backfill and live,
+    /// not an error.
+    fn accept_commit_on(
+        group: &mut MlsGroup,
+        provider: &Provider,
+        sender: &PublicKey,
+        commit_hex: &str,
+    ) -> Result<usize, MeshError> {
+        // A commit's message epoch is the one it APPLIES to (the group
+        // ratchets on merge), so ours+1 is a pending commit and anything
+        // strictly older is already behind us. Already-merged replays are
+        // not detectable from the message alone - MLS rejects them at
+        // staging (the proposal queue was consumed by the first merge),
+        // which the caller logs and moves past.
+        match Self::commit_epoch(commit_hex) {
+            Ok(epoch) if epoch < group.epoch().as_u64() => {
+                tracing::debug!(%sender, epoch, "mesh commit is older than our group; skipping");
+                return Ok(0);
+            }
+            _ => {}
+        }
         let bytes = hex::decode(commit_hex)
             .map_err(|e| MeshError::Mls(format!("bad commit hex: {e}")))?;
         let message = MlsMessageIn::tls_deserialize_exact(&mut bytes.as_slice())
@@ -548,7 +683,7 @@ impl Device {
             Err(_) => return Err(MeshError::Mls("not a public MLS message".into())),
         };
         let processed = group
-            .process_message(&self.provider, protocol)
+            .process_message(provider, protocol)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         let committer = processed.credential().serialized_content().to_vec();
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
@@ -557,11 +692,11 @@ impl Device {
         // MLS authenticated the commit; the group's policy decides whether
         // this committer may change the membership. See `authorize_commit`:
         // the policy comes from OUR context, never the commit's.
-        Self::authorize_commit(&group, &staged, &committer)?;
+        Self::authorize_commit(group, &staged, &committer)?;
         group
-            .merge_staged_commit(&self.provider, *staged)
+            .merge_staged_commit(provider, *staged)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
-        self.persist()
+        Ok(1)
     }
 
 
@@ -592,7 +727,6 @@ impl Device {
         Ok(self.group()?.epoch().as_u64())
     }
 
-    /// Gift-wrap `payload` (NIP-59) to `to`.
     /// Gift-wrap `payload` (NIP-59) to `to` over a shared relay session:
     /// fan-out to several members opens ONE connection set, not one per
     /// member (relay connects are the expensive, rate-limit-earning part).
@@ -723,8 +857,8 @@ struct MeshMessage {
 /// authenticated by the group itself and inherited by every joiner.
 ///
 /// Single-owner meshs: only the owner may add or remove devices. Members
-/// enforce this at commit-merge time (see `process_commit`) - an MLS commit
-/// is signed, so the committer's credential is checked against the policy.
+/// enforce this at commit-merge time (see `accept_commit_on`) - an MLS
+/// commit is signed, so the committer's credential is checked against the policy.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct MeshPolicy {
     /// npub bytes of the mesh's owner.
@@ -950,6 +1084,7 @@ mod tests {
     /// commit is processed by the first member through `process_message` (the
     /// `sync_mesh` path, minus the transport).
     struct MeshFixture {
+        owner: Identity,
         owner_provider: Provider,
         owner_signer: SignatureKeyPair,
         owner_group: MlsGroup,
@@ -960,6 +1095,20 @@ mod tests {
         a_signer: SignatureKeyPair,
         b_group: MlsGroup,
         b_provider: Provider,
+        /// The raw "member B joins" commit: the one A has not merged.
+        commit_b: MlsMessageOut,
+    }
+
+    impl MeshFixture {
+        /// Catch A up with the missed commit (the path `sync_mesh`'s
+        /// backfill now provides): stage and merge it into A's group.
+        fn catch_up_a(&mut self) -> Result<(), MeshError> {
+            let staged = stage_commit(&mut self.a_group, &self.a_provider, &self.commit_b)?;
+            self.a_group
+                .merge_staged_commit(&self.a_provider, *staged)
+                .map_err(|e| MeshError::Mls(e.to_string()))?;
+            Ok(())
+        }
     }
 
     fn cred(id: &Identity, signer: &SignatureKeyPair) -> CredentialWithKey {
@@ -1011,7 +1160,9 @@ mod tests {
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         let a_group = join_from_welcome(&a_provider, &welcome_a, &a_signer)?;
 
-        // Owner adds B; A follows via the commit (the `sync_mesh` path).
+        // Owner adds B; the commit is published but A (playing the member
+        // that was offline) has NOT merged it: A stays one epoch behind.
+        // `catch_up_a` is the sync/backfill path.
         let kp_b = bundle_for(&b_provider, &b_signer, &b)?;
         let (commit_b, welcome_b, _) = owner_group
             .add_members(&owner_provider, &owner_signer, &[kp_b.key_package().clone()])
@@ -1019,14 +1170,10 @@ mod tests {
         owner_group
             .merge_pending_commit(&owner_provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
-        let mut a_group = a_group;
-        let staged = stage_commit(&mut a_group, &a_provider, &commit_b)?;
-        a_group
-            .merge_staged_commit(&a_provider, *staged)
-            .map_err(|e| MeshError::Mls(e.to_string()))?;
         let b_group = join_from_welcome(&b_provider, &welcome_b, &b_signer)?;
 
         Ok(MeshFixture {
+            owner,
             owner_provider,
             owner_signer,
             owner_group,
@@ -1037,6 +1184,7 @@ mod tests {
             a_signer,
             b_group,
             b_provider,
+            commit_b,
         })
     }
 
@@ -1045,6 +1193,7 @@ mod tests {
     #[test]
     fn removal_ratchets_epoch_and_locks_out_device() -> Result<(), MeshError> {
         let mut fx = fixture_two_members()?;
+        fx.catch_up_a()?;
 
         let psk_of = |group: &MlsGroup, provider: &Provider| -> Result<Vec<u8>, MeshError> {
             group
@@ -1088,11 +1237,102 @@ mod tests {
         Ok(())
     }
 
-    /// The policy is the law: a commit from a non-owner member (even a valid,
-    /// correctly signed one) must be rejected by the receiving member.
+    /// A member that missed a live commit catches up from backfill: the
+    /// owner invited a third device while the member was not on its relay
+    /// subscription, and the stored commit replays into the member's
+    /// group - same epoch, same tunnel PSK as the owner (issue #11).
+    /// Replays of an already-merged commit (backfill and live overlap, or
+    /// a second sync) are skipped, never errors, and the epoch does not
+    /// move.
+    #[test]
+    fn backfill_merges_missed_commit_replays_are_noops() -> Result<(), MeshError> {
+        let fx = fixture_two_members()?;
+        let psk_of = |group: &MlsGroup, provider: &Provider| -> Result<Vec<u8>, MeshError> {
+            group
+                .export_secret(provider.crypto(), EXPORTER_LABEL, &[], 32)
+                .map_err(|e| MeshError::Mls(e.to_string()))
+        };
+
+        // A is one epoch behind: it never received the B-add commit.
+        let owner_epoch = fx.owner_group.epoch().as_u64();
+        assert_eq!(
+            owner_epoch,
+            fx.a_group.epoch().as_u64() + 1,
+            "fixture: A missed exactly one commit"
+        );
+
+        // Backfill into A's group.
+        let mut a_group = fx.a_group;
+        let sender = fx.owner.public_key();
+        let missed = hex::encode(fx.commit_b.tls_serialize_detached()?);
+        let merged =
+            Device::accept_commit_on(&mut a_group, &fx.a_provider, &sender, &missed)?;
+        assert_eq!(merged, 1, "the missed commit must merge");
+        assert_eq!(a_group.epoch().as_u64(), owner_epoch);
+        assert_eq!(
+            psk_of(&a_group, &fx.a_provider)?,
+            psk_of(&fx.owner_group, &fx.owner_provider)?,
+            "backfilled member derives the owner's tunnel PSK"
+        );
+
+        // Replay the same commit (the live subscription also hands stored
+        // events over): skipped or MLS-rejected, never merged, and epoch
+        // and PSK are untouched.
+        let replay =
+            Device::accept_commit_on(&mut a_group, &fx.a_provider, &sender, &missed);
+        assert!(
+            matches!(replay, Ok(0) | Err(_)),
+            "an already-merged commit must not merge again: {replay:?}"
+        );
+        assert_eq!(a_group.epoch().as_u64(), owner_epoch);
+        assert_eq!(
+            psk_of(&a_group, &fx.a_provider)?,
+            psk_of(&fx.owner_group, &fx.owner_provider)?
+        );
+        Ok(())
+    }
+
+    /// Backfill still enforces the mesh policy: a stored commit from a
+    /// non-owner member is rejected with the policy violation, not merged.
+    #[test]
+    fn backfill_rejects_non_owner_commit() -> Result<(), MeshError> {
+        let mut fx = fixture_two_members()?;
+        fx.catch_up_a()?;
+
+        // Member A (current, so its commit passes the epoch guard) commits
+        // the removal of B - legal MLS, forbidden by the policy.
+        let leaf_b = fx
+            .a_group
+            .members()
+            .find(|m| m.credential.serialized_content() == fx.b.public_key().to_bytes())
+            .map(|m| m.index)
+            .ok_or_else(|| MeshError::Mls("member B missing".into()))?;
+        let (commit, _w, _) = fx
+            .a_group
+            .remove_members(&fx.a_provider, &fx.a_signer, &[leaf_b])
+            .map_err(|e| MeshError::Mls(e.to_string()))?;
+        let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+
+        let mut owner_group = fx.owner_group;
+        let sender = fx.a.public_key();
+        let res =
+            Device::accept_commit_on(&mut owner_group, &fx.owner_provider, &sender, &commit_hex);
+        assert!(
+            matches!(res, Err(MeshError::PolicyViolation(_))),
+            "a backfilled non-owner commit must be rejected: {res:?}"
+        );
+        assert_eq!(owner_group.epoch(), fx.a_group.epoch(), "nothing merged");
+        Ok(())
+    }
+
+    /// A member commit that rewrites the policy via a GCE proposal must be
+    /// rejected: the authorization policy is read from OUR group's context,
+    /// not the committer's document. Without this, a non-owner could name
+    /// themselves owner in the commit and pass their own check.
     #[test]
     fn acl_rejects_non_owner_commit() -> Result<(), MeshError> {
         let mut fx = fixture_two_members()?;
+        fx.catch_up_a()?;
 
         // Member A (not the owner) commits the removal of B - legal MLS, but
         // the mesh's policy says only the owner may change membership.
@@ -1145,6 +1385,7 @@ mod tests {
     #[test]
     fn acl_rejects_policy_rewriting_commit() -> Result<(), MeshError> {
         let mut fx = fixture_two_members()?;
+        fx.catch_up_a()?;
 
         // Member A (not the owner) proposes a GCE that renames A owner and
         // commits it - legal MLS, and self-authorizing only if the receiver

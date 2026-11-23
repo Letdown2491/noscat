@@ -26,7 +26,7 @@ pub const DEFAULT_RELAYS: &[&str] = &[
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long to wait for a matching advert before giving up.
-const FETCH_WAIT: Duration = Duration::from_secs(15);
+pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(15);
 
 /// A connected client over `relays` - the one place relay plumbing is set
 /// up. Callers that publish/fetch shut the client down when done; the
