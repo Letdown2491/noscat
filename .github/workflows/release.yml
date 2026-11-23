@@ -153,9 +153,23 @@ jobs:
           path: dist/*
           retention-days: 1
 
+  api-compat:
+    name: API compat (cargo semver-checks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Flag breaking changes against the published crates
+        # Mechanical backstop for API.md: a signature break must ride a
+        # minor bump (0.x rules), never a patch.
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          workspace-checks: true
+
   release:
     name: publish release
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, api-compat]
     # needs holds the publish for the whole build matrix: a failed arch
     # publishes nothing, which is the right shape for a release.
     runs-on: ubuntu-24.04

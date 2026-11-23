@@ -47,6 +47,11 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo -v "$PWD:/work:Z" -w /work
 
 ## Layout
 
+- `API.md` - the app-facing API contract (`noscat-client` + `noscat-ffi`
+  surfaces, event semantics, threading contracts). ANY change to a pub item
+  of those two crates updates API.md in the same commit, even when only the
+  semantics changed. The app-repo agents rely on it being current.
+
 - `crates/noscat-core` - the data plane: Noise XK tunnels, UDP traversal, adverts
   (kind 37195), meshes (MLS), file transfer framing.
 - `crates/noscat-client` - the reusable client: identity/relay config resolution,
