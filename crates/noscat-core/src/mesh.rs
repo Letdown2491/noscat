@@ -1071,7 +1071,7 @@ impl Device {
         // caller dropping this future mid-wait was the FFI websocket-leak
         // class, and deadline + clean watcher exit keep everything orderly.
         let deadline = tokio::time::Instant::now() + wait;
-        let (sender, payload) = loop {
+        let (sender, msg) = loop {
             let msg = match tokio::time::timeout_at(deadline, rx.recv()).await {
                 Ok(Some(msg)) => msg,
                 // Deadline hit, or the watcher is gone. Either way, report
@@ -1102,7 +1102,25 @@ impl Device {
                 tracing::info!(from = %msg.0, "ignoring an invitation (not the expected owner)");
                 continue;
             }
-            break msg;
+            // Skip-and-continue on anything that is not a well-formed
+            // invitation: one stray stored message (relay retention is
+            // days) must not poison this join AND every retry after it.
+            // The backfill path already skips unparseable messages; the
+            // live loop matches it.
+            let parsed: MeshMessage = match serde_json::from_str(&msg.1) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::info!(from = %msg.0, error = %e, "skipping an unparseable mesh message");
+                    continue;
+                }
+            };
+            if parsed.welcome.is_none() {
+                // A commit fan-out from the owner (epoch propagation,
+                // no Welcome): not an invitation, keep waiting.
+                tracing::info!("owner commit without a Welcome; still waiting");
+                continue;
+            }
+            break (msg.0, parsed);
         };
         // Only the invitation was wanted: end the watch. Dropping rx (the
         // only receiver) is its exit signal - it breaks the relay loop and
@@ -1110,12 +1128,9 @@ impl Device {
         // by a caller's timeout (aborting leaked websockets per retry).
         drop(rx);
 
-        let msg: MeshMessage = serde_json::from_str(&payload)?;
         tracing::info!(%sender, "invitation received; joining");
 
-        let welcome_bytes = hex::decode(&msg.welcome.ok_or_else(|| {
-            MeshError::Mls("invitation carries no Welcome".into())
-        })?)?;
+        let welcome_bytes = hex::decode(&msg.welcome.unwrap_or_default())?;
         let welcome =
             Welcome::tls_deserialize_exact(&mut welcome_bytes.as_slice())
                 .map_err(|e| MeshError::Mls(e.to_string()))?;
