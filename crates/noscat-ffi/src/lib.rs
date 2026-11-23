@@ -105,9 +105,83 @@ pub struct TailnetMember {
 /// device; membership is what authorizes tailnet-scoped tunnels.
 #[uniffi::export]
 pub fn tailnet_members(dir: String) -> Result<Vec<TailnetMember>, NoscatError> {
-    use nostr::nips::nip19::ToBech32;
     let device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
         .map_err(NoscatError::fail)?;
+    members_of(device)
+}
+
+/// Prepare to join a tailnet over the relays: open (creating if needed) this
+/// device's tailnet device directory and publish its MLS key package. The
+/// returned npub is the address the tailnet owner must invite.
+#[uniffi::export]
+pub fn tailnet_prepare(dir: String) -> Result<String, NoscatError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(NoscatError::fail)?;
+    let device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+        .map_err(NoscatError::fail)?;
+    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    rt.block_on(device.publish_key_package(&relays))
+        .map_err(NoscatError::fail)?;
+    Ok(device.identity.npub())
+}
+
+/// Join the tailnet: wait up to `timeout_secs` for the owner's gift-wrapped
+/// invitation on the relays and process it. Returns the member list on
+/// success; a timeout error means the owner has not invited this npub yet.
+#[uniffi::export]
+pub fn tailnet_join(dir: String, timeout_secs: u64) -> Result<Vec<TailnetMember>, NoscatError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(NoscatError::fail)?;
+    let mut device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+        .map_err(NoscatError::fail)?;
+    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    rt.block_on(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            device.join_tailnet(&relays),
+        )
+        .await
+        .map_err(|_| NoscatError::Failed("no invitation arrived in time".into()))?
+        .map_err(NoscatError::fail)?;
+        members_of(device)
+    })
+}
+
+/// Keep the membership current: merge the owner's epoch commits (invites,
+/// removals) that arrive while we listen, then return the member list.
+#[uniffi::export]
+pub fn tailnet_sync(dir: String, wait_secs: u64) -> Result<Vec<TailnetMember>, NoscatError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(NoscatError::fail)?;
+    let mut device = noscat_core::tailnet::Device::open(std::path::Path::new(&dir))
+        .map_err(NoscatError::fail)?;
+    let relays: Vec<String> = noscat_core::relay::DEFAULT_RELAYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    rt.block_on(async move {
+        device
+            .sync_tailnet(&relays, std::time::Duration::from_secs(wait_secs))
+            .await
+            .map_err(NoscatError::fail)?;
+        members_of(device)
+    })
+}
+
+fn members_of(device: noscat_core::tailnet::Device) -> Result<Vec<TailnetMember>, NoscatError> {
+    use nostr::nips::nip19::ToBech32;
     let mut out = Vec::new();
     for m in device.list_members().map_err(NoscatError::fail)? {
         let npub = nostr::prelude::PublicKey::from_hex(&m.npub)

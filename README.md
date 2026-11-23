@@ -79,14 +79,17 @@ and a man page.
 - `crates/noscat-client` - the UI-facing layer: an owned runtime, config, and
   an event stream (`connect`/`listen` primitives, stdio/TCP/file composites).
   This is what graphical clients embed.
+- `crates/noscat-ffi` - UniFFI bindings over `noscat-client` for mobile apps
+  (Kotlin today, Swift via the same scaffolding later): the Android client
+  consumes the published crate.
 - `crates/noscat` - the CLI: a terminal skin over `noscat-client`.
 
 ### Try it
 
-Machine A (the server; its npub is printed on start):
+Machine A (the server; its npub and a scannable pairing QR print on start):
 
 ```
-noscat serve --listen 0.0.0.0:41641
+noscat serve
 ```
 
 Machine B (dials A by npub - A's npub must be reachable: A's advert is published to
@@ -148,22 +151,22 @@ per device) and remove them:
 
 ```
 # On the owner:
-noscat tailnet members --dir ./device-a   # who is in, at which epoch
-noscat tailnet remove <B's npub> --dir ./device-a
+noscat tailnet members   # who is in, at which epoch
+noscat tailnet remove <B's npub>
 
 # On the other members (picks up the owner's commit from the relays):
-noscat tailnet sync --dir ./device-c
+noscat tailnet sync
 ```
 
 Both devices now derive the same epoch PSK. Removing a device ratchets the
 MLS epoch: the removed device's PSK goes stale immediately, so its handshakes
 fail cryptographically even if it keeps trying. Scope any tunnel to the group
-with `--tailnet <dir>` - the handshake becomes `Noise_XKpsk0`, so only members
+with `--tailnet` - the handshake becomes `Noise_XKpsk0`, so only members
 of the same tailnet can complete it:
 
 ```
-noscat serve --tailnet ./device-a
-echo hi | noscat pipe <A's npub> --tailnet ./device-b
+noscat serve --tailnet
+echo hi | noscat pipe <A's npub> --tailnet
 ```
 
 ### Port forwarding
@@ -173,10 +176,10 @@ Expose any TCP service on one device; dial it by npub from another - like
 
 ```
 # On the device with the service (A) - expose an SSH server, web app, anything:
-noscat expose --to 127.0.0.1:22 --tailnet ./device-a
+noscat expose --to 127.0.0.1:22 --tailnet
 
 # On another device (B) - localhost:2222 now *is* A's port 22:
-noscat forward <A's npub> --port 2222 --tailnet ./device-b
+noscat forward <A's npub> --port 2222 --tailnet
 ssh -p 2222 localhost
 ```
 
@@ -191,10 +194,10 @@ the device dial the target.
 
 ```
 # Receiver (A):
-noscat receive --out ./incoming --tailnet ./device-a
+noscat receive --out ./incoming --tailnet
 
 # Sender (B):
-noscat send ./report.pdf <A's npub> --tailnet ./device-b
+noscat send ./report.pdf <A's npub> --tailnet
 ```
 
 Transfers are resumable: an interrupted attempt leaves `report.pdf.noscat-part`
@@ -212,12 +215,13 @@ in a container (same pattern as our other projects).
 # Build the dev image (once, and whenever containers/ changes):
 podman build -t localhost/noscat-dev -f containers/noscat-dev.containerfile containers/
 
-# Build / test:
-podman run --rm -v "$PWD:/work:Z" -w /work localhost/noscat-dev cargo build --workspace
-podman run --rm -v "$PWD:/work:Z" -w /work localhost/noscat-dev cargo test --workspace
+# Build / test (the :Z on the cargo volume matters on SELinux hosts):
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z -v "$PWD:/work:Z" \
+  -w /work localhost/noscat-dev sh -c "cargo test --workspace"
 
 # Try the CLI:
-podman run --rm -v "$PWD:/work:Z" -w /work localhost/noscat-dev cargo run -p noscat -- keygen
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z -v "$PWD:/work:Z" \
+  -w /work localhost/noscat-dev cargo run -p noscat -- keygen
 ```
 
 ## License

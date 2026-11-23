@@ -1,4 +1,4 @@
-.TH NOSCAT 1 "2026" "noscat 0.1.0" "User Commands"
+.TH NOSCAT 1 "2026" "noscat 0.1.3" "User Commands"
 .SH NAME
 noscat \- like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts
 .SH SYNOPSIS
@@ -13,12 +13,23 @@ that identity. The data plane is direct end-to-end encryption over UDP with
 NAT hole punching; Nostr relays are only ever the discovery/signaling channel.
 The wire protocol is specified in the draft NIP shipped in the repository
 (docs/nip-noscat.md).
+.PP
+Every data-plane command shares one node identity per machine: the first run
+generates it and stores it at
+.I ~/.noscat/identity.hex
+(mode 0600), and later runs reuse it, so your npub is stable. Pass
+.B \-\-identity
+to override. Commands that listen print the npub and a scannable pairing QR
+(the QR encodes
+.IR noscat:<npub> )
+as soon as they are ready.
 .SH COMMANDS
 .TP
 .B keygen
 Generate a fresh ephemeral node identity. With
 .B \-\-show\-secret
-also prints the hex secret (nsec).
+also prints the hex secret (nsec). Rarely needed: the shared identity is
+created automatically on first use.
 .TP
 .B advertise
 Publish an overlay advert to relays so peers can discover this node.
@@ -32,12 +43,19 @@ Watch relays for noscat adverts from any node.
 .TP
 .B serve
 Serve a tunnel: advertise a UDP endpoint and bridge the first peer to stdio.
+Prints the npub and pairing QR immediately; Ctrl-C quits.
 .B \-\-listen <addr>
-(default 0.0.0.0:41641),
-.B \-\-identity <file>
-pins the identity across runs,
-.B \-\-tailnet <dir>
-restricts the tunnel to that tailnet's MLS group.
+(default 0.0.0.0:41641).
+.TP
+.B up
+The persistent tailnet node: prints its npub and pairing QR, accepts any
+number of inbound peers, saves inbound files into
+.B \-\-out
+(default: ~/Downloads), and bridges raw inbound tunnels to
+.B \-\-to <addr>
+(when given). Requires
+.B \-\-tailnet:
+membership is the authorization for inbound connections. Runs until Ctrl-C.
 .TP
 .BI pipe " target"
 Pipe stdio into a tunnel to a peer by npub. Local stdin EOF sends a FIN; the
@@ -53,7 +71,7 @@ into place.
 .B receive
 Receive one file over a tunnel into
 .B \-\-out
-(default: the current directory).
+(default: the current directory). Prints the npub and pairing QR immediately.
 .TP
 .BI "expose \-\-to " addr
 Expose a local TCP service to tailnet peers over tunnels: each tunnel is
@@ -73,39 +91,46 @@ authorization: the group's epoch secret becomes the tunnel PSK, so scoped
 tunnels only complete for current members. Removing a device ratchets the
 epoch and locks it out immediately.
 .PP
+The device directory holds the device identity and MLS state and defaults to
+.IR ~/.noscat/device ;
+pass
+.B \-\-dir <path>
+to keep several devices on one machine.
 .TP
-.B tailnet create \-\-dir ./device
+.B tailnet create
 Create a tailnet owned by this device's directory (once, on the owner).
 .TP
-.B tailnet publish \-\-dir ./device
+.B tailnet publish
 Publish this device's MLS key package so the owner can invite it.
 .TP
-.B tailnet invite <npub> \-\-dir ./device
+.B tailnet invite <npub>
 Invite a device into this (owner's) tailnet.
 .TP
-.B tailnet join \-\-dir ./device
+.B tailnet join
 Wait for a gift-wrapped invitation and join the tailnet.
 .TP
-.B tailnet members \-\-dir ./device
+.B tailnet members
 List the tailnet's members and epoch.
 .TP
-.B tailnet remove <npub> \-\-dir ./device
+.B tailnet remove <npub>
 Remove a device from this (owner's) tailnet; the epoch ratchets.
 .TP
-.B tailnet sync \-\-dir ./device
+.B tailnet sync
 Merge pending tailnet commits addressed to this device (run after an owner
 invited or removed someone).
 .TP
-.B tailnet psk \-\-dir ./device
+.B tailnet psk
 Print the tailnet's current epoch tunnel PSK (hex).
 .SH OPTIONS
 .B \-\-relay <url>
 is repeatable on most commands and overrides the default relays
 (wss://nos.lol, wss://relay.primal.net, wss://nostr.mom).
 .B \-\-identity
-takes a file (serve/receive/expose) or an nsec/hex secret (pipe/send/forward).
-.B \-\-tailnet <dir>
-scopes the tunnel to a tailnet (MLS membership becomes the authorization).
+overrides the default shared identity file
+(~/.noscat/identity.hex, auto-created on first use).
+.B \-\-tailnet [<dir>]
+scopes the tunnel to a tailnet (MLS membership becomes the authorization);
+the value is optional and defaults to ~/.noscat/device.
 .B \-\-listen <addr>
 binds UDP listeners. Use
 .B \-\-help
@@ -122,7 +147,7 @@ Failure (timeouts, path loss, bad identities, refused transfers).
 Server:
 .PP
 .nf
-    noscat serve \-\-listen 0.0.0.0:41641
+    noscat serve
 .fi
 .PP
 Client:
@@ -131,11 +156,19 @@ Client:
     echo hello | noscat pipe <server's npub>
 .fi
 .PP
+The node (scan its QR with a peer to learn its npub):
+.PP
+.nf
+    noscat tailnet create
+    noscat up \-\-tailnet
+    noscat up \-\-tailnet \-\-out ~/incoming \-\-to 127.0.0.1:22
+.fi
+.PP
 Tailnet-scoped file transfer:
 .PP
 .nf
-    noscat receive \-\-out ./incoming \-\-tailnet ./device-a
-    noscat send ./report.pdf <A's npub> \-\-tailnet ./device-b
+    noscat receive \-\-out ./incoming \-\-tailnet
+    noscat send ./report.pdf <A's npub> \-\-tailnet
 .fi
 .SH AUTHORS
 Letdown2491 and noscat contributors. MIT licensed;
