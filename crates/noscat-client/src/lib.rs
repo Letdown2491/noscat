@@ -130,6 +130,17 @@ pub enum Event {
         path: Option<PathBuf>,
         error: String,
     },
+    /// A one-shot chat message arrived over the node dispatcher.
+    ChatMessage {
+        peer: String,
+        text: String,
+    },
+    /// Sending a chat message failed (the UI keeps its optimistic copy and
+    /// can mark it undelivered).
+    ChatFailed {
+        peer: String,
+        error: String,
+    },
     /// A background operation (listener, expose, forward) stopped.
     Stopped {
         what: &'static str,
@@ -517,6 +528,26 @@ impl Client {
                                 error: e.to_string(),
                             }),
                         }
+                    } else if tag[0] == tunnel::TAG_CHAT {
+                        // One-shot chat: the rest of the stream is the
+                        // message, read to the sender's FIN. Echo a FIN so
+                        // the sender's read-to-EOF confirms delivery.
+                        use tokio::io::AsyncWriteExt as _;
+                        let mut text = Vec::new();
+                        let ok = stream.read_to_end(&mut text).await.is_ok()
+                            && std::str::from_utf8(&text)
+                                .map(|t| {
+                                    inner.emit(Event::ChatMessage { peer: who.clone(), text: t.to_string() });
+                                    true
+                                })
+                                .unwrap_or(false);
+                        if !ok {
+                            inner.emit(Event::ChatFailed {
+                                peer: who,
+                                error: "malformed chat message".into(),
+                            });
+                        }
+                        let _ = stream.shutdown().await;
                     } else if let Some(to) = bridge_to {
                         let mut prefixed = PrefixedStream::new(tag[0], stream);
                         match tokio::net::TcpStream::connect(to).await {
@@ -661,6 +692,43 @@ impl Client {
             }
         });
         Ok(addr)
+    }
+
+    /// Send a one-shot chat message to `target`: dial a tunnel, write the
+    /// text, and wait for the peer's delivery FIN. Returns immediately; a
+    /// failure surfaces as [`Event::ChatFailed`] (the caller keeps its
+    /// optimistic copy of the message).
+    pub fn send_chat(&self, target: &str, text: &str) {
+        let inner = self.inner.clone();
+        let target = target.to_string();
+        let text = text.to_string();
+        let rt = inner.rt.handle().clone();
+        rt.spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let res = match inner.dial(&target).await {
+                Ok((mut stream, _)) => {
+                    let mut payload = vec![tunnel::TAG_CHAT];
+                    payload.extend_from_slice(text.as_bytes());
+                    let sent = stream.write_all(&payload).await.is_ok()
+                        && stream.flush().await.is_ok()
+                        && stream.shutdown().await.is_ok();
+                    if !sent {
+                        Err("could not send".to_string())
+                    } else {
+                        // The peer echoes a FIN once the message is in hand.
+                        let mut sink = Vec::new();
+                        match stream.read_to_end(&mut sink).await {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            if let Err(error) = res {
+                inner.emit(Event::ChatFailed { peer: target, error });
+            }
+        });
     }
 
     /// Forward a local TCP port over tunnels to `target`: every connection

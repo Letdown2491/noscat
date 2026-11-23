@@ -588,10 +588,12 @@ impl Device {
         expected_owner: Option<PublicKey>,
     ) -> Result<(), TailnetError> {
         if self.group_id.is_some() {
-            return Err(TailnetError::Mls(format!(
-                "{} is already in a tailnet",
-                self.identity.npub()
-            )));
+            // Local state says this device is already a member. Forgetting a
+            // tailnet on the device (the mobile "disconnect") does not remove
+            // it from the group, so this is the normal path when rejoining
+            // after a disconnect: the existing membership is still valid.
+            eprintln!("# ✅ already a member of a tailnet - nothing to join");
+            return Ok(());
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(PublicKey, String)>(16);
         let watch = tokio::spawn(crate::traversal::watch_tailnet(

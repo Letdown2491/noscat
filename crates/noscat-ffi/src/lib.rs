@@ -68,6 +68,10 @@ pub enum Event {
     },
     /// A file transfer failed.
     TransferFailed { peer: String, error: String },
+    /// A one-shot chat message arrived over the node dispatcher.
+    ChatMessage { peer: String, text: String },
+    /// Sending a chat message failed.
+    ChatFailed { peer: String, error: String },
     /// A background operation stopped (the listener, a forward, ...).
     Stopped { what: String, error: Option<String> },
 }
@@ -285,6 +289,12 @@ impl NoscatClient {
                     noscat_client::Event::TransferFailed { peer, error, .. } => {
                         Event::TransferFailed { peer, error }
                     }
+                    noscat_client::Event::ChatMessage { peer, text } => {
+                        Event::ChatMessage { peer, text }
+                    }
+                    noscat_client::Event::ChatFailed { peer, error } => {
+                        Event::ChatFailed { peer, error }
+                    }
                     noscat_client::Event::Stopped { what, error } => {
                         Event::Stopped { what: what.to_string(), error }
                     }
@@ -343,6 +353,12 @@ impl NoscatClient {
     /// arrives as TransferDone (with the verified final path) / TransferFailed.
     pub fn receive_file(&self, out_dir: String) {
         self.lock().receive_file(std::path::PathBuf::from(out_dir));
+    }
+
+    /// Send a one-shot chat message to a peer. Returns immediately; a
+    /// failure arrives as ChatFailed (delivery is FIN-confirmed otherwise).
+    pub fn send_chat(&self, target_npub: String, text: String) {
+        self.lock().send_chat(&target_npub, &text);
     }
 
     /// Node mode (requires a tailnet-scoped client: membership is the

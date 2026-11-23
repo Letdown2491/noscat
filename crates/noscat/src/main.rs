@@ -514,6 +514,10 @@ fn main() -> anyhow::Result<()> {
             Event::Incoming { .. } => {}
             Event::TransferDone { .. } => {}
             Event::TransferProgress { .. } => {} // the CLI narrates completion only
+            Event::ChatMessage { peer, text } => {
+                println!("# 💬 {peer}: {text}")
+            }
+            Event::ChatFailed { .. } => {}
             Event::TransferFailed { error, .. } => {
                 eprintln!("# ⚠️  transfer failed: {error}")
             }

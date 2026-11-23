@@ -1191,6 +1191,9 @@ pub const TAG_HEADER: u8 = 1;
 pub const TAG_CHUNK: u8 = 2;
 pub const TAG_ACK: u8 = 3;
 pub const TAG_FIN: u8 = 4;
+/// Stream-type tag (first byte) for one-shot chat messages: the payload
+/// after the tag is UTF-8 text, read to the peer's FIN.
+pub const TAG_CHAT: u8 = 6;
 /// Header reply carrying the receiver's resume point: tag + u32 "next
 /// expected seq" (how many complete chunks it already holds on disk).
 const TAG_RESUME: u8 = 5;
