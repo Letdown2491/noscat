@@ -209,7 +209,13 @@ impl Device {
             .map_err(|e| MeshError::Mls(format!("cannot store signer: {e}")))?;
 
         // Group id is tracked in a small sidecar (storage holds the state).
-        let group_id = match std::fs::read_to_string(dir.join("mesh.json")) {
+        // Migrate the pre-rename sidecar name once (tailnet -> mesh).
+        let gid_path = dir.join("mesh.json");
+        let legacy_path = dir.join("tailnet.json");
+        if !gid_path.exists() && legacy_path.exists() {
+            std::fs::rename(&legacy_path, &gid_path)?;
+        }
+        let group_id = match std::fs::read_to_string(&gid_path) {
             Ok(json) => {
                 let gid: Vec<u8> = hex::decode(json.trim())?;
                 Some(GroupId::from_slice(&gid))
