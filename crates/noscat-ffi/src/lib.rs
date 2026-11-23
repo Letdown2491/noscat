@@ -71,6 +71,9 @@ pub enum Event {
     },
     /// A file transfer failed.
     TransferFailed { peer: String, error: String },
+    /// A file transfer was cancelled by this side (cancelTransfer): the
+    /// receiver keeps its resumable partial.
+    TransferCancelled { peer: String, path: String },
     /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage { peer: String, text: String },
     /// A peer shared their clipboard: put `text` on the system clipboard.
@@ -342,6 +345,9 @@ impl NoscatClient {
                     noscat_client::Event::TransferFailed { peer, error, .. } => {
                         Event::TransferFailed { peer, error }
                     }
+                    noscat_client::Event::TransferCancelled { peer, path } => {
+                        Event::TransferCancelled { peer, path: path.display().to_string() }
+                    }
                     noscat_client::Event::ChatMessage { peer, text } => {
                         Event::ChatMessage { peer, text }
                     }
@@ -403,6 +409,15 @@ impl NoscatClient {
     /// TransferDone / TransferFailed. Resume-aware, sha256-verified at the peer.
     pub fn send_file(&self, path: String, target_npub: String) {
         self.lock().send_file(std::path::PathBuf::from(path), &target_npub);
+    }
+
+    /// Cancel an in-flight send (same path and peer the send was started
+    /// with). The transfer stops between chunks, TransferCancelled fires,
+    /// and the receiver keeps its resumable partial. Returns false when no
+    /// such send is in flight (it may have already finished).
+    pub fn cancel_transfer(&self, path: String, target_npub: String) -> bool {
+        self.lock()
+            .cancel_transfer(&target_npub, std::path::Path::new(&path))
     }
 
     /// Receive one file into out_dir. Returns immediately; the outcome

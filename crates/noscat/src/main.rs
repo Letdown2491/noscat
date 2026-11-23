@@ -830,6 +830,9 @@ fn main() -> anyhow::Result<()> {
             Event::TransferFailed { error, .. } => {
                 eprintln!("# ⚠️  transfer failed: {error}")
             }
+            Event::TransferCancelled { path, .. } => {
+                eprintln!("# ✋ transfer cancelled: {} (the receiver keeps its partial; the next send resumes)", path.display())
+            }
         }
     }
 

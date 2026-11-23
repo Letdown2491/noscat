@@ -134,6 +134,13 @@ pub enum Event {
         path: Option<PathBuf>,
         error: String,
     },
+    /// A file transfer was cancelled by this side (see
+    /// [`Client::cancel_transfer`]): the receiver keeps its resumable
+    /// partial, and a later send of the same file resumes.
+    TransferCancelled {
+        peer: String,
+        path: PathBuf,
+    },
     /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage {
         peer: String,
@@ -236,6 +243,11 @@ struct Inner {
     /// Liveness of mesh-mates, fed by the advert watcher `up` starts.
     /// Shared and never reset: relay reconnects only pause the feed.
     presence: std::sync::Arc<noscat_core::relay::Presence>,
+    /// In-flight sends keyed by (peer, path string): their cancel flags.
+    /// `cancel_transfer` sets the flag; the send task removes the entry
+    /// when it ends (completed, failed, or cancelled).
+    cancels:
+        std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 impl Inner {
@@ -406,6 +418,7 @@ impl Client {
                 ttl: config.advert_ttl_secs,
                 events: tx,
                 presence: std::sync::Arc::new(noscat_core::relay::Presence::new()),
+                cancels: std::sync::Mutex::new(std::collections::HashMap::new()),
             }),
             events_rx: Some(rx),
         })
@@ -909,12 +922,20 @@ impl Client {
     }
 
     /// Send a file to a peer (resume-aware, sha256-verified at the peer).
-    /// Returns immediately; [`Event::TransferDone`]/[`TransferFailed`] report
-    /// the outcome.
+    /// Returns immediately; [`Event::TransferDone`]/[`Event::TransferFailed`]
+    /// report the outcome, [`Event::TransferCancelled`] a cancel (see
+    /// [`Client::cancel_transfer`]).
     pub fn send_file(&self, path: PathBuf, target: &str) {
         let inner = self.inner.clone();
         let target = target.to_string();
         let source = path.clone();
+        let key = (target.clone(), source.display().to_string());
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        inner
+            .cancels
+            .lock()
+            .expect("cancel registry")
+            .insert(key.clone(), flag.clone());
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             // One event per percent change: per-ack would cross the FFI
@@ -935,17 +956,26 @@ impl Client {
                 }
             };
             let psk = inner.fresh_psk();
-            match tunnel::send_file(
+            let outcome = tunnel::send_file(
                 &inner.identity,
                 &target,
                 &source,
                 &inner.relays,
                 psk.as_ref(),
                 Some(&progress),
+                Some(flag.as_ref()),
             )
-            .await
-            {
+            .await;
+            inner
+                .cancels
+                .lock()
+                .expect("cancel registry")
+                .remove(&key);
+            match outcome {
                 Ok(()) => inner.emit(Event::TransferDone { peer: target, path: source }),
+                Err(tunnel::TunnelError::TransferCancelled) => {
+                    inner.emit(Event::TransferCancelled { peer: target, path: source })
+                }
                 Err(e) => inner.emit(Event::TransferFailed {
                     peer: target,
                     path: Some(source),
@@ -957,9 +987,26 @@ impl Client {
 
     /// Receive one file into `out_dir`. Returns immediately; the outcome
     /// arrives as [`Event::TransferDone`] (path = the verified final file) or
+    /// Cancel an in-flight send: the transfer stops between chunks (within
+    /// one retry round), [`Event::TransferCancelled`] fires, and the
+    /// receiver keeps its resumable partial for a later send of the same
+    /// file. `path` is the source path the send was started with. Returns
+    /// false when no send to that peer with that path is in flight (it may
+    /// have already finished). The receive side has no cancel: it ends
+    /// when the sender stops.
+    pub fn cancel_transfer(&self, target: &str, path: &std::path::Path) -> bool {
+        let key = (target.to_string(), path.display().to_string());
+        match self.inner.cancels.lock().expect("cancel registry").get(&key) {
+            Some(flag) => {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// [`Event::TransferFailed`].
-    pub fn receive_file(&self, out_dir: PathBuf) {
-        let inner = self.inner.clone();
+    pub fn receive_file(&self, out_dir: PathBuf) {        let inner = self.inner.clone();
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let psk = inner.fresh_psk();

@@ -86,6 +86,8 @@ pub enum TunnelError {
     TransferStalled,
     #[error("transfer too large: {0} bytes exceeds the u32 chunk ceiling (~5 TiB)")]
     TransferTooLarge(u64),
+    #[error("transfer cancelled")]
+    TransferCancelled,
 }
 
 /// The identity's Noise keypair (public, private), derived from its secret -
@@ -1444,6 +1446,7 @@ async fn stream_chunks(
     file: &mut tokio::fs::File,
     first: u32,
     progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), TunnelError> {
     let mut wire = [0u8; BUF];
     let mut plain = [0u8; BUF];
@@ -1472,6 +1475,12 @@ async fn stream_chunks(
     loop {
         if base >= total {
             return Ok(());
+        }
+        // Sender-cancelled: stop between chunks (checked once per round,
+        // so a cancel takes effect within one retry cycle). The receiver
+        // keeps its partial and sidecar and can resume later.
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(TunnelError::TransferCancelled);
         }
         // Fill the window with fresh frames.
         while next < total && next - base < WINDOW {
@@ -1693,6 +1702,7 @@ pub async fn send_file(
     relays: &[String],
     psk: Option<&[u8; 32]>,
     progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), TunnelError> {
     let name = sanitize_name(
         path.file_name()
@@ -1725,7 +1735,7 @@ pub async fn send_file(
         name.display()
     );
 
-    send_stream(&socket, peer, &mut hs, path, &name, &file_sha, progress).await
+    send_stream(&socket, peer, &mut hs, path, &name, &file_sha, progress, cancel).await
 }
 
 /// The sender half of a file transfer over an established Noise session
@@ -1738,7 +1748,11 @@ async fn send_stream(
     name: &Path,
     file_sha: &[u8; 32],
     progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), TunnelError> {
+    // Cancellation points: the chunk loop (the long haul), plus a check
+    // before the FIN handshake so a cancel that lands while the last
+    // window drains still stops the transfer instead of completing it.
     let mut file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     let mut wire = [0u8; BUF];
@@ -1776,7 +1790,10 @@ async fn send_stream(
         );
     }
     if first < total_chunks {
-        stream_chunks(socket, peer, hs, total_chunks, len, &mut file, first, progress).await?;
+        stream_chunks(socket, peer, hs, total_chunks, len, &mut file, first, progress, cancel).await?;
+    }
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(TunnelError::TransferCancelled);
     }
 
     // -> FIN; completes when the receiver's cumulative ack reaches the
@@ -2383,7 +2400,7 @@ mod tests {
         let mut src = tokio::fs::File::open(&src_path).await.unwrap();
         let mut dst = tokio::fs::File::create(&dst_path).await.unwrap();
         let sender = tokio::spawn(async move {
-            stream_chunks(&send_sock, proxy_addr, &mut ti, total, len, &mut src, 0, None)
+            stream_chunks(&send_sock, proxy_addr, &mut ti, total, len, &mut src, 0, None, None)
                 .await
                 .unwrap();
         });
@@ -2518,7 +2535,7 @@ mod tests {
         let src_path2 = src_path.clone();
         let name2 = name.clone();
         let sender = tokio::spawn(async move {
-            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None).await
+            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None, None).await
         });
         let out_dir2 = out_dir.clone();
         let receiver =
@@ -2586,7 +2603,7 @@ mod tests {
         let src_path2 = src_path.clone();
         let name2 = name.clone();
         let sender = tokio::spawn(async move {
-            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None).await
+            send_stream(&send_sock, raddr, &mut ti, &src_path2, &name2, &sha_bytes, None, None).await
         });
         let out_dir2 = out_dir.clone();
         let receiver =
@@ -2600,5 +2617,74 @@ mod tests {
         let _ = tokio::fs::remove_file(&src_path).await;
         let _ = tokio::fs::remove_dir_all(&out_dir).await;
         let _ = len;
+    }
+
+    /// Sender-cancelled transfers stop mid-stream: the chunk loop checks
+    /// the flag once per round and returns `TransferCancelled` - no FIN,
+    /// no completion - leaving the receiver a resumable partial.
+    #[tokio::test]
+    async fn send_stream_honours_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        let (send_sock, recv_sock, mut ti, mut tr, saddr, raddr) = handshake_pair().await;
+
+        // 2 MiB: enough windows that the cancel (set at half acked) lands
+        // well before the transfer would finish.
+        let data = vec![7u8; 2 * 1024 * 1024];
+        let dir = std::env::temp_dir();
+        let src_path = dir.join("noscat-cancel-src.bin");
+        tokio::fs::write(&src_path, &data).await.unwrap();
+        let len = data.len() as u64;
+        let file_sha: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(&data).into()
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_hit = cancel.clone();
+        let progress = move |acked: u64, total: u64| {
+            if acked * 2 >= total {
+                cancel_hit.store(true, AtomicOrdering::Relaxed);
+            }
+        };
+
+        let out_dir = dir.join("noscat-cancel-out");
+        tokio::fs::create_dir_all(&out_dir).await.unwrap();
+        let name = std::path::PathBuf::from("cancel-test.bin");
+
+        let src_path2 = src_path.clone();
+        let sender = tokio::spawn(async move {
+            send_stream(
+                &send_sock,
+                raddr,
+                &mut ti,
+                &src_path2,
+                &name,
+                &file_sha,
+                Some(&progress),
+                Some(&cancel),
+            )
+            .await
+        });
+        let out_dir2 = out_dir.clone();
+        let receiver = tokio::spawn(async move {
+            receive_stream("peer", &recv_sock, saddr, &mut tr, &out_dir2).await
+        });
+
+        let sent = sender.await.unwrap();
+        receiver.abort();
+
+        assert!(matches!(sent, Err(TunnelError::TransferCancelled)));
+        let partial = out_dir.join("cancel-test.bin.noscat-part");
+        let got = tokio::fs::read(&partial).await.expect("receiver keeps a partial");
+        assert!(got.len() > 0, "half the file was acked before the cancel");
+        assert!(
+            got.len() < len as usize,
+            "cancel must land before completion"
+        );
+        assert!(got.iter().all(|b| *b == 7), "the partial is a clean prefix");
+
+        let _ = tokio::fs::remove_file(&src_path).await;
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
     }
 }
