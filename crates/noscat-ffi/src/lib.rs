@@ -74,10 +74,16 @@ pub enum Event {
     /// A file transfer was cancelled by this side (cancelTransfer): the
     /// receiver keeps its resumable partial.
     TransferCancelled { peer: String, path: String },
+    /// A forward ended: cancelled (error None) or failed (error set).
+    /// The id lets the UI drop it from its forward list.
+    ForwardStopped { id: u64, error: Option<String> },
     /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage { peer: String, text: String },
     /// A peer shared their clipboard: put `text` on the system clipboard.
     Clipboard { peer: String, text: String },
+    /// A chat message or clipboard share was delivered: the peer echoed
+    /// the tunnel's FIN. The "delivered" tick.
+    ChatDelivered { peer: String },
     /// Sending a chat message failed.
     ChatFailed { peer: String, error: String },
     /// A background operation stopped (the listener, a forward, ...).
@@ -108,6 +114,18 @@ pub fn identity_from_secret(secret: String) -> Result<Identity, NoscatError> {
         npub: id.npub(),
         secret_hex: id.secret_hex(),
     })
+}
+
+/// A forward the device is running: one local TCP listener whose
+/// connections each dial a tunnel to the target.
+#[derive(uniffi::Record)]
+pub struct ForwardInfo {
+    /// The id from `forward()`; the key for `cancelForward`.
+    pub id: u64,
+    /// The npub every connection dials.
+    pub target: String,
+    /// The local TCP address the listener is on (e.g. "127.0.0.1:8080").
+    pub local: String,
 }
 
 /// A member device of a mesh group: how the UI's device list shows it.
@@ -348,6 +366,9 @@ impl NoscatClient {
                     noscat_client::Event::TransferCancelled { peer, path } => {
                         Event::TransferCancelled { peer, path: path.display().to_string() }
                     }
+                    noscat_client::Event::ForwardStopped { id, error } => {
+                        Event::ForwardStopped { id, error }
+                    }
                     noscat_client::Event::ChatMessage { peer, text } => {
                         Event::ChatMessage { peer, text }
                     }
@@ -356,6 +377,9 @@ impl NoscatClient {
                     }
                     noscat_client::Event::ChatFailed { peer, error } => {
                         Event::ChatFailed { peer, error }
+                    }
+                    noscat_client::Event::ChatDelivered { peer } => {
+                        Event::ChatDelivered { peer }
                     }
                     noscat_client::Event::Stopped { what, error } => {
                         Event::Stopped { what: what.to_string(), error }
@@ -384,13 +408,32 @@ impl NoscatClient {
     /// Forward a local port over a tunnel to a peer running `expose`:
     /// localhost:port on this device becomes the peer's service. Returns
     /// immediately; progress arrives as events.
-    pub fn forward(&self, target_npub: String, local_port: u16) -> Result<(), NoscatError> {
+    pub fn forward(&self, target_npub: String, local_port: u16) -> Result<u64, NoscatError> {
+        Ok(self.lock().forward(
+            &target_npub,
+            std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
+        ))
+    }
+
+    /// The forwards currently running (id, dial target, local listen
+    /// address): the UI's per-device forwards list.
+    pub fn list_forwards(&self) -> Vec<ForwardInfo> {
         self.lock()
-            .forward(
-                &target_npub,
-                std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
-            )
-            .map_err(NoscatError::fail)
+            .list_forwards()
+            .into_iter()
+            .map(|f| ForwardInfo {
+                id: f.id,
+                target: f.target,
+                local: f.local.to_string(),
+            })
+            .collect()
+    }
+
+    /// Stop a forward by id (listener closes; live connections finish
+    /// naturally). Returns false when no such forward is running. A
+    /// confirming Event::ForwardStopped (error None) follows.
+    pub fn cancel_forward(&self, id: u64) -> bool {
+        self.lock().cancel_forward(id)
     }
 
     /// Expose a peer-reachable TCP service of this device (host:port) over

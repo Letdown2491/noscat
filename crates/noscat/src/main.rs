@@ -814,6 +814,9 @@ fn main() -> anyhow::Result<()> {
             Event::ChatFailed { peer, error } => {
                 eprintln!("# ⚠️  message to {}... not delivered: {error}", &peer[..peer.len().min(16)])
             }
+            Event::ChatDelivered { peer } => {
+                eprintln!("# ✓ delivered to {}...", &peer[..peer.len().min(16)])
+            }
             Event::Clipboard { peer, text } => {
                 let label = peers
                     .and_then(|b| b.lock().ok().map(|b| b.label(&peer)))
@@ -832,6 +835,12 @@ fn main() -> anyhow::Result<()> {
             }
             Event::TransferCancelled { path, .. } => {
                 eprintln!("# ✋ transfer cancelled: {} (the receiver keeps its partial; the next send resumes)", path.display())
+            }
+            Event::ForwardStopped { id, error: Some(e) } => {
+                eprintln!("# ⚠️  forward {id} failed: {e}")
+            }
+            Event::ForwardStopped { id, error: None } => {
+                eprintln!("# ✋ forward {id} stopped")
             }
         }
     }
@@ -1113,11 +1122,12 @@ fn main() -> anyhow::Result<()> {
             };
             let local = std::net::SocketAddr::new(bind, port);
             let (client, rx) = make_client(identity, relays, mesh, None, 3600, None)?;
-            client.forward(&target, local)?;
-            eprintln!("# 🐈 forwarding tcp/{local} over tunnels to {target}");
+            let id = client.forward(&target, local);
+            eprintln!("# 🐈 forward {id}: tcp/{local} over tunnels to {target}");
             for ev in rx {
                 match &ev {
                     Event::Stopped { error: Some(e), .. } => anyhow::bail!("{e}"),
+                    Event::ForwardStopped { error: Some(e), .. } => anyhow::bail!("{e}"),
                     _ => {}
                 }
                 print_event(ev, None);

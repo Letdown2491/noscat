@@ -141,6 +141,13 @@ pub enum Event {
         peer: String,
         path: PathBuf,
     },
+    /// A forward ended: it was cancelled ([`Client::cancel_forward`]) or
+    /// failed (`error` set - bind failure, accept failure). The id lets
+    /// the UI drop it from its forward list.
+    ForwardStopped {
+        id: u64,
+        error: Option<String>,
+    },
     /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage {
         peer: String,
@@ -157,6 +164,12 @@ pub enum Event {
     ChatFailed {
         peer: String,
         error: String,
+    },
+    /// A chat message or clipboard share was delivered: the peer echoed
+    /// the tunnel's FIN once the text was in hand. The UI's "delivered"
+    /// tick.
+    ChatDelivered {
+        peer: String,
     },
     /// A background operation (listener, expose, forward) stopped.
     Stopped {
@@ -248,6 +261,28 @@ struct Inner {
     /// when it ends (completed, failed, or cancelled).
     cancels:
         std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Active forwards: id -> entry. `cancel_forward` wakes the accept
+    /// loop; the forward's own task removes the entry when it ends.
+    forwards: std::sync::Mutex<std::collections::HashMap<u64, ForwardEntry>>,
+    next_forward_id: std::sync::atomic::AtomicU64,
+}
+
+/// A running forward: what it dials, where it listens, and the wake that
+/// stops its accept loop.
+struct ForwardEntry {
+    target: String,
+    local: SocketAddr,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// A forward as the UI's list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardInfo {
+    pub id: u64,
+    /// The npub the forward dials per connection.
+    pub target: String,
+    /// The local TCP address it listens on.
+    pub local: SocketAddr,
 }
 
 impl Inner {
@@ -419,6 +454,8 @@ impl Client {
                 events: tx,
                 presence: std::sync::Arc::new(noscat_core::relay::Presence::new()),
                 cancels: std::sync::Mutex::new(std::collections::HashMap::new()),
+                forwards: std::sync::Mutex::new(std::collections::HashMap::new()),
+                next_forward_id: std::sync::atomic::AtomicU64::new(1),
             }),
             events_rx: Some(rx),
         })
@@ -809,6 +846,8 @@ impl Client {
             };
             if let Err(error) = res {
                 inner.emit(Event::ChatFailed { peer: target, error });
+            } else {
+                inner.emit(Event::ChatDelivered { peer: target });
             }
         });
     }
@@ -847,34 +886,69 @@ impl Client {
             };
             if let Err(error) = res {
                 inner.emit(Event::ChatFailed { peer: target, error });
+            } else {
+                inner.emit(Event::ChatDelivered { peer: target });
             }
         });
     }
 
     /// Forward a local TCP port over tunnels to `target`: every connection
     /// to `local` dials a fresh tunnel and splices through. Returns
-    /// immediately; runs until the client is dropped.
-    pub fn forward(&self, target: &str, local: SocketAddr) -> Result<(), ClientError> {
+    /// immediately with the forward's id (for [`Client::list_forwards`] /
+    /// [`Client::cancel_forward`]); runs until cancelled or the client is
+    /// dropped. A bind or accept failure arrives as
+    /// [`Event::ForwardStopped`] with the error set.
+    pub fn forward(&self, target: &str, local: SocketAddr) -> u64 {
         let inner = self.inner.clone();
+        let id = inner
+            .next_forward_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        inner.forwards.lock().expect("forward registry").insert(
+            id,
+            ForwardEntry {
+                target: target.to_string(),
+                local,
+                cancel: cancel.clone(),
+            },
+        );
         let target = target.to_string();
         let rt = inner.rt.handle().clone();
         rt.spawn(async move {
             let tcp = match tokio::net::TcpListener::bind(local).await {
                 Ok(t) => t,
                 Err(e) => {
-                    inner.emit(Event::Stopped {
-                        what: "forward",
-                        error: Some(e.to_string()),
+                    inner
+                        .forwards
+                        .lock()
+                        .expect("forward registry")
+                        .remove(&id);
+                    inner.emit(Event::ForwardStopped {
+                        id,
+                        error: Some(format!("{local}: {e}")),
                     });
                     return;
                 }
             };
             loop {
-                let (conn, client) = match tcp.accept().await {
+                let accepted = tokio::select! {
+                    _ = cancel.notified() => {
+                        inner.forwards.lock().expect("forward registry").remove(&id);
+                        inner.emit(Event::ForwardStopped { id, error: None });
+                        return;
+                    }
+                    accepted = tcp.accept() => accepted,
+                };
+                let (conn, client) = match accepted {
                     Ok(c) => c,
                     Err(e) => {
-                        inner.emit(Event::Stopped {
-                            what: "forward",
+                        inner
+                            .forwards
+                            .lock()
+                            .expect("forward registry")
+                            .remove(&id);
+                        inner.emit(Event::ForwardStopped {
+                            id,
                             error: Some(e.to_string()),
                         });
                         return;
@@ -918,7 +992,44 @@ impl Client {
                 h.await.map_err(|e| io::Error::other(e))?
             }
         });
-        Ok(())
+        id
+    }
+
+    /// The forwards currently running: id, dial target, local listen
+    /// address. A forward that just failed may linger here until its task
+    /// cleans up; its [`Event::ForwardStopped`] reconciles the UI.
+    pub fn list_forwards(&self) -> Vec<ForwardInfo> {
+        self.inner
+            .forwards
+            .lock()
+            .expect("forward registry")
+            .iter()
+            .map(|(id, e)| ForwardInfo {
+                id: *id,
+                target: e.target.clone(),
+                local: e.local,
+            })
+            .collect()
+    }
+
+    /// Stop a forward: its accept loop ends (the listener closes; live
+    /// tunnel connections finish naturally). Returns false when no
+    /// forward with that id is running. A confirming
+    /// [`Event::ForwardStopped`] (with no error) follows.
+    pub fn cancel_forward(&self, id: u64) -> bool {
+        match self
+            .inner
+            .forwards
+            .lock()
+            .expect("forward registry")
+            .get(&id)
+        {
+            Some(entry) => {
+                entry.cancel.notify_one();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Send a file to a peer (resume-aware, sha256-verified at the peer).
