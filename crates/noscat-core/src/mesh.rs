@@ -32,6 +32,12 @@ use crate::identity::Identity;
 pub const KEY_PACKAGE_KIND: u16 = 30443;
 /// Draft slot for gift-wrapped mesh messages (Welcomes, later commits).
 pub const MESH_KIND: u16 = 30444;
+
+/// How many merged commits the owner keeps in `commits.json` for
+/// `mesh resend`. Small by design: each resend re-publishes the whole
+/// chain oldest first (a straggler must merge them in order), and eight
+/// covers any realistic straggle window between membership changes.
+const COMMIT_JOURNAL_KEEP: usize = 8;
 /// Replaceable `d` tag scoping a device's key package to one slot.
 pub const KEY_PACKAGE_IDENTIFIER: &str = "noscat-mesh-kp-v1";
 /// Exporter label for the tunnel PSK (see `crate::tunnel`).
@@ -69,6 +75,8 @@ pub enum MeshError {
     NoMesh(PathBuf),
     #[error("timed out waiting for a mesh invitation")]
     JoinTimeout,
+    #[error("not stored by any relay for: {0} (run `mesh resend` on the owner once the relays answer again)")]
+    Delivery(String),
     #[error("commit rejected: {0} is not authorized to change the mesh (policy is owner-only)")]
     PolicyViolation(String),
 }
@@ -243,6 +251,36 @@ impl Device {
         Ok(())
     }
 
+    /// Append a merged commit to the owner's journal (`commits.json` in
+    /// the device dir, oldest first, last [`COMMIT_JOURNAL_KEEP`] kept).
+    /// This is the healing store for `mesh resend`: a member that missed
+    /// the live fan-out (the wrap was never stored by any relay) can only
+    /// be fixed by the owner re-publishing the commit - backfill fetches
+    /// what relays stored, and this never was.
+    fn record_commit(&self, commit_hex: &str) -> Result<(), MeshError> {
+        let mut journal = self.commit_journal()?;
+        journal.push(commit_hex.to_string());
+        let len = journal.len();
+        if len > COMMIT_JOURNAL_KEEP {
+            journal.drain(..len - COMMIT_JOURNAL_KEEP);
+        }
+        let path = self.dir.join("commits.json");
+        std::fs::write(&path, serde_json::to_vec(&journal)?)
+            .map_err(|e| MeshError::Mls(format!("write {}: {e}", path.display())))
+    }
+
+    /// The owner's merged-commit journal, oldest first. An empty or absent
+    /// journal just means "nothing to resend" (or this device is not the
+    /// owner - only owners commit, so only owners have entries).
+    fn commit_journal(&self) -> Result<Vec<String>, MeshError> {
+        let path = self.dir.join("commits.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(MeshError::Mls(format!("read {}: {e}", path.display()))),
+        }
+    }
+
     /// The group's current epoch tunnel PSK. Membership is authorization.
     pub fn tunnel_psk(&self) -> Result<Vec<u8>, MeshError> {
         let group = self.group()?;
@@ -411,11 +449,12 @@ impl Device {
             .merge_pending_commit(&self.provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         self.persist()?;
+        let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+        self.record_commit(&commit_hex)?;
 
         let MlsMessageBodyOut::Welcome(welcome) = welcome.body() else {
             return Err(MeshError::Mls("expected a Welcome from add_members".into()));
         };
-        let commit_hex = hex::encode(commit.tls_serialize_detached()?);
         let invitee_payload = serde_json::to_string(&MeshMessage {
             commit: commit_hex.clone(),
             welcome: Some(hex::encode(welcome.tls_serialize_detached()?)),
@@ -466,9 +505,11 @@ impl Device {
             .merge_pending_commit(&self.provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
         self.persist()?;
+        let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+        self.record_commit(&commit_hex)?;
 
         let payload = serde_json::to_string(&MeshMessage {
-            commit: hex::encode(commit.tls_serialize_detached()?),
+            commit: commit_hex,
             welcome: None,
         })?;
         let remaining: Vec<PublicKey> = group
@@ -481,6 +522,61 @@ impl Device {
             .map(|m| (*m, payload.as_str()))
             .collect();
         self.send_gift_waps(relays, &items).await
+    }
+
+    /// Re-publish the owner's recorded commit chain (the `commits.json`
+    /// journal, oldest first) to every other member, or to the one named
+    /// by `to`. The healing path for a member stranded at a stale epoch:
+    /// its own `mesh sync` cannot help when the original wrap was never
+    /// stored by any relay - this re-gift-wraps the commits so the next
+    /// sync (live or backfill) delivers them. Already-current members
+    /// skip the replays by epoch, so resending is safe mid-flight.
+    /// Returns how many gift wraps went out. Only the owner has a journal
+    /// (only the owner commits), so anywhere else this is an error.
+    pub async fn resend_commits(
+        &mut self,
+        to: Option<PublicKey>,
+        relays: &[String],
+    ) -> Result<usize, MeshError> {
+        if self.group_id.is_none() {
+            return Err(MeshError::NoMesh(self.dir.clone()));
+        }
+        let journal = self.commit_journal()?;
+        if journal.is_empty() {
+            return Err(MeshError::Mls(
+                "no recorded commits to resend (only the mesh owner commits; \
+                 run this on the owner's device)"
+                    .into(),
+            ));
+        }
+        let group = self.group()?;
+        let targets: Vec<PublicKey> = match to {
+            Some(pk) => vec![pk],
+            None => group
+                .members()
+                .filter(|m| m.credential.serialized_content() != self.identity.public_key().to_bytes())
+                .map(|m| PublicKey::from_slice(m.credential.serialized_content()))
+                .collect::<Result<_, _>>()?,
+        };
+        if targets.is_empty() {
+            return Err(MeshError::Mls("no other members to resend to".into()));
+        }
+        let mut items: Vec<(PublicKey, &str)> = Vec::new();
+        let mut owned = Vec::new();
+        for commit_hex in &journal {
+            owned.push(serde_json::to_string(&MeshMessage {
+                commit: commit_hex.clone(),
+                welcome: None,
+            })?);
+        }
+        for target in &targets {
+            for payload in &owned {
+                items.push((*target, payload.as_str()));
+            }
+        }
+        let sent = items.len();
+        self.send_gift_waps(relays, &items).await?;
+        Ok(sent)
     }
 
     /// Receive gift-wrapped mesh messages for up to `wait` and merge any
@@ -731,9 +827,24 @@ impl Device {
     /// fan-out to several members opens ONE connection set, not one per
     /// member (relay connects are the expensive, rate-limit-earning part).
     /// Single-recipient sends are the `(to, payload)` list of length one.
+    ///
+    /// A send counts as delivered only when at least one relay ACKs the
+    /// event with `OK` (the `success` map of the send output); a bare
+    /// absence of error means nothing. Undelivered recipients are retried
+    /// (fresh gift wraps, since the timestamp must move) before the caller
+    /// hears about it: an unacknowledged commit fan-out is how members get
+    /// stranded at a stale epoch - the owner has merged and persisted, and
+    /// a wrap that no relay stored is unrecoverable by backfill. What
+    /// still fails after the retries comes back as [`MeshError::Delivery`]
+    /// naming the npubs; the commit itself is safely merged on the owner
+    /// and recoverable via `mesh resend`.
     async fn send_gift_waps(&self, relays: &[String], items: &[(PublicKey, &str)]) -> Result<(), MeshError> {
-        let mut client: Option<crate::relay::RelayClient> = None;
-        let mut last_err: Option<MeshError> = None;
+        const ATTEMPTS: usize = 3;
+        const RETRY_PAUSE: Duration = Duration::from_secs(2);
+
+        // A wrap that fails to BUILD is a bug in our payload, not a relay
+        // problem: it aborts immediately, before any send.
+        let mut wraps: Vec<(PublicKey, Event)> = Vec::with_capacity(items.len());
         for (to, payload) in items {
             let rumor = UnsignedEvent::new(
                 self.identity.public_key(),
@@ -746,23 +857,60 @@ impl Device {
                 .expiration(Duration::from_secs(7 * 24 * 3600))
                 .finalize(self.identity.keys())
                 .map_err(|e| MeshError::Nostr(e))?;
+            wraps.push((*to, gift_wrap));
+        }
+
+        let mut client: Option<crate::relay::RelayClient> = None;
+        let mut undelivered: Vec<PublicKey> = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                if undelivered.is_empty() {
+                    break;
+                }
+                tracing::info!(n = undelivered.len(), "retrying undelivered gift wraps");
+                tokio::time::sleep(RETRY_PAUSE).await;
+            }
             // Connect lazily: a single-recipient send is the common case
-            // (sync_mesh commits go to N-1, invites to N).
+            // (sync_mesh commits go to N-1, invites to N). Reconnect on a
+            // retry: the previous session may be the thing that died.
             if client.is_none() {
                 client = Some(crate::relay::connect_client(relays).await?);
             }
             let c = client.as_ref().expect("just connected");
-            if let Err(e) = c.send_event(&gift_wrap).await {
-                tracing::warn!(%to, %e, "gift wrap failed");
-                last_err = Some(MeshError::Sdk(e));
+            let pending = std::mem::take(&mut undelivered);
+            for (to, gift_wrap) in &wraps {
+                // After the first attempt only the stragglers go out.
+                if attempt > 0 && !pending.contains(to) {
+                    continue;
+                }
+                match c.send_event(gift_wrap).await {
+                    Ok(output) if !output.success.is_empty() => {}
+                    Ok(output) => {
+                        for (url, err) in &output.failed {
+                            tracing::warn!(%url, %err, %to, "relay rejected gift wrap");
+                        }
+                        undelivered.push(*to);
+                    }
+                    Err(e) => {
+                        tracing::warn!(%to, %e, "gift wrap send failed");
+                        undelivered.push(*to);
+                    }
+                }
             }
         }
         if let Some(c) = client.as_ref() {
             c.shutdown().await;
         }
-        match last_err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        match undelivered.is_empty() {
+            true => Ok(()),
+            false => {
+                let list = undelivered
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(MeshError::Delivery(list))
+            }
         }
     }
 
@@ -1075,6 +1223,68 @@ mod tests {
         let reopened = Device::open(&dir)?;
         assert_eq!(reopened.identity.npub(), npub);
         assert_eq!(reopened.tunnel_psk()?, psk);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    /// The owner's commit journal (the `mesh resend` healing store):
+    /// round-trips oldest first, and keeps only the most recent entries.
+    #[test]
+    fn commit_journal_roundtrips_and_caps() -> Result<(), MeshError> {
+        let dir = std::env::temp_dir().join(format!(
+            "noscat-mesh-test-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        let device = Device::open(&dir)?;
+
+        for i in 0..10 {
+            device.record_commit(&format!("{i:064}"))?;
+        }
+        let journal = device.commit_journal()?;
+        assert_eq!(journal.len(), COMMIT_JOURNAL_KEEP, "journal is capped");
+        assert_eq!(
+            journal.first().map(String::as_str),
+            Some(format!("{:064}", 2).as_str())
+        );
+        assert_eq!(
+            journal.last().map(String::as_str),
+            Some(format!("{:064}", 9).as_str()),
+            "oldest first: the newest commit is last"
+        );
+        // Appends survive a reopen: the journal lives in the device dir.
+        let reopened = Device::open(&dir)?;
+        assert_eq!(reopened.commit_journal()?, journal);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    /// `resend_commits` refuses to run outside a mesh, and on an owner
+    /// device that has committed nothing (an empty journal - e.g. a member
+    /// device, which never commits). Both are local checks: no network.
+    #[test]
+    fn resend_refuses_no_mesh_or_empty_journal() -> Result<(), MeshError> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let dir = std::env::temp_dir().join(format!(
+            "noscat-mesh-test-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        let mut device = Device::open(&dir)?;
+
+        let no_mesh = rt.block_on(device.resend_commits(None, &[]));
+        assert!(matches!(no_mesh, Err(MeshError::NoMesh(_))));
+
+        device.create_mesh()?;
+        let empty = rt.block_on(device.resend_commits(None, &[]));
+        assert!(
+            matches!(&empty, Err(MeshError::Mls(m)) if m.contains("no recorded commits")),
+            "an empty journal must read as 'nothing to resend': {empty:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

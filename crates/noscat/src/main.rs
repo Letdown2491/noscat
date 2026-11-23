@@ -282,6 +282,22 @@ enum MeshCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
+    /// Re-publish this (owner) device's mesh commit chain so a member
+    /// stranded at a stale epoch can catch up. Needed when a commit's
+    /// gift wrap was never stored by any relay: the stranded member's own
+    /// `mesh sync` can only fetch what the relays hold. Safe to run any
+    /// time - up-to-date members skip the replays by epoch.
+    Resend {
+        /// The device directory of *this* (owner) device.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+        /// Resend to this one member (npub) instead of every member.
+        #[arg(long)]
+        to: Option<String>,
+        /// Relay URLs (repeatable; defaults to the public set).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+    },
     /// Print the mesh's current epoch tunnel PSK (hex).
     Psk {
         /// Device directory holding the identity and MLS state.
@@ -1273,6 +1289,28 @@ fn spawn_printer(
                         std::time::Duration::from_secs(for_secs),
                     ))?;
                     eprintln!("# ✅ synced: {merged} commit(s) merged");
+                    if merged == 0 {
+                        eprintln!(
+                            "# ℹ️  nothing merged. If other members' dials still fail with\n\
+                             #    handshake timeouts, their epoch may be stranded: the owner\n\
+                             #    should run `noscat mesh resend` to re-publish the commits."
+                        );
+                    }
+                }
+                MeshCommand::Resend { dir, to, relays } => {
+                    let mut device = noscat_core::mesh::Device::open(&dir)?;
+                    let target = match &to {
+                        Some(npub) => Some(
+                            nostr::prelude::PublicKey::parse(npub)
+                                .map_err(|e| anyhow::anyhow!("bad npub: {e}"))?,
+                        ),
+                        None => None,
+                    };
+                    let sent = rt.block_on(device.resend_commits(target, &relays_or_default(relays)))?;
+                    match to {
+                        Some(npub) => eprintln!("# ✅ resent {sent} commit(s) to {npub}"),
+                        None => eprintln!("# ✅ resent {sent} commit(s) to every member"),
+                    }
                 }
                 MeshCommand::Psk { dir } => {
                     let device = noscat_core::mesh::Device::open(&dir)?;

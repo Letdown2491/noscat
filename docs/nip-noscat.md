@@ -363,6 +363,12 @@ authenticates the scanner to the holder just as any other dial would.
    them oldest-epoch first, so a device that missed a live commit catches
    up instead of staying stranded at the old epoch; replays of
    already-merged commits MUST be skipped, never fatal.
+5a. `resend` (owner): re-gift-wrap the owner's recent commits to all (or
+   one) members. Commit fan-out SHOULD treat a relay `OK` acknowledgement
+   as delivery and retry failures before reporting success; a wrap stored
+   by no relay is unrecoverable by backfill, so owners SHOULD keep the
+   last commits they merged and re-publish them on request. Replays are
+   safe: receivers skip commits at or below their epoch.
 6. `serve`/`pipe`/`connect`: resolve the peer's advert, establish the Noise
    session (XKpsk0 when a mesh is in scope), and pump bytes.
 7. `send`/`receive`: run the file-transfer framing above over the session;

@@ -275,6 +275,34 @@ pub fn mesh_sync(
     })
 }
 
+/// Re-publish the mesh owner's recorded commit chain (see `mesh_sync`)
+/// so a member stranded at a stale epoch can catch up. `to_npub` limits
+/// the resend to one member; `None` resends to every member. Run this on
+/// the OWNER's device: only the owner commits, so only the owner has the
+/// journal. Up-to-date members skip the replays by epoch.
+/// Returns how many gift wraps were sent.
+#[uniffi::export]
+pub fn mesh_resend(
+    dir: String,
+    to_npub: Option<String>,
+    relays: Option<Vec<String>>,
+) -> Result<u32, NoscatError> {
+    let rt = mesh_runtime()?;
+    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
+        .map_err(NoscatError::fail)?;
+    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
+    let target = match &to_npub {
+        Some(npub) => Some(
+            nostr::prelude::PublicKey::parse(npub).map_err(NoscatError::fail)?,
+        ),
+        None => None,
+    };
+    let sent = rt
+        .block_on(device.resend_commits(target, &relays))
+        .map_err(NoscatError::fail)?;
+    Ok(sent as u32)
+}
+
 fn members_of(device: noscat_core::mesh::Device) -> Result<Vec<MeshMember>, NoscatError> {
     use nostr::nips::nip19::ToBech32;
     let mut out = Vec::new();

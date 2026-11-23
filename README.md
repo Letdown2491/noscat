@@ -182,6 +182,15 @@ noscat mesh remove <B's npub>
 noscat mesh sync
 ```
 
+If a member stays stranded (its dials fail with handshake timeouts, its
+roster is stale), a commit's gift wrap may never have been stored by any
+relay - no backfill can fetch what was never there. The owner re-publishes
+its commit chain, and the member syncs again:
+
+```
+noscat mesh resend   # on the owner; --to <npub> targets one member
+```
+
 Both devices now derive the same epoch PSK. Removing a device ratchets the
 MLS epoch: the removed device's PSK goes stale immediately, so its handshakes
 fail cryptographically even if it keeps trying. Scope any tunnel to the group

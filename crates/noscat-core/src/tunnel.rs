@@ -74,7 +74,7 @@ pub enum TunnelError {
     Json(#[from] serde_json::Error),
     #[error("no advert for {0} found on the relays within {1:?}")]
     AdvertTimeout(String, Duration),
-    #[error("handshake timed out (NAT or firewall is not letting the peers through)")]
+    #[error("handshake timed out (NAT or firewall is not letting the peers through; in a mesh, a stale epoch on either side looks the same - both devices should run `noscat mesh sync`, and the owner `noscat mesh resend` if that merges nothing)")]
     HandshakeTimeout,
     #[error("peer did not complete the handshake")]
     NoHandshake,
