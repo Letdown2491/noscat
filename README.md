@@ -47,7 +47,7 @@ and a man page.
 ## Status
 
 **Working** - three layers, each verified live across containers over public relays
-(`wss://nos.lol`, `wss://relay.primal.net`, `wss://nostr.mom`):
+(`wss://relay.primal.net`, `wss://nostr.mom`):
 
 1. **Tunnels** (netcat mode): identity → relay advert → discovery → Noise-XK handshake
    over UDP → stdio bridge, with STUN reflexive discovery and NIP-59 gift-wrapped
