@@ -441,7 +441,11 @@ impl Client {
             IdentitySource::File(path) => {
                 if !path.exists() {
                     // First run on this node: generate the identity and store
-                    // it, so `--identity <file>` is the whole setup.
+                    // it, so `--identity <file>` is the whole setup. Durable
+                    // and owner-only via the shared fsutil helper; a lost
+                    // create race (concurrent first runs) reads the winner
+                    // instead of overwriting it - generate() above is
+                    // simply discarded.
                     let identity = Identity::generate();
                     let secret = identity.secret_hex();
                     if let Some(dir) = path.parent() {
@@ -452,45 +456,24 @@ impl Client {
                             ))
                         })?;
                     }
-                    #[cfg(unix)]
-                    {
-                        use std::io::Write as _;
-                        use std::os::unix::fs::OpenOptionsExt as _;
-                        match std::fs::OpenOptions::new()
-                            .mode(0o600)
-                            .write(true)
-                            .create_new(true)
-                            .open(&path)
-                        {
-                            Ok(mut f) => {
-                                f.write_all(secret.as_bytes()).map_err(|e| {
-                                    ClientError::Identity(format!(
-                                        "cannot write {}: {e}",
-                                        path.display()
-                                    ))
-                                })?;
-                            }
-                            // A simultaneous first run (or a pre-planted
-                            // file) loses the create race: fall through to
-                            // reading the winner - generate() above is
-                            // simply discarded.
-                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                            Err(e) => {
-                                return Err(ClientError::Identity(format!(
-                                    "cannot write {}: {e}",
-                                    path.display()
-                                )))
-                            }
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    std::fs::write(path, secret.as_bytes()).map_err(|e| {
+                    match noscat_core::fsutil::create_secret_file(path, &secret).map_err(|e| {
                         ClientError::Identity(format!(
                             "cannot write {}: {e}",
                             path.display()
                         ))
-                    })?;
-                    identity
+                    })? {
+                        true => identity,
+                        false => {
+                            let secret = std::fs::read_to_string(path).map_err(|e| {
+                                ClientError::Identity(format!(
+                                    "cannot read {}: {e}",
+                                    path.display()
+                                ))
+                            })?;
+                            Identity::from_secret(secret.trim())
+                                .map_err(|e| ClientError::Identity(e.to_string()))?
+                        }
+                    }
                 } else {
                     let secret = std::fs::read_to_string(path).map_err(|e| {
                         ClientError::Identity(format!("cannot read {}: {e}", path.display()))

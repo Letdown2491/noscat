@@ -129,7 +129,41 @@ pub struct Provider {
 impl Provider {
     /// Open (creating and migrating if necessary) an on-disk MLS store.
     pub fn open(path: &std::path::Path) -> Result<Self, MeshError> {
-        Self::from_connection(openmls_sqlite_storage::Connection::open(path)?)
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // The store holds signature keys, encryption keys, and the epoch
+        // PSKs: create it owner-only from the start (chmod-after-open
+        // leaves a window) and heal loose modes written by older versions.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        let connection = openmls_sqlite_storage::Connection::open(path)?;
+        // Concurrent connections are routine (the node's accept loop, the
+        // dial-side PSK derivation, mesh sync): with stock defaults a
+        // reader/writer collision is SQLITE_BUSY, which callers then
+        // degrade into a silently stale-epoch PSK. WAL plus a busy
+        // timeout turn those into waits instead.
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| MeshError::Sqlite(e))?;
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| MeshError::Sqlite(e))?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Self::from_connection(connection)
     }
 
     fn from_connection(connection: openmls_sqlite_storage::Connection) -> Result<Self, MeshError> {
@@ -179,33 +213,22 @@ impl Device {
             let identity = Identity::from_secret(std::fs::read_to_string(&secret_path)?.trim())?;
             // Heal secrets written by older versions with default (loose)
             // permissions: only the owner should ever read this file.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &secret_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
-            }
+            crate::fsutil::heal_secret_mode(&secret_path);
             identity
         } else {
             let id = Identity::generate();
             // Created owner-only from the start: the nsec is the device's
-            // master secret (Nostr, Noise, and MLS all derive from it).
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                use std::io::Write as _;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&secret_path)?
-                    .write_all(format!("{}\n", id.secret_hex()).as_bytes())?;
+            // master secret (Nostr, Noise, and MLS all derive from it). A
+            // lost create race (two concurrent opens of a fresh dir) reads
+            // the winner instead of overwriting it - overwriting would
+            // fork this device's key from what its MLS store will hold.
+            let secret = format!("{}\n", id.secret_hex());
+            match crate::fsutil::create_secret_file(&secret_path, &secret)? {
+                true => id,
+                false => {
+                    Identity::from_secret(std::fs::read_to_string(&secret_path)?.trim())?
+                }
             }
-            #[cfg(not(unix))]
-            std::fs::write(&secret_path, format!("{}\n", id.secret_hex()))?;
-            id
         };
 
         // Load MLS state (SQLite storage profile) if this device has one.
@@ -224,11 +247,19 @@ impl Device {
             std::fs::rename(&legacy_path, &gid_path)?;
         }
         let group_id = match std::fs::read_to_string(&gid_path) {
-            Ok(json) => {
-                let gid: Vec<u8> = hex::decode(json.trim())?;
-                Some(GroupId::from_slice(&gid))
-            }
-            Err(_) => None,
+            Ok(json) => match hex::decode(json.trim()) {
+                Ok(gid) => Some(GroupId::from_slice(&gid)),
+                // A torn sidecar (a crash mid-write in older versions;
+                // the atomic writer prevents new ones) must not brick the
+                // device: fail loud, continue mesh-less.
+                Err(e) => {
+                    eprintln!("# ⚠️  {} is corrupt, ignoring: {e}", gid_path.display());
+                    None
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // EACCES or the like is a real problem, not "no mesh".
+            Err(e) => return Err(e.into()),
         };
 
         Ok(Self {
@@ -241,12 +272,19 @@ impl Device {
     }
 
     /// Persist device state. MLS state is written to SQLite by OpenMLS itself
-    /// as operations run; this only refreshes the group-id sidecar.
+    /// as operations run; this only refreshes the group-id sidecar. The
+    /// sidecar is written atomically (a torn mesh.json used to brick the
+    /// device dir: open hard-fails on undecodable hex) and skipped when
+    /// it already agrees - the group id never changes after create/join,
+    /// so this is normally a no-op per merged commit.
     fn persist(&self) -> Result<(), MeshError> {
         if let Some(gid) = &self.group_id {
             let gid_path = self.dir.join("mesh.json");
-            std::fs::write(&gid_path, format!("{}\n", hex::encode(gid.as_slice())))
-                .map_err(|e| MeshError::Mls(format!("write {}: {e}", gid_path.display())))?;
+            let json = format!("{}\n", hex::encode(gid.as_slice()));
+            if std::fs::read_to_string(&gid_path).is_ok_and(|s| s == json) {
+                return Ok(());
+            }
+            crate::fsutil::write_atomic(&gid_path, json.as_bytes())?;
         }
         Ok(())
     }
@@ -256,7 +294,8 @@ impl Device {
     /// This is the healing store for `mesh resend`: a member that missed
     /// the live fan-out (the wrap was never stored by any relay) can only
     /// be fixed by the owner re-publishing the commit - backfill fetches
-    /// what relays stored, and this never was.
+    /// what relays stored, and this never was. Written atomically: a torn
+    /// journal must not fail invite/remove after the commit is merged.
     fn record_commit(&self, commit_hex: &str) -> Result<(), MeshError> {
         let mut journal = self.commit_journal()?;
         journal.push(commit_hex.to_string());
@@ -265,19 +304,30 @@ impl Device {
             journal.drain(..len - COMMIT_JOURNAL_KEEP);
         }
         let path = self.dir.join("commits.json");
-        std::fs::write(&path, serde_json::to_vec(&journal)?)
-            .map_err(|e| MeshError::Mls(format!("write {}: {e}", path.display())))
+        crate::fsutil::write_atomic(&path, &serde_json::to_vec(&journal)?)?;
+        Ok(())
     }
 
-    /// The owner's merged-commit journal, oldest first. An empty or absent
-    /// journal just means "nothing to resend" (or this device is not the
-    /// owner - only owners commit, so only owners have entries).
+    /// The owner's merged-commit journal, oldest first. An empty, absent,
+    /// or corrupt journal just means "nothing to resend" (or this device
+    /// is not the owner - only owners commit, so only owners have
+    /// entries): the journal only weakens healing, it must never fail a
+    /// membership operation.
     fn commit_journal(&self) -> Result<Vec<String>, MeshError> {
         let path = self.dir.join("commits.json");
         match std::fs::read(&path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(journal) => Ok(journal),
+                Err(e) => {
+                    tracing::warn!(
+                        file = %path.display(),
+                        "commit journal unreadable, treating as empty: {e}"
+                    );
+                    Ok(Vec::new())
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(MeshError::Mls(format!("read {}: {e}", path.display()))),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -448,9 +498,13 @@ impl Device {
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
-        self.persist()?;
         let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+        // Journal before the sidecar persist: a crash between the two
+        // advances the epoch but must not lose the commit from the
+        // resend journal (a replayed entry is idempotent on the
+        // receiving side - epoch-skip).
         self.record_commit(&commit_hex)?;
+        self.persist()?;
 
         let MlsMessageBodyOut::Welcome(welcome) = welcome.body() else {
             return Err(MeshError::Mls("expected a Welcome from add_members".into()));
@@ -504,9 +558,10 @@ impl Device {
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| MeshError::Mls(e.to_string()))?;
-        self.persist()?;
         let commit_hex = hex::encode(commit.tls_serialize_detached()?);
+        // Journal before the sidecar persist (see invite).
         self.record_commit(&commit_hex)?;
+        self.persist()?;
 
         let payload = serde_json::to_string(&MeshMessage {
             commit: commit_hex,
@@ -876,14 +931,18 @@ impl Device {
             if client.is_none() {
                 client = Some(crate::relay::connect_client(relays).await?);
             }
-            let c = client.as_ref().expect("just connected");
             let pending = std::mem::take(&mut undelivered);
-            for (to, gift_wrap) in &wraps {
+            for (i, (to, gift_wrap)) in wraps.iter().enumerate() {
                 // After the first attempt only the stragglers go out.
                 if attempt > 0 && !pending.contains(to) {
                     continue;
                 }
-                match c.send_event(gift_wrap).await {
+                match client
+                    .as_ref()
+                    .expect("connected or just connected above")
+                    .send_event(gift_wrap)
+                    .await
+                {
                     Ok(output) if !output.success.is_empty() => {}
                     Ok(output) => {
                         for (url, err) in &output.failed {
@@ -894,6 +953,19 @@ impl Device {
                     Err(e) => {
                         tracing::warn!(%to, %e, "gift wrap send failed");
                         undelivered.push(*to);
+                        // Everything later in the list was not attempted
+                        // this round: carry it into the next retry.
+                        for (rest, _) in &wraps[i + 1..] {
+                            if !undelivered.contains(rest) {
+                                undelivered.push(*rest);
+                            }
+                        }
+                        // The session itself may be the thing that died:
+                        // force the next attempt to reconnect.
+                        if let Some(c) = client.take() {
+                            c.shutdown().await;
+                        }
+                        break;
                     }
                 }
             }
