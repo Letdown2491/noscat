@@ -3,19 +3,15 @@ name = "netrig-node"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "FIPS first-contact experiment node for the netrig network test rig"
+description = "netrig device: noscat-core's Dataplane and Streams in one process per namespace"
 
 # Standalone: never part of the published noscat workspace.
 [workspace]
 
 [dependencies]
-nvpn-fips-core = "=0.4.124"
-nostr = "=0.44.8"
+noscat-core = { path = "../../../crates/noscat-core" }
+nostr = "0.45"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rcgen = "0.13"
-futures = "0.3"
 sha2 = "0.10"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

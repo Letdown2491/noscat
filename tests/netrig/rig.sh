@@ -11,14 +11,13 @@
 #   quic_mib:     if set, A sends this many MiB to B over QUIC once pings
 #                 work, and the scenario also requires a verified transfer
 #
-# env: FIPS_MTU (default 1320, see below), QUIC_WAIT_DIRECT=yes (hold the
-#      transfer until A has a direct link to B), CC (bbr | cubic),
-#      PROBE_SIZES, RUST_LOG, DUMP=<A|B|C> (print that node's log)
+# env: QUIC_WAIT_DIRECT=yes (hold the transfer until A has a direct link
+#      to B), RUST_LOG, DUMP=<A|B|C> (print that node's log)
 #
-# FIPS fragments service datagrams only on a direct link; a relayed path
-# carries at most (FIPS_MTU - 110) bytes. QUIC needs 1200, so the rig, like
-# noscat, runs FIPS at 1320 (relayed max 1210). FIPS's own default, 1280,
-# makes QUIC fail over every relayed path.
+# The nodes run noscat-core's Dataplane and Streams (node/), so FIPS MTU
+# and congestion control are whatever noscat ships (1320, BBR). The relayed
+# QUIC scenario is the guard for the MTU: FIPS does not fragment on relayed
+# paths, and below MTU 1310 every relayed QUIC connection fails.
 #
 #   wan bridge 37.120.10.0/24 (the "internet"; FIPS ignores RFC 5737
 #   documentation ranges, so this must be an ordinary global range)
@@ -89,7 +88,7 @@ ns h1 python3 /rig/stunc.py > /dev/null || { echo "FAIL rig: STUN unreachable fr
 
 run() { # ns name peers [public] [quic_to]
   ns "$1" setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=-all \
-    env FIPS_MTU="${FIPS_MTU:-1320}" QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-no}" PROBE_SIZES="${PROBE_SIZES:-256,512,768,1000,1100,1150,1200,1250,1300,1400,2000,8000}" PUBLIC="${4:-no}" QUIC_TO="${5:-}" QUIC_MIB="${QUIC_MIB:-16}" CC="${CC:-bbr}" NAME="$2" PEERS="$3" SHARED=/shared \
+    env QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-no}" PUBLIC="${4:-no}" QUIC_TO="${5:-}" QUIC_MIB="${QUIC_MIB:-16}" NAME="$2" PEERS="$3" SHARED=/shared \
         STUN=stun:37.120.10.3:3478 DURATION_SECS="$DUR" HOME=/tmp \
         RUST_LOG="${RUST_LOG:-warn}" "$NODE" > "/logs/$2.log" 2>&1 &
 }
@@ -100,7 +99,7 @@ else
 fi
 sleep $((DUR + 8))
 
-echo "=== A behind $NAT_A NAT, B behind $NAT_B NAT, reachable member: $WITH_C, loss ${LOSS}%${QUIC_MIB:+, QUIC $QUIC_MIB MiB (${CC:-bbr}${QUIC_WAIT_DIRECT:+, wait direct})}, FIPS MTU ${FIPS_MTU:-1320} (expect A<->B: $EXPECT)"
+echo "=== A behind $NAT_A NAT, B behind $NAT_B NAT, reachable member: $WITH_C, loss ${LOSS}%${QUIC_MIB:+, QUIC $QUIC_MIB MiB${QUIC_WAIT_DIRECT:+, after direct link}} (expect A<->B: $EXPECT)"
 grep -h RESULT /logs/*.log | sort
 for f in /logs/A.log /logs/B.log; do
   grep -h '^t=' "$f" | awk '{k=$3; last[k]=$0} END {for (k in last) print "LAST " last[k]}'

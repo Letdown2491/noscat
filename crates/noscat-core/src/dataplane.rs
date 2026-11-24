@@ -166,6 +166,8 @@ pub struct Dataplane {
     ep: Arc<FipsEndpoint>,
     device: PublicKey,
     members: RwLock<HashSet<PublicKey>>,
+    /// Last advert content seen per member.
+    advertised: std::sync::Mutex<std::collections::HashMap<PublicKey, String>>,
 }
 
 impl std::fmt::Debug for Dataplane {
@@ -239,6 +241,7 @@ impl Dataplane {
             ep: Arc::new(ep),
             device: identity.public_key(),
             members: RwLock::new(HashSet::new()),
+            advertised: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -275,6 +278,9 @@ impl Dataplane {
             .write()
             .map_err(|_| DataplaneError::Fips("member lock poisoned".into()))?
             .retain(|d| set.contains(d));
+        if let Ok(mut seen) = self.advertised.lock() {
+            seen.retain(|d, _| set.contains(d));
+        }
         self.ep.update_peers(configs).await.map_err(fips_err)?;
         *self
             .members
@@ -302,7 +308,9 @@ impl Dataplane {
 
     /// Feed a member's advert (event JSON). Refuses anything that is not a
     /// kind 37195 event signed by a current member. Returns whether FIPS
-    /// accepted it (an older or duplicate advert is not an error).
+    /// accepted it (an older or duplicate advert is not an error). A
+    /// member's first advert, or one with changed endpoints, also triggers
+    /// an immediate dial to it.
     pub async fn ingest_advert(&self, json: &str) -> Result<bool, DataplaneError> {
         use fips_nostr::JsonUtil;
         let event = fips_nostr::Event::from_json(json)
@@ -321,7 +329,25 @@ impl Dataplane {
         if !self.is_member(&author) {
             return Err(DataplaneError::Advert("author is not a member".into()));
         }
-        self.ep.ingest_nostr_event(event).await.map_err(fips_err)
+        let content = event.content.clone();
+        let accepted = self.ep.ingest_nostr_event(event).await.map_err(fips_err)?;
+        // Members are usually configured before their first advert arrives,
+        // so FIPS's first dial found no address and waits on its retry timer
+        // (about 10 s). Dial now when a member's advertised endpoints are new
+        // or changed. Not on every accepted advert: adverts are re-signed on
+        // each export, and a path refresh restarts handshakes and rekeys
+        // live sessions, which stalls traffic if done every few seconds.
+        let changed = accepted
+            && self.advertised.lock().is_ok_and(|mut seen| {
+                seen.insert(author, content.clone()).as_ref() != Some(&content)
+            });
+        if changed && let Some(peer) = to_peer(&author) {
+            self.ep
+                .refresh_peer_paths(vec![peer])
+                .await
+                .map_err(fips_err)?;
+        }
+        Ok(accepted)
     }
 
     /// Direct-link state for every member FIPS knows about.

@@ -13,11 +13,12 @@ QUIC_WAIT_DIRECT=yes tests/netrig/run.sh cone cone yes connect 75 3 16
 ```
 
 Topology, NAT modes and the scenario arguments are documented at the top of
-`rig.sh`. Each device runs `node/` (a standalone crate, not part of the
-published workspace) as `nobody` with every capability dropped. Devices swap
-signed FIPS adverts through a shared directory, standing in for delivery
-inside the Marmot group (ADR 0006), and ping each other over FIPS. A can
-also send a QUIC stream to B (`node/src/quic.rs`, the ADR 0003 prototype)
+`rig.sh`. Each device runs `node/` as `nobody` with every capability
+dropped: a thin driver around noscat-core's `Dataplane` and `Streams`, so
+the rig tests the code that ships (it is a standalone crate, not part of
+the published workspace). Devices swap signed adverts through a shared
+directory, standing in for delivery inside the Marmot group (ADR 0006), and
+probe each other with `Streams::probe`. A can also send a QUIC stream to B
 and the scenario then requires a sha256-verified transfer.
 
 Current scenarios and what they must show (results recorded in
@@ -32,8 +33,8 @@ Current scenarios and what they must show (results recorded in
 | symmetric | symmetric | yes, 3% loss | 16 MiB over QUIC, relayed |
 | cone | cone | yes, 3% loss | 16 MiB over QUIC, after the punch |
 
-When noscat's own data plane lands, the node here should be replaced by the
-real `noscat` binary so the rig tests what ships.
+Once the client and CLI are rebuilt on these modules, the node can give way
+to the real `noscat` binary.
 
 Gotchas already paid for:
 - FIPS ignores RFC 5737 documentation addresses, so the fake internet uses
@@ -45,7 +46,7 @@ Gotchas already paid for:
 - nftables spells the symmetric-NAT flag `fully-random`.
 - FIPS fragments service datagrams only on a direct link. Through a relay
   the limit is the FIPS UDP MTU minus 110 bytes, so FIPS's default 1280
-  (limit 1170) silently drops every 1200-byte QUIC packet. The rig runs
-  FIPS at 1320, as noscat must.
+  (limit 1170) silently drops every 1200-byte QUIC packet. noscat-core
+  runs FIPS at 1320; the relayed QUIC scenario guards it.
 - Loopback hides this, and loopback's 64 KB MTU also makes kernel TCP
   baselines meaningless. Measure in the rig, not on `lo`.

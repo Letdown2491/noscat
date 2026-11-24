@@ -60,7 +60,7 @@ Decision needed for 0.5:
 Recommended: A for 0.5.0, B offered upstream in parallel, C never on by default.
 
 Implementation notes from the rig:
-- Ingest members' adverts *before* registering them as peers, or the first dial fails with "no transport" and waits about 10 s for a retry.
+- Members are registered before their adverts arrive, so FIPS's first dial fails with "no transport" and waits about 10 s for a retry. The Dataplane now calls `refresh_peer_paths` when a member's advert is new or changed (first contact 0.6 s in the rig).
 - A reachable member must set `public: true`; FIPS learns the address by STUN (or `external_addr`). FIPS ignores documentation-range addresses (RFC 5737), so test rigs must use ordinary global ranges.
 - The rig lives in `tests/netrig/` (`tests/netrig/run.sh` runs every scenario and fails on any miss). It is the network test gate from Phase 0 on; swap its experiment node for the real `noscat` binary once the data plane lands.
 
@@ -71,7 +71,7 @@ Implementation notes from the rig:
 - [ ] **MeshGroup**: Marmot subset on OpenMLS 0.10 (develop on 0.10.0-rc.1, switch to stable on release). Key packages (30443), Welcomes (444 in 1059 to 10050 inbox relays), group events (445 under the exporter key), routing component, admin policy with every device an admin, and a noscat app component for adverts and device names. Reliable commit delivery (relay ACK checks, resend) carries over from 0.4.
 - [ ] **MDK interop suite** in CI via a git dev-dependency: MDK creates and we join, we commit and MDK merges, and the reverse. Confirm `cargo publish --dry-run` passes with it.
 - [ ] **App protocols over QUIC**: port forward, file transfer (resumable, sha256-verified), chat and clipboard with a delivery acknowledgement, presence from adverts.
-- [ ] Switch `tests/netrig` from its experiment node to a node built on Dataplane and Streams.
+- [x] Switch `tests/netrig` from its experiment node to a node built on Dataplane and Streams. All six scenarios pass on the shipping modules; first contact 0.6 to 0.7 s (was 11 to 14 s) because the Dataplane dials a member as soon as its first or changed advert arrives. Only on change: adverts are re-signed on every export, and refreshing paths on each one rekeyed live sessions often enough to stall QUIC.
 - [ ] **Delete**: `tunnel.rs`, `noise.rs`, `stun.rs`, `traversal.rs`, `advert.rs`, and the 0.4 parts of `mesh.rs`.
 - [ ] `cargo audit` clean (or each remaining finding explained); `openmls_rust_crypto`'s `test-utils` feature off in production.
 

@@ -9,17 +9,17 @@
 #   QUIC_WAIT_DIRECT=yes tests/netrig/run.sh cone cone yes connect 60 3 16
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
 
 podman build -q -t localhost/noscat-netrig -f "$HERE/Containerfile" "$HERE" > /dev/null 2>&1 || { echo "netrig: image build failed"; exit 1; }
 podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z \
   -v noscat-netrig-target:/target:Z -e CARGO_TARGET_DIR=/target \
-  -v "$HERE/node:/work:Z" -w /work localhost/noscat-netrig \
+  -v "$ROOT:/work:Z" -w /work/tests/netrig/node localhost/noscat-netrig \
   cargo build -q --release
 
 scenario() {
   podman run --rm --privileged \
-    -e DUMP="${DUMP:-}" -e RUST_LOG="${RUST_LOG:-warn}" -e CC="${CC:-bbr}" -e FIPS_MTU="${FIPS_MTU:-1320}" \
-    -e QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-}" -e PROBE_SIZES="${PROBE_SIZES:-}" \
+    -e DUMP="${DUMP:-}" -e RUST_LOG="${RUST_LOG:-warn}" -e QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-}" \
     -v noscat-netrig-target:/target:ro \
     -v "$HERE:/rig:ro,Z" localhost/noscat-netrig sh /rig/rig.sh "$@"
 }
