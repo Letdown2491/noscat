@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use noscat_client::{Client, ClientConfig, Event, IdentitySource};
+use noscat_client::{Client, ClientConfig, ClientError, Event, IdentitySource};
 
 const T: Duration = Duration::from_secs(30);
 
@@ -161,5 +161,39 @@ fn two_clients_end_to_end() {
 
     drop(a);
     drop(b);
+    drop(relay);
+}
+
+/// Dropping the last `Client` stops the device and frees its directory,
+/// so the next client on it starts (the apps join with one client and
+/// then run another). Before 0.5.0's fix the background tasks kept the
+/// device alive and the second start failed with `Busy`.
+#[test]
+fn dropping_the_client_frees_the_directory() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let dir = tmp("reuse");
+    let cfg = || ClientConfig {
+        identity: IdentitySource::File(dir.join("identity.nsec")),
+        relays: Some(vec![url.clone()]),
+        listen: Some(free_udp()),
+        mesh_dir: Some(dir.clone()),
+        lan_discovery: false,
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
+        ..ClientConfig::default()
+    };
+
+    let first = Client::start(cfg()).unwrap();
+    first.create_mesh("home").unwrap();
+    let helper = Client::running(&dir).expect("registered while running");
+    assert!(matches!(Client::start(cfg()), Err(ClientError::Busy(_))), "a second client must not open a running directory");
+    drop(helper);
+    drop(first);
+
+    assert!(Client::running(&dir).is_none(), "the device stopped with its last handle");
+    let again = Client::start(cfg()).expect("the directory is free once the client is dropped");
+    assert_eq!(again.mesh_name().as_deref(), Some("home"));
+    drop(again);
     drop(relay);
 }

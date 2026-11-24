@@ -270,16 +270,12 @@ struct Serving {
     stdio: Option<tokio::sync::oneshot::Sender<(String, SendStream, RecvStream)>>,
 }
 
+/// The client's shared state. Background tasks hold it, so it must not own
+/// anything whose drop stops the device: that is [`Owner`]'s job.
 struct Inner {
-    /// Always `Some` until drop.
-    rt: Option<tokio::runtime::Runtime>,
+    rt: tokio::runtime::Handle,
     device: Device,
     npub: String,
-    dir: PathBuf,
-    /// Removed on drop when the state was temporary.
-    temp_dir: bool,
-    /// Held for the client's life: one process per state directory.
-    _lock: std::fs::File,
     events: std_mpsc::Sender<Event>,
     max_incoming: u64,
     serving: Mutex<Serving>,
@@ -290,9 +286,26 @@ struct Inner {
     next_forward_id: AtomicU64,
 }
 
-impl Drop for Inner {
+/// What only [`Client`] handles hold: the runtime, the directory lock and
+/// shutdown. Background tasks hold [`Inner`] and run on this runtime, so
+/// if they owned it the device could never stop. Dropping the last
+/// `Client` drops this, which stops the device, ends the tasks and
+/// releases the directory.
+struct Owner {
+    /// Always `Some` until drop.
+    rt: Option<tokio::runtime::Runtime>,
+    inner: Arc<Inner>,
+    dir: PathBuf,
+    /// Removed on drop when the state was temporary.
+    temp_dir: bool,
+    /// Held for the client's life: one process per state directory.
+    /// Declared after `rt` so it is released after the device stopped.
+    _lock: std::fs::File,
+}
+
+impl Drop for Owner {
     fn drop(&mut self) {
-        let device = self.device.clone();
+        let device = self.inner.device.clone();
         let rt = self.rt.take();
         let stop = move || {
             if let Some(rt) = rt {
@@ -313,16 +326,16 @@ impl Drop for Inner {
 }
 
 impl Inner {
-    fn rt(&self) -> &tokio::runtime::Runtime {
-        self.rt.as_ref().expect("runtime lives until drop")
+    fn rt(&self) -> &tokio::runtime::Handle {
+        &self.rt
     }
 }
 
 /// Running clients by state directory, so helpers that only know a
 /// directory (the FFI's mesh functions) use the running device instead
 /// of opening its state a second time.
-fn registry() -> &'static Mutex<HashMap<PathBuf, Weak<Inner>>> {
-    static R: OnceLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> = OnceLock::new();
+fn registry() -> &'static Mutex<HashMap<PathBuf, Weak<Owner>>> {
+    static R: OnceLock<Mutex<HashMap<PathBuf, Weak<Owner>>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -573,6 +586,7 @@ impl Inner {
 /// it.
 pub struct Client {
     inner: Arc<Inner>,
+    owner: Arc<Owner>,
     /// Behind a mutex so `Client` is `Sync` (`Receiver` is not).
     events_rx: Mutex<Option<std_mpsc::Receiver<Event>>>,
 }
@@ -581,6 +595,7 @@ impl Clone for Client {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            owner: self.owner.clone(),
             events_rx: Mutex::new(None),
         }
     }
@@ -651,12 +666,9 @@ impl Client {
         let device = rt.block_on(Device::start(identity, cfg))?;
         let (tx, rx) = std_mpsc::channel();
         let inner = Arc::new(Inner {
-            rt: Some(rt),
+            rt: rt.handle().clone(),
             device,
             npub,
-            dir,
-            temp_dir,
-            _lock: lock,
             events: tx,
             max_incoming: config.max_incoming_bytes.unwrap_or(MAX_INCOMING_BYTES),
             serving: Mutex::new(Serving::default()),
@@ -666,18 +678,19 @@ impl Client {
             next_forward_id: AtomicU64::new(1),
         });
         inner.pump();
+        let owner = Arc::new(Owner { rt: Some(rt), inner: inner.clone(), dir, temp_dir, _lock: lock });
         if let Ok(mut r) = registry().lock() {
             r.retain(|_, w| w.strong_count() > 0);
-            r.insert(key, Arc::downgrade(&inner));
+            r.insert(key, Arc::downgrade(&owner));
         }
-        Ok(Client { inner, events_rx: Mutex::new(Some(rx)) })
+        Ok(Client { inner, owner, events_rx: Mutex::new(Some(rx)) })
     }
 
     /// The running client for a state directory, if any in this process.
     #[must_use]
     pub fn running(dir: &Path) -> Option<Client> {
-        let inner = registry().lock().ok()?.get(&canonical(dir))?.upgrade()?;
-        Some(Client { inner, events_rx: Mutex::new(None) })
+        let owner = registry().lock().ok()?.get(&canonical(dir))?.upgrade()?;
+        Some(Client { inner: owner.inner.clone(), owner, events_rx: Mutex::new(None) })
     }
 
     /// This device's npub (bech32).
