@@ -35,11 +35,30 @@
 
 The one unanswered spike question. With `peerfinding_source: External`, hole punching is coordinated over existing FIPS sessions, not relays.
 
-- [ ] Two devices behind separate NATs, no reachable member: can they connect from adverts delivered out of band?
-- [ ] Same, with a third, publicly reachable member (home server): does transit plus punching work, and does traffic move to the direct path afterwards?
-- [ ] Symmetric NAT on one side: does it fall back to transit through a member?
+- [x] Two devices behind separate NATs, no reachable member: can they connect from adverts delivered out of band? **No.** A NATed device advertises `{"addr":"nat"}` (its public address goes into a traversal offer, not the advert), and in External mode offers travel only over existing FIPS sessions, so there is no path for the first offer.
+- [x] Same, with a third, publicly reachable member: **yes**, and the two NATed devices punch a direct link (route `direct`, link to the other NAT's public address).
+- [x] Symmetric NAT on one or both sides: **yes**, traffic falls back to transit through the reachable member automatically (no direct link; RTT equals the two legs through it).
 
-Outcome decides whether 0.5 keeps relay-based traversal signaling (kind 21059) as a fallback, requires one reachable member, or both.
+Results (2026-11-23, rig in network namespaces: two NAT routers with 10 ms each way, a public member, coturn as STUN; first ping at 12 to 14 s, most of which is the experiment registering peers before adverts arrived, so the first dial waits for FIPS's retry timer):
+
+| Scenario | A to B | Path |
+|---|---|---|
+| cone + cone, no reachable member | never | none |
+| cone + cone, reachable member | 14 s | direct (punched) |
+| cone + symmetric, reachable member | 14 s | transit via member |
+| symmetric + symmetric, reachable member | 14 s | transit via member |
+
+Decision needed for 0.5:
+- **Option A: require one reachable member** (a home server, VPS, or any device with public IPv6 or a UPnP/PCP mapping). Fully private and works today. Matches the "your own devices are your relays" model, but a mesh of only phones and laptops behind NAT cannot start.
+- **Option B: propose an External signaling hook upstream** (export and ingest traversal offers and answers like adverts do), and carry offers inside the Marmot group. Cone NATs then punch with no reachable member, privately; symmetric NATs still need a member to relay.
+- **Option C: allow FIPS's relay peerfinding as an opt-in fallback.** Works without a reachable member, but publishes adverts to public relays, which ADR 0006 rejects by default.
+
+Recommended: A for 0.5.0, B offered upstream in parallel, C never on by default.
+
+Implementation notes from the rig:
+- Ingest members' adverts *before* registering them as peers, or the first dial fails with "no transport" and waits about 10 s for a retry.
+- A reachable member must set `public: true`; FIPS learns the address by STUN (or `external_addr`). FIPS ignores documentation-range addresses (RFC 5737), so test rigs must use ordinary global ranges.
+- The rig (namespaces, nftables NAT with `masquerade` for cone and `masquerade fully-random` for symmetric, `tc netem`, coturn STUN) should move into the repo as the network test gate from Phase 0.
 
 ## Phase 2: noscat-core rewrite
 

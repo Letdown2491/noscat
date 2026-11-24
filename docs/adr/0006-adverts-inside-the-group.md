@@ -11,5 +11,5 @@ FIPS normally publishes kind 37195 adverts (endpoint IPs and ports) to public re
 
 - Relays see only Marmot's kind 445 traffic: random group id, ephemeral sender keys, no member list, no endpoints.
 - Adverts are still the ordinary signed FIPS events, so this stays wire-compatible with FIPS; only the delivery path changes.
-- In External mode, hole-punch coordination runs over existing FIPS sessions. Two NATed devices with no reachable member in common may not be able to make first contact; this is the main open question for 0.5.0 (see the plan) and may require keeping relay-based signaling as a fallback.
+- In External mode, hole-punch coordination runs over existing FIPS sessions. Measured in the network rig (see the 0.5.0 plan, Phase 1): two NATed devices with no reachable member never connect; with one reachable member, cone NATs punch a direct link and symmetric NATs relay through the member. 0.5.0 therefore needs at least one reachable member per mesh, unless an External signaling hook lands upstream so traversal offers can also travel inside the group.
 - An opt-in public mode (advertise on relays so anyone can dial by npub) remains possible for the netcat-style "reach this npub" use case.
