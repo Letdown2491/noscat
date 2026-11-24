@@ -11,6 +11,7 @@
 //! - `relay` - relay connections, back-off and presence bookkeeping.
 
 pub mod dataplane;
+pub mod device;
 pub mod fsutil;
 pub mod identity;
 pub mod marmot;

@@ -35,6 +35,10 @@ fips-nostr = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
+[dev-dependencies]
+# An in-process relay for the device tests.
+nostr-relay-builder = "0.44"
+
 # gethostname(3) is unix-only; other platforms have no caller yet (the
 # default device name falls back to "noscat").
 [target.'cfg(unix)'.dependencies]

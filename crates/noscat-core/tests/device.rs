@@ -1,0 +1,193 @@
+//! The device runtime end to end against an in-process relay: create,
+//! invite, join, adverts, streams between members, remove and leave.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use noscat_core::Identity;
+use noscat_core::dataplane::{DataplaneConfig, Reachability};
+use noscat_core::device::{Device, DeviceConfig, DeviceEvent};
+use nostr::prelude::PublicKey;
+use nostr_relay_builder::MockRelay;
+
+const T: Duration = Duration::from_secs(30);
+
+fn free_port() -> SocketAddr {
+    std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+}
+
+struct Node {
+    id: Identity,
+    addr: SocketAddr,
+    dir: std::path::PathBuf,
+}
+
+fn node(tag: &str) -> Node {
+    Node {
+        id: Identity::generate(),
+        addr: free_port(),
+        dir: std::env::temp_dir().join(format!("noscat-device-{}-{}-{tag}", std::process::id(), rand::random::<u32>())),
+    }
+}
+
+async fn start(n: &Node, name: &str, relay: &str, all: &[&Node]) -> Device {
+    let peer_addresses: HashMap<PublicKey, Vec<SocketAddr>> =
+        all.iter().map(|o| (o.id.public_key(), vec![o.addr])).collect();
+    let cfg = DeviceConfig {
+        dir: n.dir.clone(),
+        name: name.into(),
+        relays: vec![relay.into()],
+        dataplane: DataplaneConfig {
+            bind: n.addr,
+            reachability: Reachability::BehindNat,
+            stun_servers: vec!["stun:127.0.0.1:9".into()],
+            lan_discovery: false,
+        },
+        peer_addresses,
+    };
+    Device::start(n.id.clone(), cfg).await.unwrap()
+}
+
+async fn until<F, Fut>(what: &str, mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + T;
+    while !f().await {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn invite_and_join(admin: &Device, joiner: &Device) {
+    let j = joiner.clone();
+    let inviter = admin.device();
+    let waiting = tokio::spawn(async move { j.join(inviter, T).await });
+    // The joiner published a key package at start; inviting right away works.
+    admin.invite(joiner.device()).await.unwrap();
+    waiting.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_lifecycle_over_a_relay() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (na, nb, nc) = (node("a"), node("b"), node("c"));
+    let all = [&na, &nb, &nc];
+    let a = start(&na, "alpha", &url, &all).await;
+    let b = start(&nb, "bravo", &url, &all).await;
+
+    a.create("home").await.unwrap();
+    assert!(a.in_mesh().await);
+    invite_and_join(&a, &b).await;
+    assert_eq!(b.mesh_name().await.as_deref(), Some("home"));
+
+    // Both see both, and names and presence arrive through adverts.
+    until("a sees bravo online", || async {
+        a.members().await.iter().any(|m| m.name.as_deref() == Some("bravo") && m.online)
+    })
+    .await;
+    until("b sees alpha online", || async {
+        b.members().await.iter().any(|m| m.name.as_deref() == Some("alpha") && m.online)
+    })
+    .await;
+    assert!(a.members().await.iter().all(|m| m.admin));
+
+    // A stream between members.
+    let bs = b.streams().clone();
+    let server = tokio::spawn(async move {
+        let conn = bs.accept().await.unwrap();
+        let (mut s, mut r) = conn.inner.accept_bi().await.unwrap();
+        let got = r.read_to_end(1 << 20).await.unwrap();
+        s.write_all(&got).await.unwrap();
+        s.finish().unwrap();
+        let _ = s.stopped().await;
+        conn.peer
+    });
+    let conn = a.streams().connect(b.device(), T).await.unwrap();
+    let (mut s, mut r) = conn.inner.open_bi().await.unwrap();
+    s.write_all(b"over the mesh").await.unwrap();
+    s.finish().unwrap();
+    assert_eq!(r.read_to_end(1 << 20).await.unwrap(), b"over the mesh");
+    assert_eq!(server.await.unwrap(), a.device());
+
+    // App events reach the other members.
+    let mut rx = b.subscribe();
+    a.send_app(21196, vec![vec!["t".into(), "x".into()]], "hello".into()).await.unwrap();
+    let got = tokio::time::timeout(T, async {
+        loop {
+            if let Ok(DeviceEvent::App(ev)) = rx.recv().await {
+                return ev;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(got.content, "hello");
+    assert_eq!(got.pubkey, a.device());
+
+    // A third device, invited by a joiner.
+    let c = start(&nc, "charlie", &url, &all).await;
+    invite_and_join(&b, &c).await;
+    until("a sees three", || async { a.members().await.len() == 3 }).await;
+    until("c sees three", || async { c.members().await.len() == 3 }).await;
+
+    // Removal reaches the removed device.
+    let mut crx = c.subscribe();
+    a.remove(&[c.device()]).await.unwrap();
+    tokio::time::timeout(T, async {
+        loop {
+            if let Ok(DeviceEvent::Removed) = crx.recv().await {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("c learns it was removed");
+    assert!(!c.in_mesh().await);
+    until("b sees two", || async { b.members().await.len() == 2 }).await;
+
+    // B leaves: it steps down, A commits its SelfRemove.
+    b.leave(T).await.unwrap();
+    assert!(!b.in_mesh().await);
+    until("a is alone", || async { a.members().await.len() == 1 }).await;
+
+    for d in [a, b, c] {
+        d.shutdown().await;
+    }
+    for n in all {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_survives_a_restart() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (na, nb) = (node("ra"), node("rb"));
+    let all = [&na, &nb];
+    let a = start(&na, "alpha", &url, &all).await;
+    let b = start(&nb, "bravo", &url, &all).await;
+    a.create("home").await.unwrap();
+    invite_and_join(&a, &b).await;
+    b.shutdown().await;
+    drop(b);
+
+    // While B is down, a third device joins; B catches up on restart.
+    let nc = node("rc");
+    let c = start(&nc, "charlie", &url, &[&na, &nb, &nc]).await;
+    invite_and_join(&a, &c).await;
+
+    let b = start(&nb, "bravo", &url, &all).await;
+    assert!(b.in_mesh().await);
+    until("b catches up to three members", || async { b.members().await.len() == 3 }).await;
+
+    for d in [a, b, c] {
+        d.shutdown().await;
+    }
+    for n in [&na, &nb, &nc] {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}

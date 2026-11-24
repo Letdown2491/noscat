@@ -2597,6 +2597,7 @@ dependencies = [
  "libc",
  "nostr 0.44.8",
  "nostr 0.45.7",
+ "nostr-relay-builder",
  "nostr-sdk 0.45.6",
  "nvpn-fips-core",
  "openmls",
@@ -2718,6 +2719,23 @@ checksum = "4ea822fd48ff6b84b81ddf84169e6edf1dc0bc9b312c8e41685b2278debaac3d"
 dependencies = [
  "nostr 0.45.7",
  "opaquerr",
+]
+
+[[package]]
+name = "nostr-relay-builder"
+version = "0.44.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ed09e8363503c6f464087b530a1f43cf68be6292bd4928b5ea1141b03dc11c"
+dependencies = [
+ "async-utility",
+ "async-wsocket 0.13.2",
+ "atomic-destructor",
+ "hex",
+ "negentropy",
+ "nostr 0.44.8",
+ "nostr-database 0.44.0",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

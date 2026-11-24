@@ -7,9 +7,7 @@
 
 use std::time::Duration;
 
-use nostr::prelude::*;
 use nostr_sdk::prelude::*;
-use tokio::time::timeout;
 
 
 /// Relays used when the operator does not configure any. Overridable with
@@ -21,67 +19,12 @@ use tokio::time::timeout;
 /// with relays verified reachable from mobile paths.
 pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.primal.net"];
 
-/// How long to wait for relay connections before giving up.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// How long to wait for a fetch (key packages, relay lists) to finish.
 pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(15);
 
 /// A member reads as online while its last advert is younger than this.
 /// Devices re-send their advert well inside it.
 pub const PRESENCE_TTL_SECS: u64 = 600;
-
-/// A connected client over `relays` - the one place relay plumbing is set
-/// up. Callers that publish/fetch shut the client down when done; the
-/// long-lived `watch_*` streams just drop it.
-pub(crate) type RelayClient = Client;
-
-pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayError> {
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
-    // Skip relays in a rate-limit cool-down; healthy_relays never returns
-    // an empty list, so this never takes the only relay out.
-    let relays = healthy_relays(relays);
-    let client = Client::new();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    // Per-relay connects with individual timeouts (concurrent: the worst
-    // case stays at one timeout, not N). The old single
-    // `connect().and_wait(..)` under one deadline failed the WHOLE batch
-    // when one relay path was black-holed - and noted the failure against
-    // every relay, cooling down the healthy ones too. A device with one
-    // bad path then could not sync, join, or publish at all until the
-    // path recovered (issue #16).
-    let results = futures_util::future::join_all(relays.iter().map(|relay| {
-        let client = client.clone();
-        async move {
-            (relay.as_str(), client.try_connect_relay(relay, CONNECT_TIMEOUT).await)
-        }
-    }))
-    .await;
-    let mut connected = 0usize;
-    for (relay, result) in results {
-        match result {
-            Ok(()) => {
-                connected += 1;
-                note_relay_success(relay);
-            }
-            Err(e) => {
-                tracing::warn!(%relay, error = %e, "relay skipped: connect failed");
-                note_relay_failure(relay, "connect failed");
-            }
-        }
-    }
-    if connected == 0 {
-        // A failed connect still holds half-dialed relay sockets: without
-        // shutdown they accumulate while the watcher retries.
-        client.shutdown().await;
-        return Err(RelayError::ConnectTimeout);
-    }
-    Ok(client)
-}
 
 /// The default relay set as owned strings: for surfaces (FFI mesh helpers,
 /// CLI defaults) that resolve relays without a config in hand.

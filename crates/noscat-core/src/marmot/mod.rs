@@ -1276,6 +1276,24 @@ impl MeshGroup {
         Ok(())
     }
 
+    /// Drop this device's mesh state without telling anyone: for the last
+    /// device of a mesh, or after a leave that no member committed. The
+    /// key package slot is kept.
+    pub fn forget(&mut self) -> Result<(), MeshError> {
+        self.pending = None;
+        self.forget_group()?;
+        self.save()
+    }
+
+    /// Whether this device is an admin of its mesh.
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        self.group
+            .as_ref()
+            .and_then(|g| group_state(g).ok())
+            .is_some_and(|st| st.admins.contains(&xonly(&self.device())))
+    }
+
     fn forget_group(&mut self) -> Result<Vec<Change>, MeshError> {
         if let Some(g) = self.group.as_mut() {
             let _ = g.delete(self.provider.storage());
