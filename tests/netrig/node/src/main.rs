@@ -4,8 +4,17 @@
 //! Every node echoes pings on a FIPS service port and pings its peers,
 //! printing one status line per peer every 2 s.
 //!
+//! With QUIC_TO=<peer name> and QUIC_MIB, once that peer answers a ping the
+//! node sends QUIC_MIB MiB to it over QUIC (quic.rs) and prints a RESULT
+//! quic line. Every node serves QUIC.
+//!
 //! env: NAME, PEERS (comma list of names), SHARED, STUN (optional),
-//!      BIND (default 0.0.0.0:2121), DURATION_SECS (default 60)
+//!      BIND (default 0.0.0.0:2121), DURATION_SECS (default 60), PUBLIC,
+//!      QUIC_TO, QUIC_MIB (default 16), QUIC_WAIT_DIRECT (yes: wait for a
+//!      direct link first), CC (bbr default, or cubic), FIPS_MTU (UDP link
+//!      MTU), PROBE_SIZES (comma list of echo probe sizes)
+
+mod quic;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -16,6 +25,7 @@ use fips_core::{Config, FipsEndpoint, Identity, PeerIdentity, UdpConfig, encode_
 use nostr::JsonUtil;
 
 const PING_PORT: u16 = 41_000;
+const PROBE_SIZES: &str = "256,512,768,1000,1100,1150,1200,1250,1300,1400,2000,8000";
 
 fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
@@ -57,6 +67,7 @@ async fn main() -> Result<()> {
         bind_addr: Some(env("BIND", "0.0.0.0:2121")),
         advertise_on_nostr: Some(true),
         public: Some(env("PUBLIC", "no") == "yes"),
+        mtu: std::env::var("FIPS_MTU").ok().and_then(|m| m.parse().ok()),
         ..UdpConfig::default()
     });
     let ep = FipsEndpoint::builder()
@@ -93,8 +104,10 @@ async fn main() -> Result<()> {
     let rx = std::sync::Arc::new(ep.register_service_receiver(PING_PORT).await?);
     let ep = std::sync::Arc::new(ep);
     let pongs: std::sync::Arc<std::sync::Mutex<HashMap<String, (u64, Instant)>>> = Default::default();
+    // size probes: 'S' + u32 size + padding, echoed back as 's' + the same size
+    let sizes_ok: std::sync::Arc<std::sync::Mutex<HashMap<String, std::collections::BTreeSet<u32>>>> = Default::default();
     {
-        let (ep, rx, pongs) = (ep.clone(), rx.clone(), pongs.clone());
+        let (ep, rx, pongs, sizes_ok) = (ep.clone(), rx.clone(), pongs.clone(), sizes_ok.clone());
         tokio::spawn(async move {
             let mut batch = Vec::new();
             loop {
@@ -104,7 +117,16 @@ async fn main() -> Result<()> {
                 }
                 for d in batch.drain(..) {
                     let data = d.data.as_slice().to_vec();
-                    if data.first() == Some(&b'?') {
+                    if data.first() == Some(&b'S') && data.len() >= 5 {
+                        let mut reply = data.clone();
+                        reply[0] = b's';
+                        let _ = ep.send_datagram(d.source_peer, PING_PORT, PING_PORT, reply).await;
+                    } else if data.first() == Some(&b's') && data.len() >= 5 {
+                        let size = u32::from_be_bytes(data[1..5].try_into().unwrap());
+                        if size as usize == data.len() {
+                            sizes_ok.lock().unwrap().entry(d.source_peer.npub()).or_default().insert(size);
+                        }
+                    } else if data.first() == Some(&b'?') {
                         let mut reply = data.clone();
                         reply[0] = b'!';
                         let _ = ep.send_datagram(d.source_peer, PING_PORT, PING_PORT, reply).await;
@@ -122,6 +144,18 @@ async fn main() -> Result<()> {
         });
     }
 
+    // QUIC: every node serves; QUIC_TO starts a transfer once pings work
+    let book = std::sync::Arc::new(std::sync::Mutex::new(quic::Book::default()));
+    let qsock = quic::socket(ep.clone(), book.clone()).await?;
+    let qep = quic::endpoint(qsock)?;
+    tokio::spawn(quic::serve(qep.clone()));
+    let quic_to = std::env::var("QUIC_TO").ok().and_then(|p| npubs.get(&p).map(|n| (p, n.clone())));
+    let quic_mib: usize = env("QUIC_MIB", "16").parse()?;
+    let quic_result: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let mut quic_started = false;
+    let quic_wait_direct = env("QUIC_WAIT_DIRECT", "no") == "yes";
+
+    let probe_sizes: Vec<u32> = env("PROBE_SIZES", PROBE_SIZES).split(',').filter_map(|x| x.parse().ok()).collect();
     let start = Instant::now();
     let mut first_ok: HashMap<String, f64> = HashMap::new();
     while start.elapsed() < duration {
@@ -141,11 +175,20 @@ async fn main() -> Result<()> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as u64;
-        for (_, n) in &npubs {
+        for (pname, n) in &npubs {
             let mut msg = vec![b'?'];
             msg.extend_from_slice(&now_ms.to_be_bytes());
             if let Ok(id) = PeerIdentity::from_npub(n) {
                 let _ = ep.send_datagram(id, PING_PORT, PING_PORT, msg).await;
+                if first_ok.contains_key(pname) {
+                    for size in &probe_sizes {
+                        let size = *size;
+                        let mut p = vec![0u8; size as usize];
+                        p[0] = b'S';
+                        p[1..5].copy_from_slice(&size.to_be_bytes());
+                        let _ = ep.send_datagram(id, PING_PORT, PING_PORT, p).await;
+                    }
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -157,6 +200,24 @@ async fn main() -> Result<()> {
             let fresh = pong.filter(|(_, at)| at.elapsed() < Duration::from_secs(3));
             if fresh.is_some() {
                 first_ok.entry(pname.clone()).or_insert(t);
+                let direct_ok = !quic_wait_direct || link.is_some_and(|l| l.connected);
+                if !quic_started && direct_ok && quic_to.as_ref().is_some_and(|(p, _)| p == pname) {
+                    quic_started = true;
+                    let (qep, book, res) = (qep.clone(), book.clone(), quic_result.clone());
+                    let peer = PeerIdentity::from_npub(n)?;
+                    let (label, mib) = (format!("{name}->{pname}"), quic_mib);
+                    tokio::spawn(async move {
+                        let line = match quic::send(qep, book, peer, mib).await {
+                            Ok(r) => format!(
+                                "RESULT quic {label} mib={mib} ok secs={:.2} mbit={:.1} handshake_ms={} rtt_ms={} lost_pct={:.2}",
+                                r.secs, r.mbit, r.handshake_ms, r.rtt_ms, r.lost_pct
+                            ),
+                            Err(e) => format!("RESULT quic {label} mib={mib} failed: {e:#}"),
+                        };
+                        println!("{line}");
+                        *res.lock().unwrap() = Some(line);
+                    });
+                }
             }
             println!(
                 "t={t:5.1} {name}->{pname} ping={} link={} via={} route={}",
@@ -167,11 +228,20 @@ async fn main() -> Result<()> {
             );
         }
     }
+    for (p, n) in &npubs {
+        let ok = sizes_ok.lock().unwrap().get(n).cloned().unwrap_or_default();
+        println!("RESULT size {name}->{p} echoed={ok:?}");
+    }
     for p in &peers {
         println!(
             "RESULT {name}->{p} first_ping_ok_at={}",
             first_ok.get(p).map(|t| format!("{t:.1}s")).unwrap_or_else(|| "never".into())
         );
+    }
+    if let Some((p, _)) = &quic_to {
+        if quic_result.lock().unwrap().is_none() {
+            println!("RESULT quic {name}->{p} mib={quic_mib} unfinished");
+        }
     }
     ep.shutdown().await.ok();
     Ok(())

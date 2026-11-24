@@ -27,8 +27,12 @@
   - `nvpn-fips-core`: non-Linux/macOS fallback for `udp::underlay::bind_socket_to_interface` (about 15 lines; spike version works).
   - `nvpn-fips-core`: put `bluer` and `rustables` behind features so glibc builds do not need libdbus and libclang.
   - Optional: SACK and window scaling for `nvpn-fips-tcp`.
+- [ ] Ask mmalmi (issues, not patches yet):
+  - Fragment service datagrams on transit paths too, or expose the path's datagram limit. Today a relayed path silently drops anything over the UDP MTU minus 110 bytes.
+  - Queue the first datagram to a peer while the end-to-end session forms, or expose a session-ready signal (today it is dropped, costing QUIC a 1 s retransmit).
+  - An External signaling hook so traversal offers and answers can travel inside the Marmot group, like adverts (Phase 1).
 - [ ] Ask MDK about publishing `cgka-engine` to crates.io, and OpenMLS about the 0.10.0 stable timeline.
-- [x] Build the network test rig (`tests/netrig/`; NAT scenarios done, netem loss scenarios still to add): two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
+- [x] Build the network test rig (`tests/netrig/`; NAT scenarios plus QUIC under 3% loss, relayed and punched): two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
 - [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes.
 
 ## Phase 1: first-contact experiment (blocks the Dataplane design)
@@ -63,7 +67,7 @@ Implementation notes from the rig:
 ## Phase 2: noscat-core rewrite
 
 - [ ] **Dataplane**: FIPS endpoint lifecycle from the device identity; `configured_only` admission; advert export and ingest; network-change handling (`rebind_network_transports`, `refresh_peer_paths`); no other module imports `fips_*`.
-- [ ] **Streams**: quinn over a custom socket on one FIPS service port (prototype in ADR 0003 works: sync `try_send` via `send_datagram(..).now_or_never()`, receive pump into a channel); BBR; warm-up datagram before connect; npub-bound certificates; MTU 1200 with PMTUD off until the largest unfragmented FIPS payload is measured.
+- [ ] **Streams**: quinn over a custom socket on one FIPS service port (prototype in ADR 0003 works: sync `try_send` via `send_datagram(..).now_or_never()`, receive pump into a channel); BBR; warm-up datagram before connect; npub-bound certificates; quinn at 1200 with PMTUD off; FIPS UDP MTU set to 1320 (relayed paths carry at most MTU minus 110 bytes, and FIPS's default 1280 breaks relayed QUIC; see ADR 0003).
 - [ ] **MeshGroup**: Marmot subset on OpenMLS 0.10 (develop on 0.10.0-rc.1, switch to stable on release). Key packages (30443), Welcomes (444 in 1059 to 10050 inbox relays), group events (445 under the exporter key), routing component, admin policy with every device an admin, and a noscat app component for adverts and device names. Reliable commit delivery (relay ACK checks, resend) carries over from 0.4.
 - [ ] **MDK interop suite** in CI via a git dev-dependency: MDK creates and we join, we commit and MDK merges, and the reverse. Confirm `cargo publish --dry-run` passes with it.
 - [ ] **App protocols over QUIC**: port forward, file transfer (resumable, sha256-verified), chat and clipboard with a delivery acknowledgement, presence from adverts.
@@ -109,6 +113,8 @@ Throwaway crate, not kept in the repo. (The kernel TCP baselines first recorded 
 | Same, 1% / 3% loss | 1.9 / 0.8 Mbit/s |
 | Same, 3% loss, jitter, 10% reorder | 0.6 Mbit/s, sha256 match |
 | QUIC (quinn, BBR) over FIPS datagrams: 50 ms RTT, 0 / 1 / 3% loss | 166 / 154 / 156 Mbit/s, sha256 match (full table in ADR 0003) |
+| Largest relayed FIPS service datagram | FIPS UDP MTU minus 110 (1170 at the default 1280); direct links fragment |
+| QUIC (BBR) in the NAT rig, relayed, 3% loss | 98 to 160 Mbit/s, sha256 match |
 | QUIC handshake, cold / after a warm-up datagram | 1003 ms / 2 ms (FIPS drops the first datagram while the session forms) |
 | Largest FIPS service datagram delivered | at least 60 KB (FIPS fragments) |
 | Builds: Android arm64, Windows, musl, macOS arm64 | pass |
