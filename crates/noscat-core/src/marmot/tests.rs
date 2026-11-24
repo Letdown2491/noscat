@@ -267,3 +267,19 @@ fn group_events_use_fresh_keys_and_one_h_tag() {
     assert_ne!(e1.pubkey, a.pk());
     assert_eq!(e1.tags.iter().filter(|t| t.as_slice()[0] == "h").count(), 1);
 }
+
+/// Key packages are addressable (kind 30443, one slot per device): a relay
+/// keeps only the newest and rejects a replacement that is not newer. A
+/// device publishes one at start and `join` publishes another at once, so
+/// two in the same second must still be strictly ordered, and the order
+/// must survive a reopen (the next process).
+#[test]
+fn key_packages_get_strictly_increasing_timestamps() {
+    let mut d = Dev::new("kp-ts");
+    let a = d.g.key_package_event().unwrap();
+    let b = d.g.key_package_event().unwrap();
+    assert!(b.created_at > a.created_at, "{} !> {}", b.created_at, a.created_at);
+    d.reopen();
+    let c = d.g.key_package_event().unwrap();
+    assert!(c.created_at > b.created_at, "{} !> {}", c.created_at, b.created_at);
+}

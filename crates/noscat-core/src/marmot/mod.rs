@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use nostr::prelude::{Event, EventId, Keys, PublicKey};
+use nostr::prelude::{Event, EventId, Keys, PublicKey, Timestamp};
 use openmls::component::ComponentData;
 use openmls::prelude::*;
 use openmls_traits::storage::StorageProvider as _;
@@ -250,6 +250,11 @@ struct Meta {
     /// future epoch: both retried after the epoch changes.
     deferred_payloads: VecDeque<String>,
     deferred_messages: VecDeque<String>,
+    /// created_at of the newest key package event built. The next one is
+    /// stamped later even within the same second: relays keep one key
+    /// package per slot and reject a replacement that is not newer.
+    #[serde(default)]
+    last_key_package_at: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -733,6 +738,8 @@ impl MeshGroup {
             .filter(|c| *c >= codec::FIRST_APP_COMPONENT)
             .collect();
         components.sort_unstable();
+        let at = Timestamp::now().as_secs().max(self.meta.last_key_package_at + 1);
+        self.meta.last_key_package_at = at;
         let ev = transport::key_package_event(
             &self.keys,
             &bytes,
@@ -744,6 +751,7 @@ impl MeshGroup {
                 proposals: &[u16::from(ProposalType::AppDataUpdate), u16::from(ProposalType::SelfRemove)],
                 components: &components,
             },
+            Timestamp::from_secs(at),
         )?;
         // Keep the newest two: an inviter may still hold the previous one.
         self.meta.key_packages.push(OwnKeyPackage {

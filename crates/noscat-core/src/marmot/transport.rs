@@ -136,11 +136,13 @@ fn id_list(name: &str, ids: &[u16]) -> Result<Tag, TransportError> {
     Tag::parse(v).map_err(|e| TransportError(e.to_string()))
 }
 
-/// Build and sign a kind 30443 key package event.
+/// Build and sign a kind 30443 key package event. `created_at` is the
+/// caller's: the event is addressable, so each replacement must be newer.
 pub fn key_package_event(
     keys: &Keys,
     mls_message_bytes: &[u8],
     t: &KeyPackageTags<'_>,
+    created_at: Timestamp,
 ) -> Result<Event, TransportError> {
     let p = |v: &[&str]| Tag::parse(v.iter().copied()).map_err(|e| TransportError(e.to_string()));
     EventBuilder::new(Kind::Custom(KEY_PACKAGE_KIND), B64.encode(mls_message_bytes))
@@ -152,6 +154,7 @@ pub fn key_package_event(
         .tag(id_list("mls_proposals", t.proposals)?)
         .tag(id_list("app_components", t.components)?)
         .tag(p(&["client", "noscat"])?)
+        .custom_created_at(created_at)
         .finalize(keys)
         .map_err(|e| TransportError(e.to_string()))
 }
