@@ -28,7 +28,7 @@
   - `nvpn-fips-core`: put `bluer` and `rustables` behind features so glibc builds do not need libdbus and libclang.
   - Optional: SACK and window scaling for `nvpn-fips-tcp`.
 - [ ] Ask MDK about publishing `cgka-engine` to crates.io, and OpenMLS about the 0.10.0 stable timeline.
-- [ ] Build the network test rig: two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
+- [x] Build the network test rig (`tests/netrig/`; NAT scenarios done, netem loss scenarios still to add): two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
 - [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes.
 
 ## Phase 1: first-contact experiment (blocks the Dataplane design)
@@ -63,7 +63,7 @@ Implementation notes from the rig:
 ## Phase 2: noscat-core rewrite
 
 - [ ] **Dataplane**: FIPS endpoint lifecycle from the device identity; `configured_only` admission; advert export and ingest; network-change handling (`rebind_network_transports`, `refresh_peer_paths`); no other module imports `fips_*`.
-- [ ] **Streams**: quinn over a custom socket on one FIPS service port; npub-bound certificates; max UDP payload capped to one unfragmented FIPS payload.
+- [ ] **Streams**: quinn over a custom socket on one FIPS service port (prototype in ADR 0003 works: sync `try_send` via `send_datagram(..).now_or_never()`, receive pump into a channel); BBR; warm-up datagram before connect; npub-bound certificates; MTU 1200 with PMTUD off until the largest unfragmented FIPS payload is measured.
 - [ ] **MeshGroup**: Marmot subset on OpenMLS 0.10 (develop on 0.10.0-rc.1, switch to stable on release). Key packages (30443), Welcomes (444 in 1059 to 10050 inbox relays), group events (445 under the exporter key), routing component, admin policy with every device an admin, and a noscat app component for adverts and device names. Reliable commit delivery (relay ACK checks, resend) carries over from 0.4.
 - [ ] **MDK interop suite** in CI via a git dev-dependency: MDK creates and we join, we commit and MDK merges, and the reverse. Confirm `cargo publish --dry-run` passes with it.
 - [ ] **App protocols over QUIC**: port forward, file transfer (resumable, sha256-verified), chat and clipboard with a delivery acknowledgement, presence from adverts.
@@ -97,7 +97,7 @@ Implementation notes from the rig:
 
 ## Spike evidence (2026-11-23)
 
-Throwaway crate, not kept in the repo. Ran as `nobody` with all capabilities dropped:
+Throwaway crate, not kept in the repo. (The kernel TCP baselines first recorded here were invalid, see ADR 0003, and have been removed.) Ran as `nobody` with all capabilities dropped:
 
 | Check | Result |
 |---|---|
@@ -106,8 +106,10 @@ Throwaway crate, not kept in the repo. Ran as `nobody` with all capabilities dro
 | Revocation via `update_peers` | effective before return (0.3 ms) |
 | 32 MiB stream over `nvpn-fips-tcp`, clean link | sha256 match, 355 Mbit/s |
 | Same, 50 ms RTT, no loss | 8.9 Mbit/s (64 KB window cap) |
-| Same, 1% / 3% loss | 1.9 / 0.8 Mbit/s (kernel TCP: 46 / 49) |
-| Same, 3% loss, jitter, 10% reorder | 0.6 Mbit/s, sha256 match (kernel TCP: 101) |
+| Same, 1% / 3% loss | 1.9 / 0.8 Mbit/s |
+| Same, 3% loss, jitter, 10% reorder | 0.6 Mbit/s, sha256 match |
+| QUIC (quinn, BBR) over FIPS datagrams: 50 ms RTT, 0 / 1 / 3% loss | 166 / 154 / 156 Mbit/s, sha256 match (full table in ADR 0003) |
+| QUIC handshake, cold / after a warm-up datagram | 1003 ms / 2 ms (FIPS drops the first datagram while the session forms) |
 | Largest FIPS service datagram delivered | at least 60 KB (FIPS fragments) |
 | Builds: Android arm64, Windows, musl, macOS arm64 | pass |
 | Build: FreeBSD | pass with the two patches above |
