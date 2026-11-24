@@ -342,6 +342,14 @@ enum MeshCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
+    /// Report this device directory's mesh state: identity, MLS store
+    /// health, sidecar, journal. The wipe signature (tables present,
+    /// rows gone) is called out with the recovery recipe.
+    Doctor {
+        /// Device directory to inspect.
+        #[arg(long, default_value_os_t = default_device_dir())]
+        dir: std::path::PathBuf,
+    },
     /// Drop a pending join request without inviting (the requester can
     /// ask again by re-publishing its key package).
     Decline {
@@ -804,6 +812,15 @@ fn main() -> anyhow::Result<()> {
                     }
                 };
             if members.iter().any(|m| m.npub == author.to_hex()) {
+                // A member republishing its key package is normal (the
+                // event is replaceable). But it is ALSO the shape of the
+                // wiped-store trap (issue #14): the member cannot decrypt
+                // any Welcome sent against its old package, and silence
+                // here strands it. Say so.
+                eprintln!(
+                    "# 🤝 device {author} is already a member; nothing to do \
+                     (if it lost its state: `mesh remove` it, then let it join again)"
+                );
                 continue;
             }
 
@@ -1599,6 +1616,41 @@ fn spawn_printer(
                     rt.block_on(dev.invite(key, &relays_or_default(relays)))?;
                     clear_join_request(&dir, &req.key);
                     eprintln!("# ✅ invited {} into the mesh", req.npub);
+                }
+                MeshCommand::Doctor { dir } => {
+                    let report = noscat_core::mesh::store_report(&dir)?;
+                    println!("device  {}  ({})", report.npub, dir.display());
+                    if !report.store_exists {
+                        println!("store   absent (fresh device: `mesh publish` enrolls it)");
+                        return Ok(());
+                    }
+                    println!(
+                        "store   groups={} key-packages={} encryption-keys={} signature-keys={}",
+                        report.group_data_rows,
+                        report.key_package_rows,
+                        report.encryption_key_rows,
+                        report.signature_key_rows
+                    );
+                    println!(
+                        "sidecar mesh.json={} journal-commits={}",
+                        if report.mesh_sidecar_present { "present" } else { "absent" },
+                        report.journal_commits
+                    );
+                    if report.looks_wiped() {
+                        println!("# ⚠️  the MLS store holds NO state: this device cannot decrypt");
+                        println!("# any Welcome sent to it (its old key package is still on the");
+                        println!("# relays, so the owner may have added it with no effect). Fix:");
+                        println!("#   1. delete {}/mls.sqlite3*", dir.display());
+                        println!("#   2. owner: `noscat mesh remove <this npub>`");
+                        println!("#   3. here: `noscat mesh publish`, then join again");
+                    } else if report.packages_without_keys() {
+                        println!("# ⚠️  key packages exist but their private keys are gone: same");
+                        println!("# recovery as a wiped store (delete the store, get removed, re-join).");
+                    } else if report.group_data_rows == 0 {
+                        println!("# no mesh joined yet: `mesh publish` + owner invite, or `mesh join`");
+                    } else {
+                        println!("# store looks healthy");
+                    }
                 }
                 MeshCommand::Decline { dir, device } => {
                     let pending = pending_join_requests(&dir);

@@ -202,6 +202,12 @@ Same set as the Rust `Event` with `path: String` instead of `PathBuf`,
 - Join-request journaling (`join-requests/`, `mesh requests/accept/
   decline` in the CLI) is CLI-only today; the FFI/client surface for it
   is a fast-follow when an app needs it.
+- Device-state diagnostics: `noscat_core::mesh::store_report(dir)`
+  returns a `StoreReport` (row counts for the OpenMLS tables, sidecar
+  and journal presence) with `looks_wiped()` / `packages_without_keys()`
+  detecting the wiped-store signature of issue #14 - a device holding
+  no usable keys cannot decrypt Welcomes and needs the remove + re-join
+  recovery. The CLI exposes it as `noscat mesh doctor`.
 
 ## Versioning
 

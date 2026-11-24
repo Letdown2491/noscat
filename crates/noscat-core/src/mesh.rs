@@ -1140,7 +1140,7 @@ impl Device {
             welcome,
             None,
         )
-        .map_err(|e| MeshError::Mls(e.to_string()))?;
+        .map_err(|e| map_welcome_error(e))?;
         // The group itself must agree the expected owner is in charge: a
         // sender can only gift-wrap, not change who owns the mesh they
         // claim. A policy mismatch here means the invitation is for a mesh
@@ -1161,6 +1161,114 @@ impl Device {
         tracing::info!(owner = %sender, "joined mesh");
         Ok(())
     }
+}
+
+/// The facts about a device directory's mesh state, for `mesh doctor`.
+///
+/// Exists because a wiped MLS store (tables present, rows gone - issue
+/// #14) is indistinguishable from "never used" to the operator, and the
+/// failure mode is nasty: the device's old key package event lives on the
+/// relays for its expiry window, the owner's auto-accept commits an Add
+/// against it, and the joiner receives a Welcome it can never decrypt.
+pub struct StoreReport {
+    /// This device's npub.
+    pub npub: String,
+    /// Whether `mls.sqlite3` exists at all (absent = a fresh dir).
+    pub store_exists: bool,
+    /// Row counts from the OpenMLS store (0 when the table is absent).
+    pub group_data_rows: u64,
+    pub key_package_rows: u64,
+    pub encryption_key_rows: u64,
+    pub signature_key_rows: u64,
+    /// The group-id sidecar: absent means the device reads as mesh-less.
+    pub mesh_sidecar_present: bool,
+    /// Commits in the owner's resend journal (0 when absent).
+    pub journal_commits: u64,
+}
+
+impl StoreReport {
+    /// The wiped-store signature (issue #14): a store that HAS been
+    /// initialized (signer row) but holds no key packages, no encryption
+    /// keys, and no groups. A fresh device dir has no store file; a
+    /// healthy device has key packages and (once meshed) group data.
+    pub fn looks_wiped(&self) -> bool {
+        self.store_exists
+            && self.signature_key_rows > 0
+            && self.key_package_rows == 0
+            && self.encryption_key_rows == 0
+            && self.group_data_rows == 0
+    }
+
+    /// Published packages whose private keys are missing: any Welcome
+    /// built against them is undecryptable by this device.
+    pub fn packages_without_keys(&self) -> bool {
+        self.store_exists
+            && self.key_package_rows > 0
+            && self.encryption_key_rows == 0
+    }
+}
+
+/// Collect a [`StoreReport`] for `dir`. Read-only: opens the store with a
+/// second connection (WAL makes concurrent readers safe) so it runs
+/// against a live device directory.
+pub fn store_report(dir: &std::path::Path) -> Result<StoreReport, MeshError> {
+    let secret_path = dir.join("identity.nsec");
+    let identity = Identity::from_secret(std::fs::read_to_string(&secret_path)?.trim())?;
+    let store_path = dir.join("mls.sqlite3");
+    let store_exists = store_path.exists();
+    let mut report = StoreReport {
+        npub: identity.npub(),
+        store_exists,
+        group_data_rows: 0,
+        key_package_rows: 0,
+        encryption_key_rows: 0,
+        signature_key_rows: 0,
+        mesh_sidecar_present: dir.join("mesh.json").exists(),
+        journal_commits: std::fs::read_to_string(dir.join("commits.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| v.as_array().map(|a| a.len() as u64))
+            .unwrap_or(0),
+    };
+    if store_exists {
+        let connection = rusqlite::Connection::open_with_flags(
+            &store_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        for (count, table) in [
+            (&mut report.group_data_rows, "openmls_group_data"),
+            (&mut report.key_package_rows, "openmls_key_packages"),
+            (&mut report.encryption_key_rows, "openmls_encryption_keys"),
+            (&mut report.signature_key_rows, "openmls_signature_keys"),
+        ] {
+            // An absent table reads as 0: the doctor reports, it does not
+            // repair.
+            *count = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table}"),
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap_or(0);
+        }
+    }
+    Ok(report)
+}
+
+/// The Welcome decryption failure that means "this device cannot open
+/// what was sent to it": the Welcome is sealed to a key package whose
+/// private keys this store does not hold - the store was wiped (or the
+/// invitation is stale) and the generic MLS error reads as a bug, not a
+/// recovery procedure (issue #14).
+fn map_welcome_error<E: std::fmt::Display>(e: E) -> MeshError {
+    let text = e.to_string();
+    if text.contains("No matching key package was found in the key store") {
+        return MeshError::Mls(
+            "this invitation is sealed to a key package this device no longer holds keys for              (wiped or stale device state): re-publish your key package (`mesh publish`),              have the mesh owner remove this device (`mesh remove`), then join again"
+                .into(),
+        );
+    }
+    MeshError::Mls(text)
 }
 
 /// Wire format of a gift-wrapped mesh message.
