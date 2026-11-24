@@ -89,17 +89,20 @@ pub enum Event {
     TunnelUp { peer: String },
     /// It ended; `error` is set when not clean.
     TunnelClosed { peer: String, error: Option<String> },
-    /// A transfer finished: on receive the final verified path, on send
-    /// the source.
-    TransferDone { peer: String, path: String },
+    /// A transfer began, either direction. `id` names it in every later
+    /// transfer event; `path` is the source of a send, None on a receive.
+    TransferStarted { id: u64, peer: String, name: String, size: u64, incoming: bool, path: Option<String> },
+    /// A transfer finished: on receive the final verified path (it may
+    /// differ from the sent name), on send the source.
+    TransferDone { id: u64, peer: String, path: String },
     /// A receive ended without a whole file; the `.noscat-part` resumes
     /// when the same file is sent again.
-    TransferPartial { peer: String, path: String },
-    /// Sends only, one event per percent.
-    TransferProgress { peer: String, path: String, sent: u64, total: u64 },
-    TransferFailed { peer: String, error: String },
-    /// Cancelled by this side; the receiver keeps its partial.
-    TransferCancelled { peer: String, path: String },
+    TransferPartial { id: u64, peer: String, path: String },
+    /// Both directions, at most one event per percent.
+    TransferProgress { id: u64, peer: String, path: String, sent: u64, total: u64 },
+    TransferFailed { id: u64, peer: String, error: String },
+    /// A send cancelled by this side; the receiver keeps its partial.
+    TransferCancelled { id: u64, peer: String, path: String },
     /// A forward ended (cancelled: error None).
     ForwardStopped { id: u64, error: Option<String> },
     ChatMessage { peer: String, text: String },
@@ -132,13 +135,21 @@ fn event(ev: noscat_client::Event) -> Event {
         E::Listening { npub, addr } => Event::Listening { npub, port: addr.port() },
         E::TunnelUp { peer } => Event::TunnelUp { peer },
         E::TunnelClosed { peer, error } => Event::TunnelClosed { peer, error },
-        E::TransferDone { peer, path } => Event::TransferDone { peer, path: path.display().to_string() },
-        E::TransferPartial { peer, path } => Event::TransferPartial { peer, path: path.display().to_string() },
-        E::TransferProgress { peer, path, sent, total } => {
-            Event::TransferProgress { peer, path: path.display().to_string(), sent, total }
+        E::TransferStarted { id, peer, name, size, incoming, path } => Event::TransferStarted {
+            id,
+            peer,
+            name,
+            size,
+            incoming,
+            path: path.map(|p| p.display().to_string()),
+        },
+        E::TransferDone { id, peer, path } => Event::TransferDone { id, peer, path: path.display().to_string() },
+        E::TransferPartial { id, peer, path } => Event::TransferPartial { id, peer, path: path.display().to_string() },
+        E::TransferProgress { id, peer, path, sent, total } => {
+            Event::TransferProgress { id, peer, path: path.display().to_string(), sent, total }
         }
-        E::TransferFailed { peer, error, .. } => Event::TransferFailed { peer, error },
-        E::TransferCancelled { peer, path } => Event::TransferCancelled { peer, path: path.display().to_string() },
+        E::TransferFailed { id, peer, error, .. } => Event::TransferFailed { id, peer, error },
+        E::TransferCancelled { id, peer, path } => Event::TransferCancelled { id, peer, path: path.display().to_string() },
         E::ForwardStopped { id, error } => Event::ForwardStopped { id, error },
         E::ChatMessage { peer, text } => Event::ChatMessage { peer, text },
         E::Clipboard { peer, text } => Event::Clipboard { peer, text },
@@ -398,8 +409,9 @@ impl NoscatClient {
 
     /// Send a file; the outcome arrives as events. Resumes a partial the
     /// member kept.
-    pub fn send_file(&self, path: String, target_npub: String) {
-        self.client.send_file(PathBuf::from(path), &target_npub);
+    /// Send a file; returns the transfer id the events carry.
+    pub fn send_file(&self, path: String, target_npub: String) -> u64 {
+        self.client.send_file(PathBuf::from(path), &target_npub)
     }
 
     /// Cancel a send (same path and member it started with).

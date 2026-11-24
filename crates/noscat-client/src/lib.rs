@@ -143,17 +143,22 @@ pub enum Event {
     TunnelUp { peer: String },
     /// A connection with a member ended; `error` is set when not clean.
     TunnelClosed { peer: String, error: Option<String> },
+    /// A transfer began, in either direction. `id` names it in every later
+    /// transfer event. `path` is the source file of a send; `None` on a
+    /// receive (the final name is only known at the end).
+    TransferStarted { id: u64, peer: String, name: String, size: u64, incoming: bool, path: Option<PathBuf> },
     /// A transfer finished and verified (source path on send, final path
-    /// on receive).
-    TransferDone { peer: String, path: PathBuf },
+    /// on receive, which may differ from the sent name when it was taken).
+    TransferDone { id: u64, peer: String, path: PathBuf },
     /// A receive ended without a whole file; the `.noscat-part` resumes
     /// when the same file is sent again.
-    TransferPartial { peer: String, path: PathBuf },
-    /// Sends only, one event per percent.
-    TransferProgress { peer: String, path: PathBuf, sent: u64, total: u64 },
-    TransferFailed { peer: String, path: Option<PathBuf>, error: String },
-    /// Cancelled by this side.
-    TransferCancelled { peer: String, path: PathBuf },
+    TransferPartial { id: u64, peer: String, path: PathBuf },
+    /// Both directions, at most one event per percent. `path` is the source
+    /// on a send and the `.noscat-part` file on a receive.
+    TransferProgress { id: u64, peer: String, path: PathBuf, sent: u64, total: u64 },
+    TransferFailed { id: u64, peer: String, path: Option<PathBuf>, error: String },
+    /// A send cancelled by this side; the receiver keeps its partial.
+    TransferCancelled { id: u64, peer: String, path: PathBuf },
     /// A forward ended (cancelled, or `error` set).
     ForwardStopped { id: u64, error: Option<String> },
     ChatMessage { peer: String, text: String },
@@ -281,7 +286,8 @@ struct Inner {
     serving: Mutex<Serving>,
     conns: Mutex<HashMap<PublicKey, Connection>>,
     /// In-flight sends keyed by (peer, path): abort handles.
-    sends: Mutex<HashMap<(String, PathBuf), Vec<tokio::task::AbortHandle>>>,
+    sends: Mutex<HashMap<(String, PathBuf), Vec<(u64, tokio::task::AbortHandle)>>>,
+    next_transfer_id: AtomicU64,
     forwards: Mutex<HashMap<u64, ForwardEntry>>,
     next_forward_id: AtomicU64,
 }
@@ -479,8 +485,18 @@ impl Inner {
                     f.refuse().await;
                     return;
                 };
+                let id = self.next_transfer_id.fetch_add(1, Ordering::Relaxed);
+                self.emit(Event::TransferStarted {
+                    id,
+                    peer: peer.clone(),
+                    name: f.name.clone(),
+                    size: f.size,
+                    incoming: true,
+                    path: None,
+                });
                 if f.size > self.max_incoming {
                     self.emit(Event::TransferFailed {
+                        id,
                         peer,
                         path: None,
                         error: format!("{} is larger than the receive limit", f.name),
@@ -488,10 +504,19 @@ impl Inner {
                     f.refuse().await;
                     return;
                 }
-                match f.receive(&dir, |_, _| {}).await {
-                    Ok(Received::Done(path)) => self.emit(Event::TransferDone { peer, path }),
-                    Ok(Received::Partial(path)) => self.emit(Event::TransferPartial { peer, path }),
-                    Err(e) => self.emit(Event::TransferFailed { peer, path: None, error: e.to_string() }),
+                let part = dir.join(format!("{}{}", f.name, apps::PART_SUFFIX));
+                let mut last_pct = u64::MAX;
+                let progress = |got: u64, total: u64| {
+                    let pct = if total == 0 { 100 } else { got * 100 / total };
+                    if pct != last_pct {
+                        last_pct = pct;
+                        self.emit(Event::TransferProgress { id, peer: peer.clone(), path: part.clone(), sent: got, total });
+                    }
+                };
+                match f.receive(&dir, progress).await {
+                    Ok(Received::Done(path)) => self.emit(Event::TransferDone { id, peer, path }),
+                    Ok(Received::Partial(path)) => self.emit(Event::TransferPartial { id, peer, path }),
+                    Err(e) => self.emit(Event::TransferFailed { id, peer, path: None, error: e.to_string() }),
                 }
             }
             Incoming::Forward(fw) => {
@@ -674,6 +699,7 @@ impl Client {
             serving: Mutex::new(Serving::default()),
             conns: Mutex::new(HashMap::new()),
             sends: Mutex::new(HashMap::new()),
+            next_transfer_id: AtomicU64::new(1),
             forwards: Mutex::new(HashMap::new()),
             next_forward_id: AtomicU64::new(1),
         });
@@ -887,11 +913,13 @@ impl Client {
         self.inner.rt().spawn(inner.send_text(target.to_string(), TextKind::Clipboard, text.to_string()));
     }
 
-    /// Send a file; progress and the outcome arrive as events.
-    pub fn send_file(&self, path: PathBuf, target: &str) {
+    /// Send a file. Returns the transfer id; `TransferStarted`, progress
+    /// and the outcome arrive as events carrying it.
+    pub fn send_file(&self, path: PathBuf, target: &str) -> u64 {
         let inner = self.inner.clone();
         let target = target.to_string();
         let key = (target.clone(), path.clone());
+        let id = self.inner.next_transfer_id.fetch_add(1, Ordering::Relaxed);
         let task = self.inner.rt().spawn({
             let inner = inner.clone();
             let key = key.clone();
@@ -899,13 +927,16 @@ impl Client {
                 let res = async {
                     let pk = parse_target(&target)?;
                     let peer = npub_of(&pk);
+                    let size = tokio::fs::metadata(&path).await?.len();
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    inner.emit(Event::TransferStarted { id, peer: peer.clone(), name, size, incoming: false, path: Some(path.clone()) });
                     let c = inner.conn(pk).await?;
                     let mut last_pct = u64::MAX;
                     apps::send_file(&c, &path, |sent, total| {
                         let pct = if total == 0 { 100 } else { sent * 100 / total };
                         if pct != last_pct {
                             last_pct = pct;
-                            inner.emit(Event::TransferProgress { peer: peer.clone(), path: path.clone(), sent, total });
+                            inner.emit(Event::TransferProgress { id, peer: peer.clone(), path: path.clone(), sent, total });
                         }
                     })
                     .await?;
@@ -913,8 +944,8 @@ impl Client {
                 }
                 .await;
                 match res {
-                    Ok(peer) => inner.emit(Event::TransferDone { peer, path: path.clone() }),
-                    Err(e) => inner.emit(Event::TransferFailed { peer: target.clone(), path: Some(path.clone()), error: e.to_string() }),
+                    Ok(peer) => inner.emit(Event::TransferDone { id, peer, path: path.clone() }),
+                    Err(e) => inner.emit(Event::TransferFailed { id, peer: target.clone(), path: Some(path.clone()), error: e.to_string() }),
                 }
                 if let Ok(mut m) = inner.sends.lock() {
                     m.remove(&key);
@@ -922,8 +953,9 @@ impl Client {
             }
         });
         if let Ok(mut m) = self.inner.sends.lock() {
-            m.entry(key).or_default().push(task.abort_handle());
+            m.entry(key).or_default().push((id, task.abort_handle()));
         }
+        id
     }
 
     /// Cancel sends of `path` to `target`; the receiver keeps its partial
@@ -937,11 +969,9 @@ impl Client {
             .and_then(|mut m| m.remove(&(target.to_string(), path.to_path_buf())))
             .unwrap_or_default();
         let any = !handles.is_empty();
-        for h in handles {
+        for (id, h) in handles {
             h.abort();
-        }
-        if any {
-            self.inner.emit(Event::TransferCancelled { peer: target.to_string(), path: path.to_path_buf() });
+            self.inner.emit(Event::TransferCancelled { id, peer: target.to_string(), path: path.to_path_buf() });
         }
         any
     }

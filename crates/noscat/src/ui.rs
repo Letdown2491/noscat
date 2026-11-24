@@ -74,7 +74,8 @@ pub fn print_event(ev: &Event, members: &[Member]) {
             Some(e) => eprintln!("# ⚠️  connection to {} failed: {e}", label(members, peer)),
             None => eprintln!("# 🔁 connection to {} closed", label(members, peer)),
         },
-        Event::TransferDone { peer, path } => eprintln!("# ✅ {} <-> {}", label(members, peer), path.display()),
+        Event::TransferStarted { .. } => {}
+        Event::TransferDone { peer, path, .. } => eprintln!("# ✅ {} <-> {}", label(members, peer), path.display()),
         Event::TransferPartial { path, .. } => eprintln!(
             "# ⚠️  transfer ended incomplete: partial kept at {} (a resend of the same file resumes)",
             path.display()

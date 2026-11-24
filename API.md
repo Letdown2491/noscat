@@ -115,7 +115,7 @@ Sending:
 |---|---|---|
 | `connect(target)` | `MeshStream` | `AsyncRead + AsyncWrite` to the member's default service. |
 | `pipe_stdio(target)` | `()` | Netcat mode, dial side. Blocks. |
-| `send_file(path, target)` | `()` | Async; progress and outcome as events. Resumes a partial the receiver kept. |
+| `send_file(path, target)` | `u64` | Async; returns the transfer id that its `Transfer*` events carry. Resumes a partial the receiver kept. |
 | `cancel_transfer(target, path)` | `bool` | The receiver keeps its partial for a resume. |
 | `send_chat(target, text)` / `send_clipboard(target, text)` | `()` | Delivery is `ChatDelivered` or `ChatFailed`. Text up to 64 KiB. |
 | `forward(target, local)` | `u64` | Listen on `local`; each TCP connection goes to the member's default service. |
@@ -135,11 +135,12 @@ Peers are bech32 npubs.
 | `Listening` | `npub, addr` | Receiving is set up; the pairing QR banner belongs here. |
 | `TunnelUp` | `peer` | A connection with a member is up (dialed or accepted). |
 | `TunnelClosed` | `peer, error` | It ended; `error` set when not a clean close. |
-| `TransferDone` | `peer, path` | Whole file verified (sha256) and in place. On send, `path` is the source. |
-| `TransferPartial` | `peer, path` | Receive ended without a whole file; the `.noscat-part` resumes on resend. |
-| `TransferProgress` | `peer, path, sent, total` | Sends only, one event per percent. |
-| `TransferFailed` | `peer, path, error` | `path` is `None` for a receive that never started. |
-| `TransferCancelled` | `peer, path` | Cancelled by this side. |
+| `TransferStarted` | `id, peer, name, size, incoming, path` | A transfer began, either direction; `id` names it in every later transfer event. `path` is the source of a send, `None` on a receive. |
+| `TransferDone` | `id, peer, path` | Whole file verified (sha256) and in place. On send, `path` is the source; on receive, the final file, whose name may differ from the sent one when it was taken. |
+| `TransferPartial` | `id, peer, path` | Receive ended without a whole file; the `.noscat-part` resumes on resend. |
+| `TransferProgress` | `id, peer, path, sent, total` | Both directions, at most one event per percent. `path` is the source on a send, the `.noscat-part` on a receive. |
+| `TransferFailed` | `id, peer, path, error` | `path` is `None` on a receive. |
+| `TransferCancelled` | `id, peer, path` | A send cancelled by this side. |
 | `ForwardStopped` | `id, error` | Drop it from the UI list. |
 | `ChatMessage` | `peer, text` | |
 | `ChatDelivered` | `peer` | The member acknowledged the text. |
@@ -221,7 +222,7 @@ on the same directory fails with `Busy` until then.
 `npub()`, `meshName()`, `members()`, `invite(npub)`, `remove(npub)`,
 `networkChanged()`, `forward(target, localPort)`, `listForwards()`,
 `cancelForward(id)`, `expose(toHost, toPort)`, `servePort(port, enabled)`,
-`sendFile(path, target)`, `cancelTransfer(path, target)`,
+`sendFile(path, target)` (returns the transfer id), `cancelTransfer(path, target)`,
 `receiveFile(outDir)`, `sendChat(target, text)`,
 `sendClipboard(target, text)`, `up(outDir, bridgePort?)`.
 
@@ -238,7 +239,8 @@ are the ones apps keep violating):
 The Rust `Event` set with `path: String` instead of `PathBuf`,
 `Listening { npub, port }` instead of a SocketAddr, `TransferFailed`
 without `path`, and `Roster { members: List<MeshMember> }`. New in 0.5:
-`MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
+`TransferStarted` (with `path: String?`) and an `id` on every transfer
+event, `MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
 `JoinRequest { peer, name? }` (a device that scanned this one's QR asks
 to be invited: show a prompt, then `invite(peer)`).
 

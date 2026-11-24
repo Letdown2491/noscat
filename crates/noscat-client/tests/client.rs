@@ -131,15 +131,47 @@ fn two_clients_end_to_end() {
     let src = tmp("src").join("notes.txt");
     let body: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_le_bytes()).collect();
     std::fs::write(&src, &body).unwrap();
-    a.send_file(src.clone(), b.npub());
+    let sid = a.send_file(src.clone(), b.npub());
+    // The receiver: started (incoming, name, size), progress up to the
+    // whole file, done; one id throughout.
+    let mut rid = None;
+    let mut received = 0;
     let got = wait(&eb, "file received", |e| match e {
-        Event::TransferDone { path, .. } => Some(path.clone()),
+        Event::TransferStarted { id, name, size, incoming, path, .. } => {
+            assert!(*incoming && path.is_none());
+            assert_eq!((name.as_str(), *size), ("notes.txt", body.len() as u64));
+            rid = Some(*id);
+            None
+        }
+        Event::TransferProgress { id, sent, total, .. } => {
+            assert_eq!(Some(*id), rid, "progress before started, or another id");
+            assert_eq!(*total, body.len() as u64);
+            received = *sent;
+            None
+        }
+        Event::TransferDone { id, path, .. } => {
+            assert_eq!(Some(*id), rid);
+            Some(path.clone())
+        }
         Event::TransferFailed { error, .. } => panic!("receive failed: {error}"),
         _ => None,
     });
+    assert_eq!(received, body.len() as u64, "receive progress reached the whole file");
     assert_eq!(std::fs::read(&got).unwrap(), body);
+    // The sender: the id send_file returned, from started to done.
+    let mut started = false;
     wait(&ea, "file sent", |e| match e {
-        Event::TransferDone { path, .. } if *path == src => Some(()),
+        Event::TransferStarted { id, incoming, path, size, .. } if *id == sid => {
+            assert!(!*incoming && path.as_deref() == Some(src.as_path()));
+            assert_eq!(*size, body.len() as u64);
+            started = true;
+            None
+        }
+        Event::TransferDone { id, path, .. } if *id == sid => {
+            assert!(started, "done before started");
+            assert_eq!(*path, src);
+            Some(())
+        }
         Event::TransferFailed { error, .. } => panic!("send failed: {error}"),
         _ => None,
     });

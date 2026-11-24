@@ -167,23 +167,23 @@ pub async fn exec(
         }
         Op::Send { path, target } => {
             let mut rx = ctx.events.subscribe();
-            ctx.client.send_file(path.clone(), &target);
+            let id = ctx.client.send_file(path.clone(), &target);
             let mut last_tenth = None;
             loop {
                 match rx.recv().await {
-                    Ok(Event::TransferProgress { path: p, sent, total, .. }) if p == path => {
+                    Ok(Event::TransferProgress { id: i, sent, total, .. }) if i == id => {
                         let tenth = if total == 0 { 10 } else { sent * 10 / total };
                         if last_tenth != Some(tenth) {
                             last_tenth = Some(tenth);
                             line(out, format!("{}% of {}", tenth * 10, path.display()));
                         }
                     }
-                    Ok(Event::TransferDone { path: p, peer }) if p == path => {
+                    Ok(Event::TransferDone { id: i, peer, .. }) if i == id => {
                         line(out, format!("sent {} to {peer}", path.display()));
                         break;
                     }
-                    Ok(Event::TransferFailed { path: Some(p), error, .. }) if p == path => return Err(error),
-                    Ok(Event::TransferCancelled { path: p, .. }) if p == path => return Err("cancelled".into()),
+                    Ok(Event::TransferFailed { id: i, error, .. }) if i == id => return Err(error),
+                    Ok(Event::TransferCancelled { id: i, .. }) if i == id => return Err("cancelled".into()),
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(e) => return Err(e.to_string()),
                 }
