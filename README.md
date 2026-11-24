@@ -125,8 +125,13 @@ names a join request and waits. On that device, `up` prints
 ```
 
 Type that (or run `noscat mesh invite <npub>` from another terminal) and
-the new device is in. In the apps, the join request is a prompt; on a
-phone you scan the QR instead of typing the npub.
+the new device is in. On a phone you scan the QR instead of typing the
+npub. The apps cannot approve join requests yet; a CLI member does.
+
+To skip approving while you set up devices, run `noscat up --accept-joins`:
+every device that asks is invited. A join request only needs this
+device's npub, which is not secret (its key packages on relays carry it),
+so leave the flag off once your devices are in.
 
 Every member can invite and remove:
 

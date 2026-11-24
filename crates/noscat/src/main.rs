@@ -88,6 +88,10 @@ enum Command {
         /// Let members forward to this local port by number (repeatable).
         #[arg(long = "serve-port")]
         serve_ports: Vec<u16>,
+        /// Invite every device that asks to join (scanned this device's QR, or
+        /// otherwise knows its npub) without asking. Off by default.
+        #[arg(long)]
+        accept_joins: bool,
     },
     /// Run this device and expose one TCP service to members.
     Expose {
@@ -284,7 +288,7 @@ fn run_op(dir: &Path, d: &DeviceArgs, op: Op) -> Result<()> {
 }
 
 /// Narrate events until the process ends, labelling members by name.
-fn spawn_printer(ctx: &Ctx) {
+fn spawn_printer(ctx: &Ctx, accept_joins: bool) {
     let client = ctx.client.clone();
     let mut rx = ctx.events.subscribe();
     std::thread::spawn(move || {
@@ -299,6 +303,22 @@ fn spawn_printer(ctx: &Ctx) {
                 members = client.members();
             }
             ui::print_event(&ev, &members);
+            if let (true, Event::JoinRequest { peer, name }) = (accept_joins, &ev) {
+                auto_invite(&client, peer.clone(), name.clone());
+            }
+        }
+    });
+}
+
+/// `up --accept-joins`: invite a device that asked to join. Off the printer
+/// thread, since an invite is a relay round trip.
+fn auto_invite(client: &Client, peer: String, name: Option<String>) {
+    let client = client.clone();
+    std::thread::spawn(move || {
+        let who = name.unwrap_or_else(|| "the device".into());
+        match client.invite(&peer) {
+            Ok(()) => eprintln!("# ✅ invited {who} ({peer})"),
+            Err(e) => eprintln!("# ❌ could not invite {who} ({peer}): {e}"),
         }
     });
 }
@@ -311,13 +331,16 @@ fn print_qr(npub: &str) {
 }
 
 /// Run a device in the foreground until Ctrl-C.
-fn run_device(dir: &Path, d: &DeviceArgs, setup: impl FnOnce(&Client) -> Result<()>) -> Result<()> {
+fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce(&Client) -> Result<()>) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let Some(ctx) = start(dir, d, &rt)? else {
         bail!("this device is already running (another noscat process uses {})", dir.display());
     };
-    spawn_printer(&ctx);
+    spawn_printer(&ctx, accept_joins);
     setup(&ctx.client)?;
+    if accept_joins {
+        eprintln!("# 🚪 accepting joins: any device that asks is invited (anyone who knows this npub can ask)");
+    }
     if ctx.client.in_mesh() {
         eprintln!("# 🐈 mesh {:?}; scan the QR on a new device to join it", ctx.client.mesh_name().unwrap_or_default());
     } else {
@@ -356,14 +379,14 @@ fn main() -> Result<()> {
             print_qr(&npub);
             println!("{npub}");
         }
-        Command::Up { out, to, serve_ports } => {
+        Command::Up { out, to, serve_ports, accept_joins } => {
             let out = out.unwrap_or_else(|| {
                 std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
                     .map(|h| PathBuf::from(h).join("Downloads"))
                     .unwrap_or_else(|| PathBuf::from("."))
             });
-            run_device(&dir, d, |c| {
+            run_device(&dir, d, accept_joins, |c| {
                 c.up(out.clone(), to)?;
                 eprintln!("# 📥 files from members go to {}", out.display());
                 if let Some(to) = to {
@@ -377,7 +400,7 @@ fn main() -> Result<()> {
             })?;
         }
         Command::Expose { to } => {
-            run_device(&dir, d, |c| {
+            run_device(&dir, d, false, |c| {
                 c.expose(to)?;
                 eprintln!("# 🔗 exposing tcp/{to} to members");
                 Ok(())

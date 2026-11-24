@@ -169,3 +169,40 @@ fn cli_end_to_end() {
     let _ = up.wait();
     drop(relay);
 }
+
+#[test]
+fn up_accept_joins() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+
+    let (da, dc) = (tmp("a"), tmp("c"));
+    let a = Dev { npub: id(&da), dir: da, listen: free_udp() };
+    let c = Dev { npub: id(&dc), dir: dc, listen: free_udp() };
+    let rig = Rig {
+        relay: url,
+        peers: vec![format!("{}@{}", a.npub, a.listen), format!("{}@{}", c.npub, c.listen)],
+    };
+
+    rig.ok(&a, &["mesh", "create", "home"]);
+    let mut up = rig
+        .cmd(&a, &["up", "--accept-joins", "--out", tmp("inbox").to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = capture(&mut up);
+    wait_for(&log, "accepting joins");
+
+    // C asks; nobody types `invite`.
+    let joined = rig.ok(&c, &["mesh", "join", &a.npub, "--timeout", "60"]);
+    assert!(joined.contains("home"), "{joined}");
+    wait_for(&log, "invited");
+    let members = rig.ok(&a, &["mesh", "members"]);
+    assert!(members.contains("2 member(s)"), "{members}");
+
+    let _ = up.kill();
+    let _ = up.wait();
+    drop(relay);
+}
