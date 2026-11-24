@@ -1,0 +1,3 @@
+# noscat-dev plus the full Perl that MDK's vendored OpenSSL build needs.
+FROM localhost/noscat-dev
+RUN dnf install -y -q perl && dnf clean all

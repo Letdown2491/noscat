@@ -1,0 +1,19 @@
+[package]
+name = "mdk-interop"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "noscat-core against MDK's White Noise CLI (wn) over one relay"
+
+# Standalone: never part of the published noscat workspace.
+[workspace]
+
+[dependencies]
+noscat-core = { path = "../../crates/noscat-core" }
+nostr = "0.45"
+nostr-relay-builder = "0.44"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde_json = "1"
+rand = "0.9"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
