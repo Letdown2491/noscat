@@ -192,7 +192,7 @@ pub enum ClientError {
     #[error("{0}")]
     Stream(String),
     /// Another process is running a device on this state directory.
-    #[error("another noscat process is using {}", .0.display())]
+    #[error("another noscat client is using {} (in this process or another)", .0.display())]
     Busy(PathBuf),
 }
 

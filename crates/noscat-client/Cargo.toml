@@ -1,6 +1,6 @@
 [package]
 name = "noscat-client"
-description = "Client layer for noscat: event-driven tunnel sessions on top of noscat-core, for UIs"
+description = "Client layer for noscat: one device with mesh operations, app streams and an event stream, for UIs and the CLI"
 repository.workspace = true
 version.workspace = true
 edition.workspace = true

@@ -36,7 +36,11 @@ A device's published, single-use offer to be added to a mesh. A device not in a 
 
 **Invitation**:
 What a device receives when an admin adds it: the encrypted welcome into the mesh. A device accepts an invitation only from the device it was told to expect.
-_Avoid_: pairing request, join request (0.4 terms)
+_Avoid_: pairing request (0.4 term)
+
+**Join request**:
+A joining device's message to the member whose QR it scanned, asking to be invited. It grants nothing by itself: a member still has to invite the device.
+_Avoid_: key package (that is what makes the invitation possible, not the request)
 
 **Leave**:
 A member asking the others to remove it. Someone else completes it; the last device of a mesh just forgets the mesh.

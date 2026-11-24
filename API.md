@@ -31,9 +31,9 @@ Rules that keep this file true:
 ## noscat-client (Rust)
 
 A `Client` is one running device: identity, state directory, mesh
-membership, data plane and an event stream. 0.5 is a fresh start: no 0.4
-state is read, and a 0.4 identity file still works as an identity but
-its old mesh is not carried over.
+membership, data plane and an event stream. 0.5 is a fresh start: it
+reads no 0.4 state, and the CLI and apps keep 0.5 state in new
+locations, so every device gets a new identity.
 
 ### Identity and config
 
@@ -66,14 +66,22 @@ public IPv6 address); members behind NAT reach each other through it.
 `identity_npub(&IdentitySource)` resolves an identity (creating the file)
 without starting anything.
 
+Also exported: `parse_pairing_target(&str)` (a QR's `noscat:` URI, a bare
+npub or hex key to a public key; what the join screens use to validate
+input), `DEFAULT_RELAYS` / `default_relays()`, `MAX_INCOMING_BYTES`
+(64 GiB) and `DEFAULT_LISTEN_PORT` (41641, used when reachable).
+
 `Client::start(config) -> Result<Client, ClientError>` starts the device
 right away (relay connections, key package, data plane). It blocks for a
 few seconds; call it from a worker thread, never from inside an async
-runtime. Cloning shares the device; dropping the last clone stops it.
+runtime. Cloning shares the device; dropping the last clone stops it and
+releases the directory, so a new `Client` can start on it right away (the
+apps join with one client, drop it, then start their long-running one).
 Only one `Client` may run per state directory, across processes too:
-`start` locks `<dir>/lock` and fails with `ClientError::Busy` when another
-process holds it. `Client::running(dir)` returns the one running in this
-process. `Client` is `Send + Sync`; dropping it from async code is safe.
+`start` locks `<dir>/lock` and fails with `ClientError::Busy` while another
+client holds it, in this process or another. `Client::running(dir)`
+returns the one running in this process. `Client` is `Send + Sync`;
+dropping it from async code is safe.
 
 Mesh:
 
@@ -112,7 +120,7 @@ Sending:
 | `send_chat(target, text)` / `send_clipboard(target, text)` | `()` | Delivery is `ChatDelivered` or `ChatFailed`. Text up to 64 KiB. |
 | `forward(target, local)` | `u64` | Listen on `local`; each TCP connection goes to the member's default service. |
 | `forward_port(target, local, remote_port)` | `u64` | Same, to a port the member serves (`serve_port`). |
-| `list_forwards()` / `cancel_forward(id)` | `Vec<ForwardInfo>` / `bool` | `cancel_forward` is confirmed by `ForwardStopped`. |
+| `list_forwards()` / `cancel_forward(id)` | `Vec<ForwardInfo>` / `bool` | `ForwardInfo { id, target, local, remote_port }` (`remote_port` 0 = default service). `cancel_forward` is confirmed by `ForwardStopped`. |
 
 Scope: only members of this device's mesh can reach it or be reached.
 Streams from anyone else never get past the data plane. A device that is
@@ -143,7 +151,7 @@ Peers are bech32 npubs.
 | `MemberSeen` | `peer, name` | A member's advert arrived. |
 | `MeshChangeUndone` | | A membership change of ours lost a race with another member's; retry it. |
 | `MeshLeft` | | Removed, or left. |
-| `JoinRequest` | `peer, name` | A device that scanned this device's QR asks to be invited: prompt, then `invite(peer)`. |
+| `JoinRequest` | `peer, name` | A device that scanned this device's QR (or otherwise knows its npub) asks to be invited: prompt, then `invite(peer)`. Only while in a mesh; at most once per request. |
 
 0.4's `Incoming` is gone: inbound streams are always handled by the
 client. `TunnelUp` no longer carries an address.
@@ -159,7 +167,8 @@ Delivery contracts:
 ### Errors
 
 `ClientError`: `Identity(String) | Mesh(String) | Io(io::Error) | Stream(String) | Busy(PathBuf)`.
-Match on the variant, show the display string.
+Match on the variant, show the display string. `Busy` means another
+client holds the state directory.
 
 ---
 
@@ -174,7 +183,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 
 | Function | Contract |
 |---|---|
-| `generate_identity()` | New `Identity` record. |
+| `generate_identity()` | New `Identity { npub, secret_hex }`. |
 | `identity_from_secret(secret)` | Restore from hex or nsec. |
 | `mesh_prepare(dir, owner?, relays?)` | This directory's npub, creating `identity.nsec` if missing. `owner` is unused (kept for call compatibility). |
 | `mesh_join(dir, timeout_secs, owner_npub, relays?)` | Wait for an invitation from `owner_npub` (bare npub or `noscat:` URI) and join; the inviter is sent a join request. Returns the members. A timeout is the error "no invitation arrived in time". |
@@ -193,11 +202,18 @@ same `mesh_dir`), and otherwise run the device just for the call.
   `listen_port` None = any free port (0.4 defaulted to 41641).
 - `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device }`.
   0.4's `is_owner` is gone: every device is an admin.
-- `ForwardInfo { id, target, local }`.
+- `ForwardInfo { id, target, local }` (`local` as a string, e.g.
+  `"127.0.0.1:8080"`).
+- `Identity { npub, secret_hex }`.
+- Errors are `NoscatException.Failed(message)` (one flat variant); show
+  the message.
 
 ### NoscatClient
 
-`NoscatClient(config, listener)`, a mirror of the Rust `Client`:
+`NoscatClient(config, listener)`, a mirror of the Rust `Client`. The
+`listener` implements the `EventListener` callback interface
+(`onEvent(event)`). Releasing the last reference stops the device and
+frees its directory, like dropping a Rust `Client`.
 
 `npub()`, `meshName()`, `members()`, `invite(npub)`, `remove(npub)`,
 `networkChanged()`, `forward(target, localPort)`, `listForwards()`,

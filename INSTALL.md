@@ -5,6 +5,11 @@ tap, the pacman repository, the Scoop bucket, and crates.io are all updated
 automatically per release. Latest release page:
 <https://github.com/Letdown2491/noscat/releases>.
 
+> Every channel below installs the latest **release**, currently 0.4.3. The
+> `main` branch is 0.5.0, which is not released yet and does not talk to
+> 0.4. Only the from-git methods (`cargo install --git`, `nix run`) build
+> `main`.
+
 ## Quick install (Linux and macOS)
 
 Shell installer, into `~/.local/bin`:
@@ -40,14 +45,10 @@ Server = https://letdown2491.github.io/noscat/x86_64
 
 then `pacman -Sy noscat`; normal `pacman -Syu` upgrades pick up new releases.
 
-An AUR source package is also prepared in
-[`packaging/PKGBUILD`](packaging/PKGBUILD) (submission pending AUR account
-registration reopening); until then it can be installed by hand:
-
-```
-git clone https://github.com/Letdown2491/noscat && cd noscat/packaging
-makepkg -si
-```
+An AUR source package is prepared in [`packaging/PKGBUILD`](packaging/PKGBUILD)
+for when AUR account registration reopens. It is still pinned at 0.1.1, so
+use the pacman repository above instead; the PKGBUILD is refreshed at its
+submission.
 
 ## Windows
 
@@ -70,30 +71,38 @@ nix run github:Letdown2491/noscat
 ```
 
 A flake is at the repo root; `nix profile install github:Letdown2491/noscat`
-adds it to a profile. Linux and macOS, x86_64 and aarch64.
+adds it to a profile. Linux and macOS, x86_64 and aarch64. It builds the
+`main` branch (0.5.0 today); add `?ref=v0.4.3` for the release.
 
 ## cargo (any platform with a Rust toolchain)
 
-Once the crates are published:
+The latest release from crates.io:
 
 ```
 cargo install --locked noscat
 ```
 
-Or straight from git, which also works on the BSDs and anywhere else a Rust
-toolchain exists:
+Or `main` straight from git:
 
 ```
 cargo install --locked --git https://github.com/Letdown2491/noscat
 ```
 
+On glibc Linux, 0.5 needs the libdbus and libclang development packages to
+build (`libdbus-1-dev libclang-dev pkg-config` on Debian and Ubuntu,
+`dbus-devel clang-devel` on Fedora). macOS, Windows and musl need nothing
+extra.
+
 ## BSDs (FreeBSD, OpenBSD, NetBSD)
 
-There are no prebuilt BSD packages yet. Rust builds out of the box on all
-three, so the git-based `cargo install` above is the install method. A
-FreeBSD port (and then pkgsrc-wip) is on the table if there is demand.
+There are no prebuilt BSD packages yet; `cargo install` above is the
+install method. 0.4.3 builds on all three. 0.5 does not build on FreeBSD
+yet: one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket
+option, and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
+OpenBSD and NetBSD have not been tried with 0.5. A FreeBSD port (and then
+pkgsrc-wip) is on the table if there is demand.
 
 ## Every package ships
 
 - a man page (`noscat(1)`),
-- shell completions: `noscat completions <bash|zsh|fish|powershell>`.
+- shell completions: `noscat completions <bash|zsh|fish|powershell|elvish>`.

@@ -33,8 +33,9 @@ Current scenarios and what they must show (results recorded in
 | symmetric | symmetric | yes, 3% loss | 16 MiB over QUIC, relayed |
 | cone | cone | yes, 3% loss | 16 MiB over QUIC, after the punch |
 
-Once the client and CLI are rebuilt on these modules, the node can give way
-to the real `noscat` binary.
+The client and CLI now run on these same modules; the rig still drives
+`node/`, which gives it direct control over adverts and probes. Swapping in
+the real `noscat` binary would also need advert delivery through a relay.
 
 Gotchas already paid for:
 - FIPS ignores RFC 5737 documentation addresses, so the fake internet uses

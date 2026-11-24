@@ -9,6 +9,10 @@
 //!   member devices, gated to the current roster.
 //! - `streams` - QUIC over FIPS: reliable streams between members.
 //! - `relay` - relay connections, back-off and presence bookkeeping.
+//! - `device` - the runtime: keeps relays, group, data plane and streams
+//!   in step for one device.
+//! - `apps` - the app protocols over streams: file transfer, chat and
+//!   clipboard text, TCP forwarding.
 
 pub mod apps;
 pub mod dataplane;

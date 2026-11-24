@@ -80,29 +80,34 @@ Implementation notes from the rig:
 
 - [x] `noscat-client` surface for the new model; API.md rewritten in the same commits (stamp 0.5.0). One `Client` per device on the device runtime; mesh operations (`create_mesh`, `invite`, `join`, `remove`, `leave`, `members`) next to the 0.4 app operations; the 0.4 events kept (minus `Incoming`) plus mesh events. `tests/client.rs` runs two clients end to end. The FFI section of API.md follows in phase 4.
 - [x] `docs/nip-noscat.md` rewritten to cover only what is ours: the Marmot mesh profile (our app component, roster-to-admission rule, adverts in the group) and the app stream protocols. FIPS and Marmot are referenced, not restated.
-- [x] AGENTS.md layout sections updated in all three repos. Done here (and CONTEXT.md gained Reachable device and Default service); the app repos' AGENTS.md were rewritten with their 0.5 glue in phase 4 (v0.5.0 branches).
+- [x] AGENTS.md layout sections updated in all three repos. Done here (and CONTEXT.md gained Reachable device and Default service); the app repos' AGENTS.md were rewritten with their 0.5 glue in phase 4.
 
 ## Phase 4: clients
 
-- [x] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events (noscat-android v0.5.0 branch: debug APK builds; device dir `filesDir/device`, `members.json`; ten minute presence; `JoinRequest` only logged, inviting from the phone needs UI). FFI done (same function names; `mesh_*` use the running client; `MeshMember.admin/online/this_device` replace `is_owner`; new mesh events and `JoinRequest`). Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
+- [x] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events (debug APK builds and runs on a Pixel 9a; device dir `filesDir/device`, `members.json`; ten minute presence; `JoinRequest` only logged, inviting from the phone needs UI). FFI done (same function names; `mesh_*` use the running client; `MeshMember.admin/online/this_device` replace `is_owner`; new mesh events and `JoinRequest`). Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
 - [x] `noscat up --accept-joins` invites every device that sends a join request (the 0.4 `--auto-accept-joins` workflow); off by default, and the banner says anyone who knows the npub can ask.
-- [x] noscat-desktop moved to the new client; its `src/mesh.rs` glue shrinks or disappears (noscat-desktop v0.5.0 branch: `mesh.rs` is a thin layer over `Client`; `[patch.crates-io]` points at this branch until release; device dir `device/`, `members.json`; dev image gains dbus-devel and clang-devel). Neither app can create a mesh or approve a join request yet: both need new UI, which the user chose to keep unchanged for now, so a CLI device creates the mesh and invites.
+- [x] noscat-desktop moved to the new client; its `src/mesh.rs` glue shrinks or disappears (`mesh.rs` is a thin layer over `Client`; `[patch.crates-io]` points at this repo's `main` until release; device dir `device/`, `members.json`; dev image gains dbus-devel, clang-devel and the Vulkan/Wayland runtime, and `scripts/run.sh` runs the app in it, since the host is immutable). Neither app can create a mesh or approve a join request yet: both need new UI, which the user chose to keep unchanged for now, so a CLI device creates the mesh and invites.
 - [x] CLI commands mapped onto the new model: `id`, `up`, `expose`, `serve`, `pipe`, `send`, `chat`, `clip`, `forward`, `mesh create|invite|join|remove|leave|members|qr`. One process runs a device (directory lock); other commands go through its loopback control channel or start the device themselves. State moved to the platform data directory. `tests/cli.rs` drives the binary end to end.
 - [x] Join requests (kind 21196 gift wrap to the scanned device) so the inviting side gets a prompt instead of typing an npub; restores 0.4's approve-on-request flow without an owner.
 - [x] Devices send their advert at start and answer a returning member's advert, so a just-started device (a one-shot CLI command) reaches members in seconds.
+- [x] Dropping the last `Client` stops the device and frees its directory. Background tasks held the shared state, which owned their runtime, so no client ever dropped; the apps' join helper then kept the directory and the app's own client failed with `Busy`. Found on the phone; `tests/client.rs` covers it.
+- [x] First real-device test (2026-11-24): CLI on Linux plus the Android app joined one mesh over the LAN; chat from the CLI delivered to the phone.
 
 ## Phase 5: release
 
 - [ ] All five platforms green in CI, plus the netns NAT and loss suite. **FreeBSD blocks on upstream draft 01** (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands.
 - [ ] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB).
-- [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android.
+- [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android: publish the crates, drop the desktop's `[patch.crates-io]`, point `scripts/build-native.sh` at the published 0.5.0.
+- [ ] Android release build: `scripts/build-native.sh` builds the Rust library unoptimized (stripped debug profile), and the Gradle project has no release signing.
+- [ ] Packaging refresh: `packaging/PKGBUILD` and `.SRCINFO` are still at 0.1.1 (and need `dbus` plus build-time `clang`), the winget manifests are the 0.1.1 submission. The man page, nfpm, Homebrew and flake descriptions are already 0.5.
+- [ ] Remove the "not released yet" notes from README.md, INSTALL.md and AGENTS.md.
 
 ## Decisions (2026-11-24)
 
 - **Every mesh needs one reachable member** in 0.5.0 (home server, VPS, port forward, or public IPv6). Setup flows say so when no member is reachable. The upstream signaling hook (draft 05) may lift this for cone NATs later.
 - **MeshGroup builds on OpenMLS 0.10.0-rc.1**; switch to 0.10 stable when released.
 - **Fresh start from 0.4**: no 0.4 state is read, including identities. 0.5 keeps its state in a new location so 0.4 files are left alone.
-- **Git**: work on `v0.5.0` branches in all three repos, pushed to GitHub for backup; no merges to main and no crates.io publishing until release. The apps use noscat by path during development.
+- **Git**: work happened on `v0.5.0` branches and moved to each repo's default branch (`main`, `master` for noscat-android) on 2026-11-24; all work continues there. No crates.io publishing and no tags until release. The apps build against noscat `main` until then.
 
 ## Open questions
 

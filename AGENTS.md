@@ -7,9 +7,10 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). `docs/plan-0.5.0.md` tracks the 0.5.0
-rewrite and `docs/adr/` records why things are the way they are. Build/test in the podman container only; the host has no
-toolchain:
+library (`crates/noscat-client`). `main` is 0.5.0, not released yet (the
+last release is 0.4.3); `docs/plan-0.5.0.md` tracks what is left and
+`docs/adr/` records why things are the way they are. Build/test in the
+podman container only; the host has no toolchain:
 
 ```
 podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /work \
@@ -64,17 +65,33 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 - `crates/noscat-ffi` - UniFFI bridge for mobile apps (Kotlin now, Swift later):
   `NoscatClient`, `Event` callback, identity and `mesh_*` functions (which use
   the app's running client for a directory, or run the device for the call).
-  The Android app (`~/Documents/noscat-android`) consumes the published crate.
+  The Android app (`~/Documents/noscat-android`) builds it from this
+  checkout (`scripts/build-native.sh local`) until 0.5.0 is published.
 - `crates/noscat` - the CLI: a thin skin over the client. One process runs a
   device (`Client::start` locks the state directory); `control.rs` is the
   loopback channel every other command on that directory goes through.
-  `tests/cli.rs` drives the real binary.
+  `tests/cli.rs` drives the real binary. The man page
+  (`packaging/noscat.1`) is written by hand: a change to commands, flags or
+  defaults updates it, README's CLI section and the `--help` text together.
 - `docs/nip-noscat.md` - the wire protocol spec (the interop contract).
-- `packaging/` - nfpm, AUR prep, bottle script; `.github/workflows/release.yml` -
-  the whole release pipeline (builds, crates.io, tap, scoop, pacman).
+- `packaging/` - man page, nfpm, AUR prep (pinned at 0.1.1), winget (the
+  0.1.1 submission), bottle script; `flake.nix` at the root;
+  `.github/workflows/release.yml` - the whole release pipeline (builds,
+  crates.io, tap, scoop, pacman).
+- `containers/noscat-dev.containerfile` - the dev image (Rust plus the
+  libdbus and libclang the FIPS crates need on glibc).
+- `docs/upstream/` - drafts of issues and patches for FIPS. Never post them
+  without the user's approval.
 
-## Related project
+## Related projects
 
-The Android client lives in `~/Documents/noscat-android` (separate repo, its own
-AGENTS.md): native Kotlin over a UniFFI bridge that consumes the published
-`noscat-client` crate. Protocol changes belong here; the app repo carries none.
+Two app repos, each with its own AGENTS.md, carry no protocol code; protocol
+changes belong here, and API.md is their contract:
+
+- `~/Documents/noscat-android`: native Kotlin over `noscat-ffi`.
+- `~/Documents/noscat-desktop`: GPUI in Rust, embedding `noscat-client`
+  directly (from this repo's `main` through `[patch.crates-io]` until
+  0.5.0 is published).
+
+All three repos work on their default branch (`main`; `master` for
+noscat-android) and release in lockstep.

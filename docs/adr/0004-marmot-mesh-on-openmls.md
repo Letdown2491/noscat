@@ -19,3 +19,9 @@ A mesh is now a Marmot-compatible MLS group (spec at marmot-protocol/marmot, ref
 - Every device in the mesh can be an admin, so losing any one device never locks the mesh.
 - Our own Marmot app component carries mesh state (endpoint adverts, ADR 0006) using an id in Marmot's private range (at or above `0xf000`).
 - We own convergence subtleties MDK has already solved; the MDK interop suite in CI is the guard.
+
+## Updates (2026-11-24, as implemented)
+
+- MDK interop is checked by a standalone harness, `tests/mdk-interop/run.sh`, which builds MDK's `wn` CLI at a pinned commit in a container. It is not a dev-dependency, so the published crates never see MDK, and it runs by hand rather than in CI. Both directions pass.
+- Endpoint adverts travel as Marmot application messages (kind 21195), not in a component. The noscat component (`noscat.mesh.v1`, `0xf3a0`) holds only the mesh name and is not required, so other Marmot clients can join a mesh.
+- OpenMLS 0.10.0-rc.1 with in-memory storage persisted to one file: rusqlite and the OpenMLS sqlite storage are gone, and `cargo audit` reports no vulnerabilities (only upstream unmaintained or unsound warnings, listed in the 0.5.0 plan).

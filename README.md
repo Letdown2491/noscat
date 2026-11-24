@@ -25,10 +25,15 @@ Think Tailscale, but:
 
 The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-noscat.md).
 
+> **This branch is 0.5.0, which is not released yet.** The packages below
+> install the latest release, 0.4.3, which works differently (Noise tunnels
+> and an owner device) and cannot talk to 0.5. To try 0.5 now, build from
+> source (see Development).
+
 ## Install
 
-noscat is a single static binary with no dependencies, packaged for every
-major platform: Linux (x86_64 and aarch64 - deb, rpm, apk, and a live pacman
+noscat is a single binary, packaged for every major platform (the Linux
+packages are static, with no dependencies): Linux (x86_64 and aarch64 - deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
 bottles), and Windows (Scoop and winget, winget in community review). Nix
 and cargo cover everything else, including the BSDs from source.
@@ -49,7 +54,7 @@ or Homebrew, on macOS and Linux:
 brew install Letdown2491/tap/noscat
 ```
 
-Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell>`)
+Every package ships shell completions (`noscat completions <bash|zsh|fish|powershell|elvish>`)
 and a man page.
 
 ## Clients
@@ -59,10 +64,13 @@ native GUI clients:
 
 - **[noscat-android](https://github.com/Letdown2491/noscat-android)** - native
   Kotlin (Compose) app over a Rust UniFFI bridge: chat, file send/receive,
-  port forwards, and mesh join by invite.
+  port forwards, and joining a mesh by scanning a member's QR.
 - **[noscat-desktop](https://github.com/Letdown2491/noscat-desktop)** - pure
   Rust desktop app (GPUI), embedding `noscat-client` directly with no FFI
   layer: feature parity with the Android client plus expose/serve.
+
+Neither app can create a mesh or approve a join request yet: a CLI device
+creates the mesh and invites the apps.
 
 Both repos contain no protocol code - the wire format lives in this
 workspace and is specified in the draft NIP above, so the clients are
@@ -70,9 +78,12 @@ interoperable by construction.
 
 ## Status
 
-0.5.0 is a rewrite on FIPS and Marmot and does not talk to 0.4. It starts
-fresh: no 0.4 state or identity is read (0.5 keeps its state in a new
-place), so recreate the mesh after upgrading every device.
+0.5.0 (unreleased; this branch) is a rewrite on FIPS and Marmot and does
+not talk to 0.4. It starts fresh: no 0.4 state or identity is read (0.5
+keeps its state in a new place), so every device gets a new npub and the
+mesh is created again after upgrading every device. The release plan and
+what still blocks it are in [`docs/plan-0.5.0.md`](docs/plan-0.5.0.md);
+the design decisions are in [`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core` - the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them
@@ -108,7 +119,7 @@ On the first device:
 
 ```
 noscat mesh create home
-noscat up --reachable          # this one has a forwarded UDP port or a public address
+noscat up --reachable          # this one has UDP 41641 forwarded, or a public address
 ```
 
 On each new device:
@@ -144,7 +155,8 @@ noscat mesh leave              # this device leaves
 **Reachability.** Every mesh needs at least one member the others can
 reach from the internet: a home server with a forwarded UDP port, a VPS,
 anything with a public IPv6 address. Start it with `--reachable` (learn
-the address by STUN) or `--reachable <ip:port>`. Members behind NAT reach
+the address by STUN) or `--reachable <ip:port>`; it listens on UDP 41641
+unless `--listen` says otherwise. Members behind NAT reach
 each other directly where they can and through that member otherwise.
 Members on the same LAN find each other by mDNS.
 
@@ -200,8 +212,9 @@ invite <npub>            # add a device that asked to join
 
 ### Names and presence
 
-Each device has a name (`--name`, default the hostname; the apps use the
-device model) and sends it with its advert, inside the group, every two
+Each device has a name (`--name`, default the hostname; the desktop app
+uses the hostname and the Android app the phone model, both changeable in
+Settings) and sends it with its advert, inside the group, every two
 minutes. A member is online while its latest advert is under ten minutes
 old.
 
@@ -218,10 +231,19 @@ podman build -t localhost/noscat-dev -f containers/noscat-dev.containerfile cont
 podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" \
   -w /work localhost/noscat-dev sh -c "cargo test --workspace"
 
-# Try the CLI:
+# A release binary at target/release/noscat (static builds come from CI):
 podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" \
-  -w /work localhost/noscat-dev cargo run -p noscat -- id
+  -w /work localhost/noscat-dev cargo build --release -p noscat
 ```
+
+Without a container, building on glibc Linux needs the libdbus and libclang
+development packages (`libdbus-1-dev libclang-dev` on Debian and Ubuntu,
+`dbus-devel clang-devel` on Fedora): the FIPS data plane links them for
+its Bluetooth transport. macOS, Windows and musl builds need nothing extra.
+
+Beyond `cargo test`, two harnesses check what unit tests cannot:
+`tests/netrig/run.sh` (NAT and packet loss in network namespaces) and
+`tests/mdk-interop/run.sh` (interop with White Noise's MDK).
 
 ## License
 

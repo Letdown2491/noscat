@@ -1,6 +1,6 @@
 [package]
 name = "noscat"
-description = "like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
+description = "like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts"
 repository.workspace = true
 version.workspace = true
 edition.workspace = true

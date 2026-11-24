@@ -1,6 +1,6 @@
 [package]
 name = "noscat-core"
-description = "Core library for noscat: a Nostr-native userspace tunnel and mesh tool"
+description = "Core library for noscat: a private device mesh on Marmot (MLS over Nostr) and FIPS, with QUIC streams"
 repository.workspace = true
 version.workspace = true
 edition.workspace = true

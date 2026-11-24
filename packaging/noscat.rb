@@ -3,7 +3,7 @@
 # the generated formula (noscat.rb) as a release asset; copy it into the tap
 # repo: https://github.com/Letdown2491/homebrew-tap (Formula/noscat.rb).
 class Noscat < Formula
-  desc "Like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts"
+  desc "Like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts"
   homepage "https://github.com/Letdown2491/noscat"
   version "__VERSION__"
 

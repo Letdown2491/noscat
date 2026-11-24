@@ -7,9 +7,9 @@ arch: ${ARCH}
 version: ${VERSION}
 maintainer: Letdown2491 <https://github.com/Letdown2491>
 description: |-
-  like netcat, but over a Nostr-native mesh: npub-addressed tunnels,
-  no root, no accounts. Noise-XK over UDP with NAT hole punching; Nostr
-  relays are only the discovery channel.
+  like netcat, but over your own device mesh: npub-addressed, end-to-end
+  encrypted, no root, no accounts. Membership is a Marmot (MLS) group on
+  Nostr relays; data goes device to device over FIPS with QUIC streams.
 license: MIT
 homepage: https://github.com/Letdown2491/noscat
 

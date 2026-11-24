@@ -1,204 +1,282 @@
-.TH NOSCAT 1 "2026" "noscat 0.3.0" "User Commands"
+.TH NOSCAT 1 "2026" "noscat 0.5.0" "User Commands"
 .SH NAME
-noscat \- like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts
+noscat \- like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts
 .SH SYNOPSIS
 .B noscat
+.RI [ OPTIONS ]
 .I COMMAND
-.RI [ OPTIONS ] " " [ ARGS ]
+.RI [ ARGS ]
 .SH DESCRIPTION
 .B noscat
-gives every machine a self-generated Nostr identity (a keypair - no email, no
-phone number, no account), and tunnels encrypted traffic between machines by
-that identity. The data plane is direct end-to-end encryption over UDP with
-NAT hole punching; Nostr relays are only ever the discovery/signaling channel.
-The wire protocol is specified in the draft NIP shipped in the repository
-(docs/nip-noscat.md).
+joins your devices into a private mesh. Each device has its own
+self-generated Nostr identity (a keypair: no email, no phone number, no
+account) and is addressed by its npub. Membership is a Marmot group (MLS)
+carried by Nostr relays; every member can verify who is in the mesh and
+any member can manage it. Data goes device to device over FIPS, an
+end-to-end encrypted overlay keyed by the same identities, with QUIC
+streams on top. Relays never see who is in a mesh, device names,
+addresses or data. Only members can reach a device, and a device can only
+reach members.
 .PP
-Every data-plane command shares one node identity per machine: the first run
-generates it and stores it at
-.I ~/.noscat/identity.hex
-(mode 0600), and later runs reuse it, so your npub is stable. Pass
-.B \-\-identity
-to override. Commands that listen print the npub and a scannable pairing QR
-(the QR encodes
-.IR noscat:<npub> )
-as soon as they are ready.
+The protocol is specified in
+.I docs/nip-noscat.md
+in the repository. noscat 0.5 does not talk to 0.4 and reads none of its
+state.
+.SH THE DEVICE
+Each machine is one device. Its state (identity and mesh) lives in the
+platform data directory:
+.I ~/.local/share/noscat
+on Linux and the BSDs (or
+.IR $XDG_DATA_HOME/noscat ),
+.I ~/Library/Application Support/noscat
+on macOS,
+.I %APPDATA%\(rsnoscat
+on Windows. The identity is
+.I identity.nsec
+there, created (mode 0600) on first use.
+.PP
+Only one process runs a device. While
+.B noscat up
+(or
+.BR expose )
+runs, every other
+.B noscat
+command on the same directory goes through it; when none runs, a command
+starts the device just for itself and stops it when done.
 .SH COMMANDS
 .TP
+.B id
+Print this device's npub and its pairing QR (which encodes
+.IR noscat:<npub> ).
+.TP
 .B keygen
-Generate a fresh ephemeral node identity. With
+Generate a throwaway identity and print its npub. With
 .B \-\-show\-secret
-also prints the hex secret (nsec). Rarely needed: the shared identity is
-created automatically on first use.
-.TP
-.B advertise
-Publish an overlay advert to relays so peers can discover this node.
-.B \-\-endpoint <transport>/<ip:port>
-(repeatable) names where you are reachable;
-.B \-\-ttl <secs>
-is the advert lifetime (default 3600).
-.TP
-.B watch
-Watch relays for noscat adverts from any node.
-.TP
-.B serve
-Serve a tunnel: advertise a UDP endpoint and bridge the first peer to stdio.
-Prints the npub and pairing QR immediately; Ctrl-C quits.
-.B \-\-listen <addr>
-(default 0.0.0.0:41641).
+also print the secret key (hex). Devices create their own identity on
+first use, so this is rarely needed.
 .TP
 .B up
-The persistent mesh node: prints its npub and pairing QR, accepts any number
-of inbound peers, saves inbound files into
-.B \-\-out
-(default: ~/Downloads), bridges raw inbound tunnels to
+Run this device until Ctrl-C: receive files, chat, and serve members.
+Prints the pairing QR and runs a terminal chat (see
+.BR CHAT ).
+.RS
+.TP
+.B \-\-out <dir>
+Where received files go (default
+.IR ~/Downloads ).
+.TP
 .B \-\-to <addr>
-(when given), and runs a terminal chat. Requires
-.B \-\-mesh:
-membership is the authorization for inbound connections. The mesh owner also
-answers join requests: devices publishing key packages are shown, and each is
-invited once confirmed with
-.BR y .
-Answers other than y (including EOF) decline. Runs until Ctrl-C.
+Bridge members' default-service streams (see
+.BR PORTS )
+to this TCP service, e.g. 127.0.0.1:22.
 .TP
-.BI pipe " target"
-Pipe stdio into a tunnel to a peer by npub. Local stdin EOF sends a FIN; the
-session closes when both sides are done.
+.B \-\-serve\-port <port>
+Let members forward to this local port by number (repeatable).
 .TP
-.BI send " path target"
-Send a file over a tunnel to a peer by npub. Transfers are resumable: an
-interrupted attempt leaves a partial file plus a sidecar on the receiver, and
-the next send of the same file picks up where the last one stopped. The
-finished file is verified against the sender's sha256 before it is renamed
-into place.
-.TP
-.B receive
-Receive one file over a tunnel into
-.B \-\-out
-(default: the current directory). Prints the npub and pairing QR immediately.
+.B \-\-accept\-joins
+Invite every device that sends a join request, without asking. A join
+request only needs this device's npub, which is not secret, so use it
+while setting devices up and turn it off afterwards.
+.RE
 .TP
 .BI "expose \-\-to " addr
-Expose a local TCP service to mesh peers over tunnels: each tunnel is
-spliced to a fresh connection to the target address. Serves concurrent
-sessions from one shared UDP port. Runs until interrupted.
+Run this device and expose one TCP service to members as its default
+service.
 .TP
-.BI forward " target"
-Forward a local TCP port over tunnels to a peer by npub (the side running
-.BR expose ).
-The listener binds 127.0.0.1 by default; pass
+.B serve
+Netcat listen: bridge the first member stream to stdio.
+.TP
+.BI pipe " target"
+Netcat connect: bridge stdio to a member's default service.
+.TP
+.BI send " path target"
+Send a file to a member. Transfers resume: an interrupted send leaves a
+partial file on the receiver, and sending the same file again continues
+where it stopped. The receiver verifies the whole file against the
+sender's sha256 before renaming it into place.
+.TP
+.BI chat " target text..."
+Send a chat message to a member; exits once it is delivered.
+.TP
+.BI clip " target"
+Share this machine's clipboard with a member; it becomes their
+clipboard.
+.TP
+.BI "forward " target " \-\-port " port
+Listen on local TCP
+.I port
+and carry each connection to a member's default service, or with
+.B \-\-remote\-port <port>
+to a port the member serves
+.RB ( "up \-\-serve\-port" ).
+The listener binds 127.0.0.1;
 .B \-\-bind <ip>
-to expose it further - anyone who can reach it can make this process dial the
-target. Each connection dials its own tunnel.
-.SH MESHES
-A mesh is one MLS group per owner's set of devices (OpenMLS). Membership is
-authorization: the group's epoch secret becomes the tunnel PSK, so scoped
-tunnels only complete for current members. Removing a device ratchets the
-epoch and locks it out immediately.
+exposes it further, and anyone who can reach it can use the forward.
+.TP
+.BI completions " shell"
+Print shell completions (bash, elvish, fish, powershell, zsh).
 .PP
-The device directory holds the device identity and MLS state and defaults to
-.IR ~/.noscat/device ;
-pass
-.B \-\-dir <path>
-to keep several devices on one machine.
+A
+.I target
+is a member's npub, or the
+.I noscat:<npub>
+text of its QR.
+.SH MESHES
+A mesh is a Marmot (MLS) group. Every member is an admin: any member can
+invite and remove, and losing any one device loses nothing.
 .TP
-.B mesh create
-Create a mesh owned by this device's directory (once, on the owner).
+.BI "mesh create " name
+Start a new mesh with this device as its only member.
 .TP
-.B mesh publish [\-\-owner <npub>]
-Publish this device's MLS key package as a join request. With
-.BR \-\-owner ,
-the request is addressed to that owner alone; with
-.BR \-\-mesh ,
-the device also watches for the resulting invitation.
+.BI "mesh join " inviter
+Ask the member
+.I inviter
+(the device whose QR you scanned) to invite this device, wait for the
+invitation and join. Only that member's invitation is accepted.
+.B \-\-timeout <secs>
+gives up (default 600).
 .TP
-.B mesh invite <npub>
-Invite a device into this (owner's) mesh.
+.BI "mesh invite " target
+Add a device. It must be running, or waiting in
+.BR "mesh join" .
+A running
+.B up
+prints each join request with the
+.B invite
+line to type.
 .TP
-.B mesh join [\-\-owner <npub>]
-Wait for a gift-wrapped invitation and join the mesh; with
-.BR \-\-owner ,
-invitations from anyone else are ignored.
+.BI "mesh remove " target
+Remove a member. Each member cuts it off as soon as it processes the
+removal.
+.TP
+.B mesh leave
+Leave the mesh. Another member completes it;
+.B \-\-timeout <secs>
+waits for that (default 120). The last member just forgets the mesh.
 .TP
 .B mesh members
-List the mesh's members and epoch, each with its presence from the
-member's freshest advert on the relays (online while the advert is within
-the TTL, otherwise when it was last seen; a member with no advert reads
-as offline).
+List the members, their names and presence.
 .TP
-.B mesh remove <npub>
-Remove a device from this (owner's) mesh; the epoch ratchets.
-.TP
-.B mesh sync
-Merge pending mesh commits addressed to this device (run after an owner
-invited or removed someone).
-.TP
-.B mesh psk
-Print the mesh's current epoch tunnel PSK (hex).
+.B mesh qr
+Print this device's pairing QR (same as
+.BR id ).
+.PP
+Every mesh needs at least one member the others can reach from the
+internet: a home server with a forwarded UDP port, a VPS, or anything with
+a public IPv6 address. Run it with
+.BR \-\-reachable .
+Members behind NAT reach each other directly where they can and through
+that member otherwise. Members on the same LAN find each other by mDNS.
+.SH PORTS
+A member's
+.I default service
+is whatever it exposes
+.RB ( "up \-\-to"
+or
+.BR expose ).
+Other local ports are reachable only if the member serves them by number
+.RB ( "up \-\-serve\-port" ).
 .SH CHAT
-The
 .B up
-node runs a terminal chat on stdin: type
+runs a terminal chat on stdin. Incoming messages print with the
+sender's name.
+Type
 .B to
-to list the mesh's devices,
-.BI to " <prefix>"
-to pick one, then every following line is delivered to them as a chat
-message. The special line
+to list the members and
+.BI to " <name or npub prefix>"
+to pick one; every following line goes to them.
 .B clip
-shares the local clipboard with the selected peer - it becomes the clipboard
-on the receiving device (Android or another
-.BR up ).
-Incoming messages print as
-.BR "# 💬 <peer>: <text>" .
+shares the local clipboard with the selected member, and
+.BI invite " <npub>"
+adds a device that asked to join.
 .SH OPTIONS
+These apply to every command.
+.TP
+.B \-\-dir <dir>
+The device state directory (default: see
+.BR "THE DEVICE" ).
+.TP
 .B \-\-relay <url>
-is repeatable on most commands and overrides the default relays.
-.B \-\-identity
-overrides the default shared identity file
-(~/.noscat/identity.hex, auto-created on first use).
-.B \-\-mesh [<dir>]
-scopes the tunnel to a mesh (MLS membership becomes the authorization);
-the value is optional and defaults to ~/.noscat/device.
-.B \-\-name <name>
-publishes a friendly device name with the advert (up defaults to the
-hostname).
+A relay to use (repeatable). Default: a public set.
+.TP
 .B \-\-listen <addr>
-binds UDP listeners. Use
-.B \-\-help
-on any command for the full list.
+UDP address of the data plane. Default: any free port, 41641 with
+.BR \-\-reachable .
+.TP
+.B \-\-name <name>
+The name other members see. Default: the hostname.
+.TP
+.B \-\-reachable [<addr>]
+This device is reachable from the internet. Give its public address, or
+nothing to learn it by STUN. Forward UDP 41641 to it, or set
+.BR \-\-listen .
+.TP
+.B \-\-peer <npub@ip:port>
+A known address of a device (repeatable).
+.TP
+.B \-\-no\-lan
+Do not look for members on the LAN (mDNS).
+.TP
+.B \-\-verbose
+Info-level logs. Warnings always print;
+.B RUST_LOG
+overrides.
+.SH ENVIRONMENT
+.TP
+.B NOSCAT_DIR
+The device state directory, like
+.BR \-\-dir .
+.TP
+.B NOSCAT_IDENTITY
+The identity (hex or nsec) instead of
+.IR identity.nsec .
+It is read from the environment so it never appears in the process list.
+.TP
+.B RUST_LOG
+Log filter, e.g.
+.BR noscat=debug .
 .SH EXIT STATUS
 .TP
 .B 0
-Success (for transfers: the whole file was received, flushed, and verified).
+Success (for
+.BR send :
+the whole file was received and verified; for
+.BR chat :
+the member acknowledged it).
 .TP
 .B nonzero
-Failure (timeouts, path loss, bad identities, refused transfers).
+Failure: not a member, no route, timeout, a refused transfer, or the
+device is busy in another process.
 .SH EXAMPLES
-.PP
-Server:
+A first device, reachable from the internet:
 .PP
 .nf
-    noscat serve
+    noscat mesh create home
+    noscat up \-\-reachable
 .fi
 .PP
-Client:
+A second device (scan or copy the first one's npub), then approve on the
+first with the printed
+.B invite
+line:
 .PP
 .nf
-    echo hello | noscat pipe <server's npub>
+    noscat mesh join npub1...
 .fi
 .PP
-The node (scan its QR with a peer to learn its npub):
+SSH to a member through the mesh:
 .PP
 .nf
-    noscat mesh create
-    noscat up \-\-mesh
-    noscat up \-\-mesh \-\-out ~/incoming \-\-to 127.0.0.1:22
+    noscat up \-\-to 127.0.0.1:22          # on the server
+    noscat forward npub1... \-\-port 2222   # on the laptop
+    ssh \-p 2222 localhost
 .fi
 .PP
-Mesh-scoped file transfer:
+Netcat:
 .PP
 .nf
-    noscat receive \-\-out ./incoming \-\-mesh
-    noscat send ./report.pdf <A's npub> \-\-mesh
+    noscat serve                       # on A
+    echo hello | noscat pipe npub1...  # on B, A's npub
 .fi
 .SH AUTHORS
 Letdown2491 and noscat contributors. MIT licensed;

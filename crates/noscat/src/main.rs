@@ -108,18 +108,24 @@ enum Command {
     },
     /// Send a file to a member.
     Send {
+        /// The file to send.
         path: PathBuf,
         /// The member (npub or noscat: URI).
         target: String,
     },
     /// Send a chat message to a member.
     Chat {
+        /// The member (npub or noscat: URI).
         target: String,
+        /// The message; the words are joined with spaces.
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
     /// Share this machine's clipboard with a member.
-    Clip { target: String },
+    Clip {
+        /// The member (npub or noscat: URI).
+        target: String,
+    },
     /// Forward a local TCP port to a member.
     Forward {
         /// The member (npub or noscat: URI).
@@ -146,18 +152,29 @@ enum Command {
 #[derive(Subcommand)]
 enum MeshCommand {
     /// Start a new mesh with this device as its only member.
-    Create { name: String },
+    Create {
+        /// The mesh's name, shown to its members.
+        name: String,
+    },
     /// Add a device. It must be running, or waiting in `mesh join`.
-    Invite { target: String },
-    /// Wait for an invitation from a member (npub or noscat: URI) and join.
+    Invite {
+        /// The device (npub or noscat: URI).
+        target: String,
+    },
+    /// Ask a member to invite this device, wait for the invitation and join.
     Join {
+        /// The member whose QR you scanned (npub or noscat: URI). Only its
+        /// invitation is accepted.
         inviter: String,
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
     },
     /// Remove a member.
-    Remove { target: String },
+    Remove {
+        /// The member (npub or noscat: URI).
+        target: String,
+    },
     /// Leave the mesh.
     Leave {
         /// Wait this long for another member to complete it.
