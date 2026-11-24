@@ -10,6 +10,7 @@
 //! - `streams` - QUIC over FIPS: reliable streams between members.
 //! - `relay` - relay connections, back-off and presence bookkeeping.
 
+pub mod apps;
 pub mod dataplane;
 pub mod device;
 pub mod fsutil;
