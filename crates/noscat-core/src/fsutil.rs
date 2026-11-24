@@ -41,6 +41,30 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// [`write_atomic`] for files holding secrets: the temp file is created
+/// owner-only on unix before any byte lands in it.
+pub fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("noscat");
+    let tmp = dir.join(format!("{name}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut f = new_secret_options().write(true).create_new(true).open(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// OpenOptions for a secret file: owner-only on unix, plain elsewhere
 /// (Windows and the BSDs via cargo install get the default mode).
 fn new_secret_options() -> std::fs::OpenOptions {

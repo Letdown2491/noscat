@@ -1,7 +1,9 @@
-//! Relay plumbing: publish and watch overlay adverts over real Nostr relays.
+//! Relay plumbing shared by the control plane: connecting to relays with
+//! per-relay timeouts, rate-limit back-off, and presence bookkeeping.
 //!
-//! Relays are the discovery channel only - they carry signed, public advert
-//! events (kind 37195 pattern). Tunnel traffic never touches them.
+//! Relays carry only the Marmot group traffic (kind 445 group events, 1059
+//! gift-wrapped Welcomes, 30443 key packages, 10050 and 10002 relay lists).
+//! Endpoint adverts travel inside the group, never in public (ADR 0006).
 
 use std::time::Duration;
 
@@ -9,8 +11,6 @@ use nostr::prelude::*;
 use nostr_sdk::prelude::*;
 use tokio::time::timeout;
 
-use crate::advert::{Advert, AdvertError, Endpoint, ADVERT_IDENTIFIER, ADVERT_KIND};
-use crate::identity::Identity;
 
 /// Relays used when the operator does not configure any. Overridable with
 /// `--relay`. Currently ONE relay: two of the three defaults have proven
@@ -24,8 +24,12 @@ pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.primal.net"];
 /// How long to wait for relay connections before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long to wait for a matching advert before giving up.
+/// How long to wait for a fetch (key packages, relay lists) to finish.
 pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(15);
+
+/// A member reads as online while its last advert is younger than this.
+/// Devices re-send their advert well inside it.
+pub const PRESENCE_TTL_SECS: u64 = 600;
 
 /// A connected client over `relays` - the one place relay plumbing is set
 /// up. Callers that publish/fetch shut the client down when done; the
@@ -85,10 +89,6 @@ pub fn default_relays() -> Vec<String> {
     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
 }
 
-/// The default UDP port serve-side tunnels listen on (one place; the CLI
-/// defaults, the client's default listen addr, and the FFI agree on it).
-pub const DEFAULT_LISTEN_PORT: u16 = 41641;
-
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("no relays configured")]
@@ -96,8 +96,6 @@ pub enum RelayError {
     ConnectTimeout,
     #[error(transparent)]
     Sdk(#[from] nostr_sdk::error::Error),
-    #[error(transparent)]
-    Advert(#[from] AdvertError),
     #[error(transparent)]
     Sign(#[from] nostr::error::Error),
 }
@@ -189,266 +187,6 @@ pub fn healthy_relays(relays: &[String]) -> Vec<String> {
     }
 }
 
-/// Sign and publish an advert event to the given relays.
-pub async fn publish_advert(
-    identity: &Identity,
-    endpoints: Vec<Endpoint>,
-    noise_pub: [u8; 32],
-    name: Option<String>,
-    ttl_secs: u64,
-    relays: &[String],
-) -> Result<(), RelayError> {
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
-    let event =
-        Advert::event(identity, endpoints, noise_pub, name, ttl_secs, Timestamp::now())?;
-
-    let client = connect_client(relays).await?;
-    let output = client.send_event(&event).await;
-    client.shutdown().await;
-    let output = output?;
-    for (url, status) in &output.success {
-        tracing::info!(%url, ?status, "advert published");
-    }
-    for (url, err) in &output.failed {
-        tracing::warn!(%url, %err, "relay rejected advert");
-        if is_rate_limit(err) {
-            note_relay_failure(&url.to_string(), err);
-        }
-    }
-    client.shutdown().await;
-    Ok(())
-}
-
-/// Fetch the freshest advert for each key, all concurrently. Rosters repeat
-/// this pattern (FFI `mesh_members`, the CLI roster, the pairing watcher):
-/// an offline member costs its own [`FETCH_WAIT`], not the batch's. Order
-/// matches `keys`.
-pub async fn fetch_adverts_concurrent(
-    relays: &[String],
-    keys: Vec<nostr::prelude::PublicKey>,
-) -> Vec<Option<Advert>> {
-    futures_util::future::join_all(
-        keys.iter()
-            .map(|pk| async { fetch_advert_for(relays, None, Some(*pk)).await.ok().flatten() }),
-    )
-    .await
-}
-
-/// Fetch the freshest advert matching a Noise key and/or npub from the relays.
-///
-/// Subscribes, waits up to [`FETCH_WAIT`] for a valid, unexpired advert, then
-/// disconnects. `None` means "nothing valid arrived in time". Results are
-/// cached briefly ([`ADVERT_CACHE_TTL`]): lookups repeat constantly (accept-
-/// time peer display, roster names, dials) and relays rate-limit the churn.
-pub async fn fetch_advert_for(
-    relays: &[String],
-    noise_key: Option<[u8; 32]>,
-    npub: Option<PublicKey>,
-) -> Result<Option<Advert>, RelayError> {
-    const ADVERT_CACHE_TTL: Duration = Duration::from_secs(30);
-    // A miss must expire faster than the dialer's retry cadence (5s): a
-    // miss cached for the full 30s answers every retry from the cache, so
-    // a dial against a peer whose advert just landed performs exactly one
-    // real query and then fails against our own memory of the miss.
-    const ADVERT_MISS_TTL: Duration = Duration::from_secs(4);
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<Advert>)>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let cache_key = match (noise_key, npub) {
-        (Some(k), _) => format!("k:{}", hex::encode(k)),
-        (_, Some(p)) => format!("n:{p}"),
-        (None, None) => String::new(),
-    };
-    if let Some((at, advert)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&cache_key) {
-        let ttl = if advert.is_some() {
-            ADVERT_CACHE_TTL
-        } else {
-            ADVERT_MISS_TTL
-        };
-        if at.elapsed() < ttl {
-            return Ok(advert.clone());
-        }
-    }
-
-    let mut filter = Filter::new()
-        .kind(Kind::Custom(ADVERT_KIND))
-        .identifier(ADVERT_IDENTIFIER);
-    if let Some(pk) = npub {
-        filter = filter.author(pk);
-    }
-
-    let client = connect_client(relays).await?;
-    // Always disconnect, failures included: the client holds relay
-    // websockets that only shutdown() releases.
-    let subscribed = client.subscribe(filter).await;
-    if let Err(e) = subscribed {
-        client.shutdown().await;
-        return Err(e.into());
-    }
-
-    let mut notifications = client.notifications();
-    let found = timeout(
-        FETCH_WAIT,
-        async {
-            let cache_key = cache_key.clone();
-            while let Some(notification) = notifications.next().await {
-                let ClientNotification::Event { event, .. } = notification else {
-                    continue;
-                };
-                let advert = match Advert::from_event(&event, Timestamp::now()) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::debug!(%e, "ignoring invalid advert");
-                        continue;
-                    }
-                };
-                if let Some(want_noise) = noise_key {
-                    if advert.noise_pub != want_noise {
-                        continue;
-                    }
-                }
-                cache
-                    .lock()
-                    .expect("advert cache")
-                    .insert(cache_key, (std::time::Instant::now(), Some(advert.clone())));
-                return Some(advert);
-            }
-            None
-        },
-    )
-    .await
-    .unwrap_or(None);
-
-    client.shutdown().await;
-    cache
-        .lock()
-        .expect("advert cache")
-        .insert(cache_key, (std::time::Instant::now(), found.clone()));
-    Ok(found)
-}
-
-/// Fetch a device's published MLS key package (mesh kind 30443) by author.
-///
-/// `None` means "nothing arrived in time" - usually the device has not run
-/// `noscat mesh publish` yet.
-pub async fn fetch_key_package(
-    relays: &[String],
-    device: PublicKey,
-) -> Result<Option<Event>, RelayError> {
-    use crate::mesh::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
-
-    let filter = Filter::new()
-        .kind(Kind::Custom(KEY_PACKAGE_KIND))
-        .identifier(KEY_PACKAGE_IDENTIFIER)
-        .author(device);
-
-    let client = connect_client(relays).await?;
-    let subscribed = client.subscribe(filter).await;
-    if let Err(e) = subscribed {
-        client.shutdown().await;
-        return Err(e.into());
-    }
-
-    let mut notifications = client.notifications();
-    let found = timeout(
-        FETCH_WAIT,
-        async {
-            while let Some(notification) = notifications.next().await {
-                let ClientNotification::Event { event, .. } = notification else {
-                    continue;
-                };
-                if event.pubkey == device {
-                    return Some(event.as_ref().clone());
-                }
-            }
-            None
-        },
-    )
-    .await
-    .unwrap_or(None);
-
-    client.shutdown().await;
-    Ok(found)
-}
-
-/// Subscribe to noscat adverts on the given relays and print them as they
-/// arrive, until the task is cancelled. Returns when the stream ends.
-pub async fn watch_adverts(relays: &[String]) -> Result<(), RelayError> {
-    let client = connect_client(relays).await?;
-
-    let filter = Filter::new()
-        .kind(Kind::Custom(ADVERT_KIND))
-        .identifier(ADVERT_IDENTIFIER);
-    let subscribed = client.subscribe(filter).await;
-    if let Err(e) = subscribed {
-        client.shutdown().await;
-        return Err(e.into());
-    }
-
-    let mut notifications = client.notifications();
-    while let Some(notification) = notifications.next().await {
-        if let ClientNotification::Event { relay_url, event, .. } = notification {
-            match Advert::from_event(&event, Timestamp::now()) {
-                Ok(advert) => {
-                    let npub = advert.npub.to_string();
-                    println!(
-                        "# advert from {npub} via {relay_url}: {:?} (expires {})",
-                        advert.endpoints, advert.expires_at
-                    );
-                }
-                Err(e) => tracing::warn!(%relay_url, "ignoring invalid advert: {e}"),
-            }
-        }
-    }
-    client.shutdown().await;
-    Ok(())
-}
-
-/// Subscribe to mesh key packages (kind 30443) on the relays and forward
-/// each event's author to the returned channel; the stream lives until the
-/// receiver is dropped. This is how the mesh owner notices a device asking
-/// to join: the device publishes its key package tagged to the owner's npub,
-/// and this subscription only surfaces events addressed to `target` - a
-/// device that scanned a different owner's QR never reaches us.
-pub async fn watch_key_packages(
-    relays: &[String],
-    target: PublicKey,
-) -> Result<tokio::sync::mpsc::Receiver<PublicKey>, RelayError> {
-    use crate::mesh::{KEY_PACKAGE_IDENTIFIER, KEY_PACKAGE_KIND};
-
-    let client = connect_client(relays).await?;
-    let filter = Filter::new()
-        .kind(Kind::Custom(KEY_PACKAGE_KIND))
-        .identifier(KEY_PACKAGE_IDENTIFIER)
-        .pubkey(target);
-    let subscribed = client.subscribe(filter).await;
-    if let Err(e) = subscribed {
-        client.shutdown().await;
-        return Err(e.into());
-    }
-
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
-    tokio::spawn(async move {
-        let mut notifications = client.notifications();
-        while let Some(notification) = notifications.next().await {
-            if let ClientNotification::Event { event, .. } = notification {
-                // Bounded channel: a slow confirmer drops duplicates rather
-                // than buffering unbounded; the phone republishes on retry.
-                // Receiver gone: end the watch (the relay client shuts down
-                // with it, via the take+shutdown below).
-                if tx.try_send(event.pubkey).is_err() {
-                    break;
-                }
-            }
-        }
-        client.shutdown().await;
-    });
-    Ok(rx)
-}
-
 /// Presence tracking for mesh-mates: when each member's advert was last
 /// received. Keyed by hex npub (the mesh roster's native form), so the
 /// client and UIs never need the nostr types to query it. Held by the
@@ -474,7 +212,7 @@ impl Presence {
     pub fn note_at(&self, npub: &str, at: std::time::Instant) {
         let mut map = self.last_seen.lock().unwrap_or_else(|p| p.into_inner());
         if !map.contains_key(npub) && map.len() >= PRESENCE_CAP {
-            let ttl = std::time::Duration::from_secs(crate::advert::ADVERT_TTL_SECS as u64);
+            let ttl = std::time::Duration::from_secs(PRESENCE_TTL_SECS);
             map.retain(|_, t| t.elapsed() < ttl);
             if map.len() >= PRESENCE_CAP {
                 let oldest = map
@@ -504,10 +242,10 @@ impl Presence {
     }
 
     /// Online = an advert arrived within the advert TTL
-    /// ([`crate::advert::ADVERT_TTL_SECS`]). A member with no recent advert is
+    /// ([`PRESENCE_TTL_SECS`]). A member with no recent advert is
     /// offline, never an error.
     pub fn is_online(&self, npub: &str) -> bool {
-        matches!(self.age_secs(npub), Some(age) if age < crate::advert::ADVERT_TTL_SECS)
+        matches!(self.age_secs(npub), Some(age) if age < PRESENCE_TTL_SECS)
     }
 }
 
@@ -515,77 +253,6 @@ impl Default for Presence {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Subscribe to noscat adverts (kind 37195) on the relays and forward each
-/// valid advert's author (hex npub) to the returned channel; the stream
-/// lives until the receiver is dropped. This is the node's presence feed:
-/// every arrival is recorded in the caller's [`Presence`] map, and callers
-/// filter to mesh-mates at query time, so devices that join mid-run show up
-/// without resubscribing. Reconnects are handled inside (a dropped relay
-/// stream or an unreachable relay just restarts the subscription after a
-/// short back off), so the caller's last-seen map survives relay churn
-/// untouched.
-pub async fn watch_adverts_presence(
-    relays: &[String],
-) -> Result<tokio::sync::mpsc::Receiver<String>, RelayError> {
-    if relays.is_empty() {
-        return Err(RelayError::NoRelays);
-    }
-    let filter = Filter::new()
-        .kind(Kind::Custom(ADVERT_KIND))
-        .identifier(ADVERT_IDENTIFIER);
-    let relays = relays.to_vec();
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        while !tx.is_closed() {
-            let client = match connect_client(&relays).await {
-                Ok(c) => c,
-                Err(e) => {
-                    for r in &relays {
-                        note_relay_failure(r, &e.to_string());
-                    }
-                    tracing::warn!(%e, "presence: relays unreachable; retrying");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-            if let Err(e) = client.subscribe(filter.clone()).await {
-                for r in &relays {
-                    note_relay_failure(r, &e.to_string());
-                }
-                tracing::warn!(%e, "presence: subscribe failed; retrying");
-                client.shutdown().await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            let mut notifications = client.notifications();
-            loop {
-                match notifications.next().await {
-                    Some(ClientNotification::Event { event, .. }) => {
-                        match Advert::from_event(&event, Timestamp::now()) {
-                            Ok(a) => {
-                                if tx.try_send(a.npub.to_string()).is_err() {
-                                    return; // receiver gone: stop watching
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!(%e, "presence: ignoring invalid advert")
-                            }
-                        }
-                    }
-                    Some(_) => {}
-                    None => break, // relay stream ended: resubscribe
-                }
-            }
-            client.shutdown().await;
-            if tx.is_closed() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    });
-    Ok(rx)
 }
 
 #[cfg(test)]
@@ -611,14 +278,14 @@ mod tests {
         // Arrived just past the TTL window: offline, but still remembered.
         p.note_at(
             A,
-            std::time::Instant::now() - Duration::from_secs(crate::advert::ADVERT_TTL_SECS + 5),
+            std::time::Instant::now() - Duration::from_secs(PRESENCE_TTL_SECS + 5),
         );
         assert!(!p.is_online(A));
         assert!(p.age_secs(A).is_some());
         // Still inside the window: online.
         p.note_at(
             A,
-            std::time::Instant::now() - Duration::from_secs(crate::advert::ADVERT_TTL_SECS - 5),
+            std::time::Instant::now() - Duration::from_secs(PRESENCE_TTL_SECS - 5),
         );
         assert!(p.is_online(A));
     }

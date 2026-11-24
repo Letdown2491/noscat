@@ -13,7 +13,6 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-snow = { workspace = true }
 
 [lints]
 workspace = true

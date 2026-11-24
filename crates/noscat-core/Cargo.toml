@@ -10,9 +10,7 @@ authors.workspace = true
 [dependencies]
 nostr = { workspace = true }
 nostr-sdk = { workspace = true }
-snow = { workspace = true }
 secp256k1 = { workspace = true }
-curve25519-dalek = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
@@ -20,8 +18,9 @@ openmls = { workspace = true }
 openmls_basic_credential = { workspace = true }
 openmls_rust_crypto = { workspace = true }
 openmls_traits = { workspace = true }
-openmls_sqlite_storage = { workspace = true }
-rusqlite = { workspace = true }
+openmls_memory_storage = { workspace = true }
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
 tls_codec = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
