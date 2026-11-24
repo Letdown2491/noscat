@@ -92,6 +92,7 @@ Implementation notes from the rig:
 - [x] Devices send their advert at start and answer a returning member's advert, so a just-started device (a one-shot CLI command) reaches members in seconds.
 - [x] Dropping the last `Client` stops the device and frees its directory. Background tasks held the shared state, which owned their runtime, so no client ever dropped; the apps' join helper then kept the directory and the app's own client failed with `Busy`. Found on the phone; `tests/client.rs` covers it.
 - [x] First real-device test (2026-11-24): CLI on Linux plus the Android app joined one mesh over the LAN; chat from the CLI delivered to the phone.
+- [x] Both apps split Disconnect (go offline, stay a member; Android remembers it across restarts) from Forget mesh (leave, then delete the device dir and cached roster; nothing is deleted if leaving fails). Before, Android's disconnect only dropped its pointer to the device, which stayed a member. Android now closes clients with `close()` instead of leaving them to the garbage collector, so a restart (rename) no longer depends on the old client being collected first. Disconnect, restart and reconnect verified on the Pixel 9a; Forget left for the user to try.
 
 ## Phase 5: release
 
