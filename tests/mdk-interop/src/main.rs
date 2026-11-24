@@ -146,8 +146,16 @@ async fn main() -> Result<()> {
             tokio::spawn(async move { a.join(wn_pk, T).await })
         };
         tokio::time::sleep(Duration::from_secs(2)).await;
+        match wn.run(&["keys", "check", &a.device().to_hex()]) {
+            Ok(v) => println!("wn keys check: {v}"),
+            Err(e) => println!("wn keys check failed: {e:#}"),
+        }
         let created = wn.run(&["groups", "create", "interop", &a.device().to_hex()])?;
-        let gid = find(&created, "group_id").context("groups create group_id")?.to_string();
+        let gid = find(&created, "group_id")
+            .or_else(|| find(&created, "group_id_hex"))
+            .or_else(|| find(&created, "mls_group_id_hex"))
+            .with_context(|| format!("no group id in: {created}"))?
+            .to_string();
         joining.await??;
         println!("1. noscat joined the White Noise group {gid}");
         let mut rx = a.subscribe();
@@ -170,7 +178,7 @@ async fn main() -> Result<()> {
         let mut gid2 = String::new();
         eventually("White Noise sees the invitation", || {
             let inv = wn.run(&["groups", "invites"])?;
-            if let Some(g) = find(&inv, "group_id") {
+            if let Some(g) = find(&inv, "group_id").or_else(|| find(&inv, "group_id_hex")).or_else(|| find(&inv, "mls_group_id_hex")) {
                 gid2 = g.to_string();
                 return Ok(true);
             }

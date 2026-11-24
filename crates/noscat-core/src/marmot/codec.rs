@@ -26,21 +26,32 @@ pub const LIFECYCLE: u16 = 0x800c;
 /// name. Private-use id, never required, so other Marmot clients keep it
 /// byte for byte as unknown data (see docs/nip-noscat.md).
 pub const NOSCAT_MESH: u16 = 0xf3a0;
+/// Marmot encrypted media policy v2. White Noise requires it in every new
+/// group. noscat never sends media; it supports the component in the sense
+/// Marmot means (it can be a member of a group that carries the policy and
+/// leaves the policy as it is).
+pub const ENCRYPTED_MEDIA_V2: u16 = 0x800b;
 
 /// Components a noscat group requires: the Marmot mandatory set plus Nostr
 /// routing and lifecycle.
 pub const REQUIRED_COMPONENTS: [u16; 4] = [ADMIN_POLICY, NOSTR_ROUTING, IDENTITY_PROOF, LIFECYCLE];
-/// Components noscat advertises in its leaves and key packages.
+/// Components noscat advertises in its leaves: the `app_components` list
+/// itself plus every app component it supports. The key package's
+/// `app_components` tag carries only the app components (ids from
+/// [`FIRST_APP_COMPONENT`]), as MDK checks.
 pub const SUPPORTED_COMPONENTS: [u16; 8] = [
     APP_COMPONENTS,
-    SAFE_AAD,
     GROUP_PROFILE,
     ADMIN_POLICY,
     NOSTR_ROUTING,
     IDENTITY_PROOF,
     LIFECYCLE,
     NOSCAT_MESH,
+    ENCRYPTED_MEDIA_V2,
 ];
+
+/// First app-component id; lower ids are dictionary framework entries.
+pub const FIRST_APP_COMPONENT: u16 = 0x8000;
 
 /// Most relays a routing component may list.
 pub const MAX_RELAYS: usize = 16;

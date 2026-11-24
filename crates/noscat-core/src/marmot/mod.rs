@@ -728,7 +728,10 @@ impl MeshGroup {
         let bytes = msg.tls_serialize_detached().map_err(mls("serialize key package"))?;
         let mut slot = [0u8; 32];
         hex::decode_to_slice(&self.meta.slot, &mut slot).map_err(|_| MeshError::State("bad slot".into()))?;
-        let mut components: Vec<u16> = codec::SUPPORTED_COMPONENTS.to_vec();
+        let mut components: Vec<u16> = codec::SUPPORTED_COMPONENTS
+            .into_iter()
+            .filter(|c| *c >= codec::FIRST_APP_COMPONENT)
+            .collect();
         components.sort_unstable();
         let ev = transport::key_package_event(
             &self.keys,

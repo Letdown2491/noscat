@@ -12,7 +12,7 @@ ROOT=$(cd "$HERE/../.." && pwd)
 MDK_REV=${1:-08f3ebf}
 IMAGE=localhost/noscat-mdk
 
-podman build -q -t "$IMAGE" -f "$HERE/Containerfile" "$HERE" > /dev/null || { echo "mdk-interop: image build failed"; exit 1; }
+podman build -q -t "$IMAGE" -f "$HERE/Containerfile" "$HERE" > /dev/null 2>&1 || { echo "mdk-interop: image build failed"; exit 1; }
 
 podman volume exists noscat-mdk-src || podman volume create noscat-mdk-src > /dev/null
 podman volume exists noscat-mdk-target || podman volume create noscat-mdk-target > /dev/null

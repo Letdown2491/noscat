@@ -411,6 +411,12 @@ impl IncomingForward {
         let _ = self.s.finish();
     }
 
+    /// Accept and take the raw stream pair (for stdio bridging).
+    pub async fn accept_raw(mut self) -> Result<(SendStream, RecvStream), AppError> {
+        write(&mut self.s, &[OK]).await?;
+        Ok((self.s, self.r))
+    }
+
     /// Accept and bridge to a TCP service at `to`.
     pub async fn accept(mut self, to: std::net::SocketAddr) -> Result<(), AppError> {
         let tcp = match tokio::net::TcpStream::connect(to).await {
