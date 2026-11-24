@@ -58,7 +58,7 @@ Recommended: A for 0.5.0, B offered upstream in parallel, C never on by default.
 Implementation notes from the rig:
 - Ingest members' adverts *before* registering them as peers, or the first dial fails with "no transport" and waits about 10 s for a retry.
 - A reachable member must set `public: true`; FIPS learns the address by STUN (or `external_addr`). FIPS ignores documentation-range addresses (RFC 5737), so test rigs must use ordinary global ranges.
-- The rig (namespaces, nftables NAT with `masquerade` for cone and `masquerade fully-random` for symmetric, `tc netem`, coturn STUN) should move into the repo as the network test gate from Phase 0.
+- The rig lives in `tests/netrig/` (`tests/netrig/run.sh` runs every scenario and fails on any miss). It is the network test gate from Phase 0 on; swap its experiment node for the real `noscat` binary once the data plane lands.
 
 ## Phase 2: noscat-core rewrite
 

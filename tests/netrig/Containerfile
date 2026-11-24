@@ -1,0 +1,7 @@
+# Network test rig image: the noscat dev image plus what the rig needs to
+# build FIPS on glibc (dbus, clang) and to fake an internet (namespaces,
+# nftables NAT, netem, coturn as STUN).
+FROM localhost/noscat-dev
+RUN dnf install -y -q dbus-devel clang-devel pkgconf-pkg-config \
+      nftables iproute iproute-tc python3 util-linux procps-ng coturn \
+    && dnf clean all
