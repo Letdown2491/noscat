@@ -26,7 +26,7 @@ use crate::control::{Ctx, Op, Reply};
     about = "like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts"
 )]
 struct Cli {
-    /// Info-level logs. Warnings always print; RUST_LOG overrides.
+    /// Info-level logs, plus the FIPS warnings hidden by default (routine at startup). RUST_LOG overrides.
     #[arg(long, global = true)]
     verbose: bool,
     /// Device state directory (identity, mesh). Also NOSCAT_DIR.
@@ -372,12 +372,20 @@ fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    // openmls logs at ERROR for routine cases noscat already handles (an
-    // old advert from the backlog a restarted device fetches), so it is off.
+    // Routine startup noise stays out of the default output (--verbose
+    // shows the FIPS warnings): openmls logs at ERROR for an old advert from
+    // the backlog a restarted device fetches; FIPS warns that the kernel
+    // capped the UDP receive buffer (always, without root) and that a
+    // member has no address yet or its retry failed (until its advert
+    // arrives, or while it is offline). noscat reports real connection
+    // failures itself.
     let filter = if cli.verbose {
         "noscat=info,noscat_core=info,noscat_client=info,nostr_sdk=off,fips_core=warn,openmls=off"
     } else {
-        "warn,nostr_sdk=off,nostr_relay_pool=off,openmls=off"
+        "warn,nostr_sdk=off,nostr_relay_pool=off,openmls=off,\
+         fips_core::transport::udp::socket::platform=error,\
+         fips_core::node::lifecycle::peer_config=error,\
+         fips_core::node::retry=error"
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));

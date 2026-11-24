@@ -218,7 +218,9 @@ A known address of a device (repeatable).
 Do not look for members on the LAN (mDNS).
 .TP
 .B \-\-verbose
-Info-level logs. Warnings always print;
+Info-level logs, plus the FIPS warnings hidden by default because they are
+routine at startup (a capped UDP receive buffer, a member with no address
+yet). Other warnings always print;
 .B RUST_LOG
 overrides.
 .SH ENVIRONMENT
