@@ -13,14 +13,13 @@ use crate::advert::{Advert, AdvertError, Endpoint, ADVERT_IDENTIFIER, ADVERT_KIN
 use crate::identity::Identity;
 
 /// Relays used when the operator does not configure any. Overridable with
-/// `--relay`. Chosen for uptime: three operators so no single relay is
-/// load-bearing, and a relay that rate-limits us is backed off (see
-/// [`note_relay_failure`]) rather than hammering.
-pub const DEFAULT_RELAYS: &[&str] = &[
-    "wss://relay.primal.net",
-    "wss://relay.nostr.com",
-    "wss://nostr.mom",
-];
+/// `--relay`. Currently ONE relay: two of the three defaults have proven
+/// unreachable from real phone networks (a black-holed path fails every
+/// relay op - see issue #16 - and with one healthy relay left the fan-out
+/// buys nothing). A relay that rate-limits us is backed off (see
+/// [`note_relay_failure`]) rather than hammered. Re-broaden this list only
+/// with relays verified reachable from mobile paths.
+pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.primal.net"];
 
 /// How long to wait for relay connections before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,18 +43,38 @@ pub(crate) async fn connect_client(relays: &[String]) -> Result<Client, RelayErr
     for relay in &relays {
         client.add_relay(relay).await?;
     }
-    let connected = timeout(CONNECT_TIMEOUT, client.connect().and_wait(CONNECT_TIMEOUT)).await;
-    if connected.is_err() {
-        for relay in &relays {
-            note_relay_failure(relay, "connect timeout");
+    // Per-relay connects with individual timeouts (concurrent: the worst
+    // case stays at one timeout, not N). The old single
+    // `connect().and_wait(..)` under one deadline failed the WHOLE batch
+    // when one relay path was black-holed - and noted the failure against
+    // every relay, cooling down the healthy ones too. A device with one
+    // bad path then could not sync, join, or publish at all until the
+    // path recovered (issue #16).
+    let results = futures_util::future::join_all(relays.iter().map(|relay| {
+        let client = client.clone();
+        async move {
+            (relay.as_str(), client.try_connect_relay(relay, CONNECT_TIMEOUT).await)
         }
+    }))
+    .await;
+    let mut connected = 0usize;
+    for (relay, result) in results {
+        match result {
+            Ok(()) => {
+                connected += 1;
+                note_relay_success(relay);
+            }
+            Err(e) => {
+                tracing::warn!(%relay, error = %e, "relay skipped: connect failed");
+                note_relay_failure(relay, "connect failed");
+            }
+        }
+    }
+    if connected == 0 {
         // A failed connect still holds half-dialed relay sockets: without
         // shutdown they accumulate while the watcher retries.
         client.shutdown().await;
         return Err(RelayError::ConnectTimeout);
-    }
-    for relay in &relays {
-        note_relay_success(relay);
     }
     Ok(client)
 }

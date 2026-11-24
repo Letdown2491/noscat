@@ -62,8 +62,8 @@ interoperable by construction.
 
 ## Status
 
-**Working** - three layers, each verified live across containers over public relays
-(`wss://relay.primal.net`, `wss://relay.nostr.com`, `wss://nostr.mom`):
+**Working** - three layers, each verified live across containers over public
+relays (currently `wss://relay.primal.net`):
 
 1. **Tunnels** (netcat mode): identity → relay advert → discovery → Noise-XK handshake
    over UDP → stdio bridge, with STUN reflexive discovery and NIP-59 gift-wrapped
