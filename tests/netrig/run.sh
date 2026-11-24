@@ -12,7 +12,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 
 podman build -q -t localhost/noscat-netrig -f "$HERE/Containerfile" "$HERE" > /dev/null 2>&1 || { echo "netrig: image build failed"; exit 1; }
-podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z \
   -v noscat-netrig-target:/target:Z -e CARGO_TARGET_DIR=/target \
   -v "$ROOT:/work:Z" -w /work/tests/netrig/node localhost/noscat-netrig \
   cargo build -q --release

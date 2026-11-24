@@ -302,11 +302,11 @@ in a container (same pattern as our other projects).
 podman build -t localhost/noscat-dev -f containers/noscat-dev.containerfile containers/
 
 # Build / test (the :Z on the cargo volume matters on SELinux hosts):
-podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z -v "$PWD:/work:Z" \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" \
   -w /work localhost/noscat-dev sh -c "cargo test --workspace"
 
 # Try the CLI:
-podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z -v "$PWD:/work:Z" \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" \
   -w /work localhost/noscat-dev cargo run -p noscat -- keygen
 ```
 

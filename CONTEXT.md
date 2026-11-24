@@ -30,3 +30,13 @@ _Avoid_: announcement, beacon
 **Stream**:
 A reliable, ordered byte channel between two members, used by forwards, file transfer, chat and clipboard.
 _Avoid_: tunnel (0.4 term)
+
+**Key package**:
+A device's published, single-use offer to be added to a mesh. A device not in a mesh keeps one on its relays.
+
+**Invitation**:
+What a device receives when an admin adds it: the encrypted welcome into the mesh. A device accepts an invitation only from the device it was told to expect.
+_Avoid_: pairing request, join request (0.4 terms)
+
+**Leave**:
+A member asking the others to remove it. Someone else completes it; the last device of a mesh just forgets the mesh.

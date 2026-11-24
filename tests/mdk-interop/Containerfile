@@ -1,3 +1,5 @@
-# noscat-dev plus the full Perl that MDK's vendored OpenSSL build needs.
+# noscat-dev plus what MDK needs to build: the full Perl for its vendored
+# OpenSSL, clang and llvm-tools for the Odin toolchain (installed by MDK's own
+# pinned scripts/install-odin.sh at build time).
 FROM localhost/noscat-dev
-RUN dnf install -y -q perl && dnf clean all
+RUN dnf install -y -q perl clang && dnf clean all && rustup component add llvm-tools-preview

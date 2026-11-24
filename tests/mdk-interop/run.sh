@@ -18,15 +18,16 @@ podman volume exists noscat-mdk-src || podman volume create noscat-mdk-src > /de
 podman volume exists noscat-mdk-target || podman volume create noscat-mdk-target > /dev/null
 TOOLCHAIN=$(podman run --rm "$IMAGE" rustup show active-toolchain | cut -d' ' -f1)
 
-podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z \
-  -v noscat-mdk-src:/mdk:Z -v noscat-mdk-target:/target:Z \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z \
+  -v noscat-mdk-src:/mdk:z -v noscat-mdk-target:/target:z \
   -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN="$TOOLCHAIN" -w /mdk "$IMAGE" sh -ec "
     [ -d /mdk/.git ] || git clone -q https://github.com/marmot-protocol/mdk.git /mdk
     git fetch -q origin && git checkout -q $MDK_REV
-    cargo build -q --release -p wn-cli --bins"
+    [ -x /mdk/.odin/odin ] || bash scripts/install-odin.sh /mdk/.odin > /dev/null
+    ODIN=/mdk/.odin/odin cargo build -q --release -p wn-cli --bins"
 
-podman run --rm -v noscat-cargo-home:/usr/local/cargo:Z \
-  -v noscat-mdk-target:/mdk-target:Z \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z \
+  -v noscat-mdk-target:/mdk-target:z \
   -e CARGO_TARGET_DIR=/mdk-target/harness -e WN_BIN=/mdk-target/release/wn \
   -e RUST_LOG="${RUST_LOG:-warn}" \
   -v "$ROOT:/work:Z" -w /work/tests/mdk-interop "$IMAGE" cargo run -q --release

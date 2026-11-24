@@ -10,7 +10,7 @@ discovery), packaged as a Rust CLI (`crates/noscat`) and reusable client library
 toolchain:
 
 ```
-podman run --rm -v noscat-cargo-home:/usr/local/cargo -v "$PWD:/work:Z" -w /work \
+podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /work \
   localhost/noscat-dev sh -c "cargo test --workspace"
 ```
 
