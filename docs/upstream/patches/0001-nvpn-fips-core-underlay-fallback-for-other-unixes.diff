@@ -1,0 +1,52 @@
+diff --git a/src/transport/udp/mod.rs b/src/transport/udp/mod.rs
+index b41cce8..7ed2975 100644
+--- a/src/transport/udp/mod.rs
++++ b/src/transport/udp/mod.rs
+@@ -11,12 +11,7 @@ pub(crate) mod darwin_sockopts;
+ mod rebind;
+ pub(crate) mod socket;
+ mod stats;
+-#[cfg(any(
+-    target_os = "android",
+-    target_os = "ios",
+-    target_os = "linux",
+-    target_os = "macos"
+-))]
++#[cfg(unix)]
+ pub(crate) mod underlay;
+ use super::resolve::resolve_socket_addr_with_network;
+ use crate::config::UdpConfig;
+diff --git a/src/transport/udp/underlay.rs b/src/transport/udp/underlay.rs
+index 01baf4f..0aee599 100644
+--- a/src/transport/udp/underlay.rs
++++ b/src/transport/udp/underlay.rs
+@@ -49,3 +49,29 @@ pub(crate) fn bind_socket_to_interface(
+             }),
+     }
+ }
++
++/// Other unixes (FreeBSD, OpenBSD, NetBSD, ...): no portable per-socket
++/// interface binding, so binding to a named interface is reported as
++/// unsupported instead of failing the build.
++#[cfg(all(
++    unix,
++    not(any(
++        target_os = "android",
++        target_os = "ios",
++        target_os = "linux",
++        target_os = "macos"
++    ))
++))]
++pub(crate) fn bind_socket_to_interface(
++    _socket: &Socket,
++    _bind_addr: SocketAddr,
++    interface: Option<&str>,
++) -> io::Result<()> {
++    match interface {
++        None => Ok(()),
++        Some(interface) => Err(io::Error::new(
++            io::ErrorKind::Unsupported,
++            format!("binding to interface {interface:?} is not supported on this platform"),
++        )),
++    }
++}

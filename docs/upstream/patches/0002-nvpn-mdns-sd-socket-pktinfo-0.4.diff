@@ -1,0 +1,11 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -100,7 +100,7 @@
+ optional = true
+ 
+ [dependencies.socket-pktinfo]
+-version = "0.3.2"
++version = "0.4.2"
+ 
+ [dependencies.socket2]
+ version = "0.6"

@@ -1,0 +1,63 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 19dc395..1dd81ea 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -30,7 +30,14 @@ repository = "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n
+ resolver = "2"
+ 
+ [features]
+-default = []
++# Both on by default, so existing builds are unchanged. Embedders that need
++# neither (and want glibc builds without libdbus and libclang) use
++# default-features = false.
++default = ["bluez-ble", "linux-gateway"]
++# Host BLE transport over BlueZ (glibc Linux only; a no-op elsewhere).
++bluez-ble = ["dep:bluer"]
++# NAT/port-forward gateway on nftables (glibc Linux only; a no-op elsewhere).
++linux-gateway = ["dep:rustables"]
+ host-ble-transport = []
+ sim-transport = []
+ webrtc-transport = [
+@@ -223,6 +230,7 @@ features = ["test-util"]
+ 
+ [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies.bluer]
+ version = "0.17"
++optional = true
+ features = [
+     "bluetoothd",
+     "l2cap",
+@@ -239,6 +247,7 @@ version = "0.8"
+ 
+ [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies.rustables]
+ version = "0.8.8"
++optional = true
+ 
+ [target.'cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))'.dependencies.tempfile]
+ version = "3.15"
+diff --git a/build.rs b/build.rs
+index d1a6959..1733d65 100644
+--- a/build.rs
++++ b/build.rs
+@@ -63,7 +63,8 @@ fn main() {
+     println!("cargo:rustc-check-cfg=cfg(bluer_available)");
+     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+-    if target_os == "linux" && target_env != "musl" {
++    let bluez_ble = std::env::var_os("CARGO_FEATURE_BLUEZ_BLE").is_some();
++    if bluez_ble && target_os == "linux" && target_env != "musl" {
+         println!("cargo:rustc-cfg=bluer_available");
+     }
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 7cbcbd9..4b9a244 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,7 +10,7 @@ pub mod control;
+ pub mod discovery;
+ pub(crate) mod dns_query;
+ pub mod endpoint;
+-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
++#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "linux-gateway"))]
+ pub mod gateway;
+ pub mod host_firewall;
+ pub mod host_network;
