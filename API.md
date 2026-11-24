@@ -96,7 +96,7 @@ Mesh:
 | `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
-| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs`. |
+| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable` (`reachable`: its latest advert says it is reachable from the internet; a mesh needs one). |
 | `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
 | `network_changed()` | `()` | Re-check paths after a network switch. |
 | `events()` | `Option<Receiver<Event>>` | Take the receiver once; pump it forever. |
@@ -203,7 +203,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 
 - `ClientConfig { identity_secret?, relays?, mesh_dir?, device_name?, listen_port? }`.
   `listen_port` None = any free port (0.4 defaulted to 41641).
-- `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device }`.
+- `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device, reachable }`.
   0.4's `is_owner` is gone: every device is an admin.
 - `ForwardInfo { id, target, local }` (`local` as a string, e.g.
   `"127.0.0.1:8080"`).

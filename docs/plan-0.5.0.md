@@ -97,6 +97,7 @@ Implementation notes from the rig:
 - [x] Transfers carry an id from a new `TransferStarted` to their outcome, and receives report progress like sends, so both apps show a progress bar either way and keep a Received / Sent history (the last 100 sends; Forget mesh clears it).
 - [x] Renames reach members within seconds: `Device::set_name` / `Client::set_device_name` send an advert with the new name at once (before, a running device kept its old name until restarted). The CLI gains `noscat name [new name]` (saved in the device dir) and a `name` command in the `up` chat that saves it the same way; both apps call it from Settings.
 - [x] Routine FIPS path warnings (a failed direct-path upgrade, a stale direct path, congestion marks) are hidden by default like the startup ones; `--verbose` shows them.
+- [x] Adverts carry `["reachable", "1"]` from a device run reachable, members expose `reachable`, and `mesh members` and both apps warn when no member is, so a mesh that cannot connect across networks says why.
 
 ## Phase 5: release
 

@@ -58,6 +58,8 @@ pub struct Row {
     pub this_device: bool,
     pub online: bool,
     pub last_seen_secs: Option<u64>,
+    #[serde(default)]
+    pub reachable: bool,
 }
 
 /// One reply line.
@@ -136,6 +138,7 @@ pub async fn exec(
                     this_device: m.this_device,
                     online: m.online,
                     last_seen_secs: m.last_seen_secs,
+                    reachable: m.reachable,
                 })
                 .collect();
             let _ = out.send(Reply::Members { mesh, members });

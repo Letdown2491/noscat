@@ -166,7 +166,7 @@ application message whose inner event is:
 |---|---|
 | kind | `21195` |
 | content | the device's FIPS overlay advert (a signed kind 37195 event, JSON), or empty while it has none |
-| tags | `["name", "<device name>"]`, optional |
+| tags | `["name", "<device name>"]`, optional; `["reachable", "1"]` when the device is reachable from the internet (a fixed public UDP endpoint), so members can tell whether the mesh has one |
 
 A member is online while its latest advert is under 10 minutes old.
 Members feed the FIPS advert to their data plane; it is how they learn

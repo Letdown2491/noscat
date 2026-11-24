@@ -89,7 +89,7 @@ fn create_invite_and_talk() {
     // Every device is an admin.
     assert!(b.g.members().unwrap().iter().all(|m| m.admin));
 
-    let ev = b.g.send_advert(Some(r#"{"x":1}"#), "laptop").unwrap();
+    let ev = b.g.send_advert(Some(r#"{"x":1}"#), "laptop", true).unwrap();
     assert_eq!(ev.kind, Kind::Custom(GROUP_KIND));
     let got = a.g.process(&ev).unwrap();
     let got = apps(&got);
@@ -97,6 +97,7 @@ fn create_invite_and_talk() {
     assert_eq!(got[0].pubkey, b.pk());
     assert_eq!(got[0].kind, ADVERT_KIND);
     assert_eq!(got[0].tag("name"), Some("laptop"));
+    assert_eq!(got[0].tag("reachable"), Some("1"));
     // Duplicates are dropped; our own echo is ignored.
     assert!(a.g.process(&ev).unwrap().is_empty());
     assert!(b.g.process(&ev).unwrap().is_empty());

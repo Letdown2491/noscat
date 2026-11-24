@@ -59,8 +59,28 @@ pub fn print_members(mesh: Option<&str>, rows: &[Row]) {
                 (_, None) => "not seen yet".to_string(),
             }
         };
-        println!("{}  {:<20} {presence}", r.npub, r.name.as_deref().unwrap_or("-"));
+        let reach = if r.reachable { ", reachable" } else { "" };
+        println!("{}  {:<20} {presence}{reach}", r.npub, r.name.as_deref().unwrap_or("-"));
     }
+    if let Some(note) = no_reachable_note(rows.iter().map(|r| (r.reachable, r.this_device || r.last_seen_secs.is_some()))) {
+        println!("{note}");
+    }
+}
+
+/// The warning for a mesh with no member reachable from the internet, once
+/// another member has been heard from (before that it is unknown).
+/// `members` yields (reachable, heard from) per member, this device
+/// included as heard from.
+pub fn no_reachable_note(members: impl Iterator<Item = (bool, bool)>) -> Option<&'static str> {
+    let (mut any_reachable, mut heard) = (false, 0);
+    for (reachable, seen) in members {
+        any_reachable |= reachable;
+        heard += usize::from(seen);
+    }
+    (!any_reachable && heard > 1).then_some(
+        "note: no member is reachable from the internet, so members on different networks \
+         cannot meet. Run one (a home server or VPS) with `noscat up --reachable`.",
+    )
 }
 
 /// Narrate one event. `members` labels peers by name.

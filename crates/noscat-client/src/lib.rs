@@ -131,6 +131,9 @@ pub struct Member {
     pub online: bool,
     /// Seconds since its last advert; `None` = never seen.
     pub last_seen_secs: Option<u64>,
+    /// Reachable from the internet, per its latest advert (this device:
+    /// per its own config). Every mesh needs one.
+    pub reachable: bool,
 }
 
 /// What the client does on its own, surfaced for UIs. Peers are bech32
@@ -419,6 +422,7 @@ impl Inner {
                 this_device: m.this_device,
                 online: m.online,
                 last_seen_secs: m.last_seen_secs,
+                reachable: m.reachable,
             })
             .collect()
     }

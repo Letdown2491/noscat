@@ -111,6 +111,9 @@ pub struct MemberStatus {
     /// An advert arrived within [`relay::PRESENCE_TTL_SECS`].
     pub online: bool,
     pub last_seen_secs: Option<u64>,
+    /// Its latest advert says it is reachable from the internet (run with
+    /// `--reachable`); every mesh needs one such member.
+    pub reachable: bool,
 }
 
 /// Something that happened on the mesh.
@@ -158,6 +161,8 @@ struct Inner {
     names: StdMutex<HashMap<PublicKey, String>>,
     /// This device's name: the configured one until [`Device::set_name`].
     my_name: StdMutex<String>,
+    /// Members whose latest advert says they are reachable.
+    reachable: StdMutex<std::collections::HashSet<PublicKey>>,
     /// Accept a Welcome only from this device (set by [`Device::join`]).
     expected_inviter: StdMutex<Option<PublicKey>>,
     subscribed: StdMutex<Vec<[u8; 32]>>,
@@ -253,6 +258,7 @@ impl Device {
             presence: Presence::new(),
             names: StdMutex::new(HashMap::new()),
             my_name: StdMutex::new(my_name),
+            reachable: StdMutex::new(std::collections::HashSet::new()),
             expected_inviter: StdMutex::new(None),
             subscribed: StdMutex::new(Vec::new()),
             sync: StdMutex::new(sync),
@@ -314,6 +320,7 @@ impl Device {
     pub async fn members(&self) -> Vec<MemberStatus> {
         let infos = self.inner.group.lock().await.members().unwrap_or_default();
         let names = self.inner.names.lock().map(|n| n.clone()).unwrap_or_default();
+        let reachable = self.inner.reachable.lock().map(|r| r.clone()).unwrap_or_default();
         infos
             .into_iter()
             .map(|m| {
@@ -330,6 +337,7 @@ impl Device {
                     this_device: m.this_device,
                     online: m.this_device || self.inner.presence.is_online(&hex),
                     last_seen_secs: if m.this_device { Some(0) } else { self.inner.presence.age_secs(&hex) },
+                    reachable: if m.this_device { self.is_reachable() } else { reachable.contains(&m.device) },
                 }
             })
             .collect()
@@ -688,6 +696,13 @@ impl Device {
     async fn on_advert(&self, ev: AppEvent) {
         let device = ev.pubkey;
         let name = ev.tag("name").map(str::to_string);
+        if let Ok(mut r) = self.inner.reachable.lock() {
+            if ev.tag("reachable") == Some("1") {
+                r.insert(device);
+            } else {
+                r.remove(&device);
+            }
+        }
         if let Some(n) = &name {
             if let Ok(mut names) = self.inner.names.lock() {
                 names.insert(device, n.clone());
@@ -751,6 +766,11 @@ impl Device {
         Ok(())
     }
 
+    /// Whether this device runs reachable from the internet.
+    fn is_reachable(&self) -> bool {
+        matches!(self.inner.cfg.dataplane.reachability, crate::dataplane::Reachability::Public { .. })
+    }
+
     /// This device's name, as members see it.
     pub fn name(&self) -> String {
         self.inner.my_name.lock().map(|n| n.clone()).unwrap_or_else(|_| self.inner.cfg.name.clone())
@@ -787,7 +807,7 @@ impl Device {
             if !g.in_mesh() {
                 return;
             }
-            g.send_advert(advert.as_deref(), &self.name())
+            g.send_advert(advert.as_deref(), &self.name(), self.is_reachable())
         };
         match ev {
             Ok(ev) => {
