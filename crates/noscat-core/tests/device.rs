@@ -62,10 +62,22 @@ where
 }
 
 async fn invite_and_join(admin: &Device, joiner: &Device) {
+    let mut rx = admin.subscribe();
     let j = joiner.clone();
     let inviter = admin.device();
     let waiting = tokio::spawn(async move { j.join(inviter, T).await });
-    // The joiner published a key package at start; inviting right away works.
+    // The joiner asks the inviter (the QR it scanned) to invite it.
+    let asked = tokio::time::timeout(T, async {
+        loop {
+            if let Ok(DeviceEvent::JoinRequest { device, .. }) = rx.recv().await {
+                if device == joiner.device() {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(asked.is_ok(), "no join request from the joiner");
     admin.invite(joiner.device()).await.unwrap();
     waiting.await.unwrap().unwrap();
 }

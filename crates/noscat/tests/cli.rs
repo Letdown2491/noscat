@@ -1,0 +1,171 @@
+//! The `noscat` binary end to end against an in-process relay: create,
+//! join and invite as one-shot commands, then a running `up` that other
+//! commands on the same directory go through (members, invite), and
+//! chat, send and pipe from the other device.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const BIN: &str = env!("CARGO_BIN_EXE_noscat");
+
+fn free_udp() -> SocketAddr {
+    std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+}
+
+fn tmp(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("noscat-cli-{}-{}-{tag}", std::process::id(), rand_u32()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn rand_u32() -> u32 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+}
+
+struct Dev {
+    dir: PathBuf,
+    listen: SocketAddr,
+    npub: String,
+}
+
+struct Rig {
+    relay: String,
+    peers: Vec<String>,
+}
+
+impl Rig {
+    fn cmd(&self, d: &Dev, args: &[&str]) -> Command {
+        let mut c = Command::new(BIN);
+        c.arg("--dir").arg(&d.dir);
+        c.args(["--relay", &self.relay, "--listen", &d.listen.to_string(), "--no-lan", "--stun", "stun:127.0.0.1:9"]);
+        for p in &self.peers {
+            c.args(["--peer", p]);
+        }
+        c.args(args).env_remove("NOSCAT_IDENTITY").env("RUST_LOG", "warn");
+        c
+    }
+
+    fn ok(&self, d: &Dev, args: &[&str]) -> String {
+        let out = self.cmd(d, args).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "noscat {args:?} failed\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout + &String::from_utf8_lossy(&out.stderr)
+    }
+}
+
+fn id(dir: &Path) -> String {
+    let out = Command::new(BIN).arg("--dir").arg(dir).arg("id").output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).lines().last().unwrap().trim().to_string()
+}
+
+fn echo() -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut s = s;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = s.read(&mut buf) {
+                    if n == 0 || s.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Collect a child's stdout and stderr lines into a shared log.
+fn capture(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    for r in [
+        Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>,
+        Box::new(child.stderr.take().unwrap()),
+    ] {
+        let log = log.clone();
+        std::thread::spawn(move || {
+            for l in BufReader::new(r).lines().map_while(Result::ok) {
+                log.lock().unwrap().push_str(&(l + "\n"));
+            }
+        });
+    }
+    log
+}
+
+fn wait_for(log: &std::sync::Mutex<String>, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !log.lock().unwrap().contains(what) {
+        assert!(Instant::now() < deadline, "never saw {what:?} in:\n{}", log.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn cli_end_to_end() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+
+    let (da, db) = (tmp("a"), tmp("b"));
+    let a = Dev { npub: id(&da), dir: da, listen: free_udp() };
+    let b = Dev { npub: id(&db), dir: db, listen: free_udp() };
+    let rig = Rig {
+        relay: url,
+        peers: vec![format!("{}@{}", a.npub, a.listen), format!("{}@{}", b.npub, b.listen)],
+    };
+
+    // One-shot mesh commands, each starting and stopping its device.
+    rig.ok(&a, &["mesh", "create", "home"]);
+    let join = rig.cmd(&b, &["mesh", "join", &a.npub, "--timeout", "60"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    rig.ok(&a, &["mesh", "invite", &b.npub]);
+    let joined = join.wait_with_output().unwrap();
+    assert!(joined.status.success(), "join failed: {}", String::from_utf8_lossy(&joined.stderr));
+
+    // A runs; commands on A's directory go through it.
+    let inbox = tmp("inbox");
+    let svc = echo();
+    let mut up = rig
+        .cmd(&a, &["up", "--out", inbox.to_str().unwrap(), "--to", &svc.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = capture(&mut up);
+    wait_for(&log, "up as");
+    let members = rig.ok(&a, &["mesh", "members"]);
+    assert!(members.contains("2 member(s)"), "{members}");
+    assert!(rig.cmd(&a, &["up"]).output().unwrap().status.code() != Some(0), "a second up must fail");
+
+    // B (not running) sends to A.
+    let said = rig.ok(&b, &["chat", &a.npub, "hello", "from", "b"]);
+    assert!(said.contains("delivered"), "{said}");
+    wait_for(&log, "hello from b");
+
+    let src = tmp("src").join("data.bin");
+    let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &body).unwrap();
+    rig.ok(&b, &["send", src.to_str().unwrap(), &a.npub]);
+    assert_eq!(std::fs::read(inbox.join("data.bin")).unwrap(), body);
+
+    // Netcat: B's stdio to A's default service (the echo).
+    let mut pipe = rig.cmd(&b, &["pipe", &a.npub]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    pipe.stdin.take().unwrap().write_all(b"ping over noscat\n").unwrap();
+    let out = pipe.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ping over noscat\n", "{}", String::from_utf8_lossy(&out.stderr));
+
+    let _ = up.kill();
+    let _ = up.wait();
+    drop(relay);
+}

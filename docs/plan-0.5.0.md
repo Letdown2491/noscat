@@ -84,9 +84,11 @@ Implementation notes from the rig:
 
 ## Phase 4: clients
 
-- [ ] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events. Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
+- [ ] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events. FFI done (same function names; `mesh_*` use the running client; `MeshMember.admin/online/this_device` replace `is_owner`; new mesh events and `JoinRequest`). Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
 - [ ] noscat-desktop moved to the new client; its `src/mesh.rs` glue shrinks or disappears.
-- [ ] CLI commands mapped onto the new model (`up`, `forward`, `expose`, `send`, `mesh ...`).
+- [x] CLI commands mapped onto the new model: `id`, `up`, `expose`, `serve`, `pipe`, `send`, `chat`, `clip`, `forward`, `mesh create|invite|join|remove|leave|members|qr`. One process runs a device (directory lock); other commands go through its loopback control channel or start the device themselves. State moved to the platform data directory. `tests/cli.rs` drives the binary end to end.
+- [x] Join requests (kind 21196 gift wrap to the scanned device) so the inviting side gets a prompt instead of typing an npub; restores 0.4's approve-on-request flow without an owner.
+- [x] Devices send their advert at start and answer a returning member's advert, so a just-started device (a one-shot CLI command) reaches members in seconds.
 
 ## Phase 5: release
 

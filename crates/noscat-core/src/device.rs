@@ -48,6 +48,10 @@ const PUBLISH_ATTEMPTS: u32 = 3;
 /// Gift wraps carry a created_at randomized up to two days into the past.
 const GIFT_WRAP_LOOKBACK_SECS: u64 = 3 * 24 * 60 * 60;
 /// Overlap when resuming the group subscription after a restart.
+/// Join requests older than this are stale (the asker stopped waiting).
+const JOIN_REQUEST_TTL_SECS: u64 = 15 * 60;
+/// Least time between adverts sent in answer to a returning member.
+const ADVERT_REPLY_DEBOUNCE: Duration = Duration::from_secs(10);
 const RESUME_OVERLAP_SECS: u64 = 15 * 60;
 const SYNC_FILE: &str = "relay-sync.json";
 const SUB_GROUP: &str = "noscat-group";
@@ -119,6 +123,10 @@ pub enum DeviceEvent {
     Superseded,
     /// This device is no longer in a mesh.
     Removed,
+    /// A device that is not a member asks to be invited (it scanned this
+    /// device's QR and is waiting in [`Device::join`]). Only a prompt:
+    /// nothing happens unless someone calls [`Device::invite`].
+    JoinRequest { device: PublicKey, name: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -141,6 +149,11 @@ struct Inner {
     expected_inviter: StdMutex<Option<PublicKey>>,
     subscribed: StdMutex<Vec<[u8; 32]>>,
     sync: StdMutex<SyncState>,
+    /// When this device last answered a returning member with its advert.
+    last_reply: StdMutex<Option<std::time::Instant>>,
+    /// Newest join request time per device, so relays replaying the inbox
+    /// do not repeat a prompt.
+    join_requests: StdMutex<HashMap<PublicKey, u64>>,
 }
 
 /// A running device. Cheap to clone; stops when [`Device::shutdown`] is
@@ -193,6 +206,8 @@ impl Device {
             expected_inviter: StdMutex::new(None),
             subscribed: StdMutex::new(Vec::new()),
             sync: StdMutex::new(sync),
+            last_reply: StdMutex::new(None),
+            join_requests: StdMutex::new(HashMap::new()),
         });
         let dev = Self {
             inner,
@@ -449,8 +464,9 @@ impl Device {
     fn spawn_advert_ticker(&self) {
         let dev = self.clone();
         let h = tokio::spawn(async move {
+            // The first tick fires at once: members learn a restarted
+            // device's endpoints now, not one interval later.
             let mut tick = tokio::time::interval(ADVERT_INTERVAL);
-            tick.tick().await;
             loop {
                 tick.tick().await;
                 dev.send_advert().await;
@@ -466,7 +482,10 @@ impl Device {
             self.handle(changes).await;
         } else if event.kind == Kind::GiftWrap {
             let expected = *self.inner.expected_inviter.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(inviter) = expected else { return Ok(()) };
+            let Some(inviter) = expected else {
+                self.on_join_request(event).await;
+                return Ok(());
+            };
             let joined = {
                 let mut g = self.inner.group.lock().await;
                 if g.in_mesh() {
@@ -488,6 +507,43 @@ impl Device {
             }
         }
         Ok(())
+    }
+
+    async fn on_join_request(&self, event: &Event) {
+        if !self.in_mesh().await {
+            return;
+        }
+        let req = match marmot::transport::unwrap_join_request(self.inner.identity.keys(), event) {
+            Ok(Some(r)) => r,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!("gift wrap ignored: {e}");
+                return;
+            }
+        };
+        if now().saturating_sub(req.created_at) > JOIN_REQUEST_TTL_SECS {
+            return;
+        }
+        let member = self
+            .inner
+            .group
+            .lock()
+            .await
+            .members()
+            .unwrap_or_default()
+            .iter()
+            .any(|m| m.device == req.sender);
+        if member {
+            return;
+        }
+        {
+            let mut seen = self.inner.join_requests.lock().unwrap_or_else(|p| p.into_inner());
+            if seen.get(&req.sender).is_some_and(|t| *t >= req.created_at) {
+                return;
+            }
+            seen.insert(req.sender, req.created_at);
+        }
+        let _ = self.inner.events.send(DeviceEvent::JoinRequest { device: req.sender, name: req.name });
     }
 
     /// Act on group changes. Boxed: committing a leave from here re-enters
@@ -552,7 +608,30 @@ impl Device {
                 names.insert(device, n.clone());
             }
         }
+        // A member we have not heard from lately (just started, or back
+        // from offline) needs our endpoints too: answer with our advert
+        // instead of making it wait for the next tick. Debounced so a
+        // mesh full of restarts does not echo.
+        let stale = self
+            .inner
+            .presence
+            .age_secs(&device.to_hex())
+            .is_none_or(|age| age > ADVERT_INTERVAL.as_secs() + 30);
         self.inner.presence.note(&device.to_hex());
+        if stale && device != self.device() {
+            let due = {
+                let mut last = self.inner.last_reply.lock().unwrap_or_else(|p| p.into_inner());
+                let due = last.is_none_or(|t| t.elapsed() > ADVERT_REPLY_DEBOUNCE);
+                if due {
+                    *last = Some(std::time::Instant::now());
+                }
+                due
+            };
+            if due {
+                let dev = self.clone();
+                tokio::spawn(async move { dev.send_advert().await });
+            }
+        }
         if !ev.content.is_empty() {
             if let Err(e) = self.inner.dp.ingest_advert(&ev.content).await {
                 tracing::debug!("advert not used: {e}");
@@ -736,6 +815,17 @@ impl Device {
         let mut rx = self.subscribe();
         *self.inner.expected_inviter.lock().unwrap_or_else(|p| p.into_inner()) = Some(inviter);
         self.publish_key_package().await?;
+        // Ask the inviter's device to prompt its user. Best effort: an
+        // invite by npub works without it.
+        match marmot::transport::wrap_join_request(self.inner.identity.keys(), &inviter, &self.inner.cfg.name) {
+            Ok(wrap) => {
+                let relays = self.inbox_relays(&inviter).await;
+                if let Err(e) = self.publish(&wrap, &relays).await {
+                    tracing::warn!("join request not delivered: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("join request: {e}"),
+        }
         // An invitation that arrived before now is still on the relays.
         let relays = self.all_relays().await;
         let stored = self

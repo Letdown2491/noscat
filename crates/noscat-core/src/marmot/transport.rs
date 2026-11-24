@@ -23,6 +23,8 @@ pub const KEY_PACKAGE_KIND: u16 = 30443;
 pub const INBOX_RELAYS_KIND: u16 = 10050;
 /// Kind 10002: NIP-65 relay list, where key packages are published.
 pub const RELAY_LIST_KIND: u16 = 10002;
+/// Rumor kind of a noscat join request (gift-wrapped to the inviter).
+pub const JOIN_REQUEST_KIND: u16 = 21196;
 
 /// A malformed transport object. Never carries input bytes.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -304,6 +306,51 @@ pub fn unwrap_welcome(keys: &Keys, gift_wrap: &Event) -> Result<Option<WelcomeEn
         mls_bytes,
         key_package_event_id,
         relays,
+    }))
+}
+
+// ---- join requests ------------------------------------------------------
+
+/// Gift-wrap a join request: "I am waiting to be invited", with this
+/// device's name, for the device whose QR was scanned.
+pub fn wrap_join_request(keys: &Keys, inviter: &PublicKey, name: &str) -> Result<Event, TransportError> {
+    let rumor = EventBuilder::new(Kind::Custom(JOIN_REQUEST_KIND), name).finalize_unsigned(keys.public_key());
+    nostr::nips::nip59::GiftWrapBuilder::new(*inviter, rumor)
+        .finalize(keys)
+        .map_err(|e| TransportError(e.to_string()))
+}
+
+/// An unwrapped join request.
+#[derive(Debug, Clone)]
+pub struct JoinRequest {
+    /// The device asking, as authenticated by the NIP-59 seal.
+    pub sender: PublicKey,
+    /// Its name, if it gave one.
+    pub name: Option<String>,
+    /// When it asked (the rumor's time, not the gift wrap's).
+    pub created_at: u64,
+}
+
+/// Unwrap a gift wrap that holds a join request; `Ok(None)` for any other
+/// rumor kind.
+pub fn unwrap_join_request(keys: &Keys, gift_wrap: &Event) -> Result<Option<JoinRequest>, TransportError> {
+    if gift_wrap.kind != Kind::GiftWrap {
+        return bad("not a gift wrap");
+    }
+    let unwrapped = nostr::nips::nip59::extract_rumor(keys, gift_wrap)
+        .map_err(|e| TransportError(format!("unwrap failed: {e}")))?;
+    let rumor = unwrapped.rumor;
+    if rumor.kind != Kind::Custom(JOIN_REQUEST_KIND) {
+        return Ok(None);
+    }
+    if rumor.pubkey != unwrapped.sender {
+        return bad("rumor author is not the seal signer");
+    }
+    let name: String = rumor.content.chars().filter(|c| !c.is_control()).take(64).collect();
+    Ok(Some(JoinRequest {
+        sender: unwrapped.sender,
+        name: (!name.trim().is_empty()).then(|| name.trim().to_string()),
+        created_at: rumor.created_at.as_secs(),
     }))
 }
 

@@ -136,6 +136,23 @@ MUST accept a Welcome only from that device (the gift wrap's rumor
 author). The QR is the trust anchor; without it anyone could invite a
 device into their own mesh.
 
+While waiting, the joining device SHOULD send that device a join request
+so its user can approve with one action instead of typing an npub: a
+NIP-59 gift wrap (kind 1059) to the scanned device's inbox relays, whose
+rumor is
+
+| Field | Value |
+|---|---|
+| kind | `21196` |
+| content | the joining device's name (UTF-8, at most 64 characters), or empty |
+| tags | none |
+
+A member that receives one from a non-member, with a rumor no older than
+15 minutes, MAY show it to its user. A join request grants nothing: the
+device is added only if a member then commits an Add for its key
+package. Receivers MUST ignore requests from current members and SHOULD
+show at most one prompt per request time per device.
+
 A device keeps at most its two newest key packages and deletes consumed
 ones after joining.
 

@@ -25,8 +25,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
      the other platforms (see `IdentitySource::File` in `crates/noscat-client` for
      the pattern: unix 0600 file mode, plain write elsewhere).
    - Paths: never assume `/`-prefixed homes or `$HOME` alone; Windows-native
-     environments set `USERPROFILE`, not `HOME` (see `default_identity` in
-     `crates/noscat/src/main.rs`).
+     environments set `USERPROFILE` and `APPDATA`, not `HOME` (see `default_dir`
+     in `crates/noscat/src/main.rs`).
    - Unix-only APIs (file modes, symlinks, signals, fork) need a documented
      Windows/BSD fallback or a graceful degradation.
    - BSDs are tested only by compilation (`cargo install`); keep dependencies
@@ -61,10 +61,14 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 - `crates/noscat-client` - the reusable client: one `Client` per device,
   identity sources, mesh operations, an event stream, and the app operations
   (`up`/`expose`/`forward`/`send_file`/`send_chat`/stdio).
-- `crates/noscat-ffi` - (being moved to 0.5 in phase 4) UniFFI bridge for mobile apps (Kotlin now, Swift later):
-  `NoscatClient`, `Event` callback, identity/mesh helpers. The Android app
-  (`~/Documents/noscat-android`) consumes the published crate.
-- `crates/noscat` - (being moved to 0.5 in phase 4) the CLI: a thin skin over the client.
+- `crates/noscat-ffi` - UniFFI bridge for mobile apps (Kotlin now, Swift later):
+  `NoscatClient`, `Event` callback, identity and `mesh_*` functions (which use
+  the app's running client for a directory, or run the device for the call).
+  The Android app (`~/Documents/noscat-android`) consumes the published crate.
+- `crates/noscat` - the CLI: a thin skin over the client. One process runs a
+  device (`Client::start` locks the state directory); `control.rs` is the
+  loopback channel every other command on that directory goes through.
+  `tests/cli.rs` drives the real binary.
 - `docs/nip-noscat.md` - the wire protocol spec (the interop contract).
 - `packaging/` - nfpm, AUR prep, bottle script; `.github/workflows/release.yml` -
   the whole release pipeline (builds, crates.io, tap, scoop, pacman).

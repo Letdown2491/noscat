@@ -63,12 +63,17 @@ public IPv6 address); members behind NAT reach each other through it.
 
 ### Client
 
+`identity_npub(&IdentitySource)` resolves an identity (creating the file)
+without starting anything.
+
 `Client::start(config) -> Result<Client, ClientError>` starts the device
 right away (relay connections, key package, data plane). It blocks for a
 few seconds; call it from a worker thread, never from inside an async
 runtime. Cloning shares the device; dropping the last clone stops it.
-Only one `Client` may run per state directory in a process;
-`Client::running(dir)` returns it.
+Only one `Client` may run per state directory, across processes too:
+`start` locks `<dir>/lock` and fails with `ClientError::Busy` when another
+process holds it. `Client::running(dir)` returns the one running in this
+process. `Client` is `Send + Sync`; dropping it from async code is safe.
 
 Mesh:
 
@@ -138,6 +143,7 @@ Peers are bech32 npubs.
 | `MemberSeen` | `peer, name` | A member's advert arrived. |
 | `MeshChangeUndone` | | A membership change of ours lost a race with another member's; retry it. |
 | `MeshLeft` | | Removed, or left. |
+| `JoinRequest` | `peer, name` | A device that scanned this device's QR asks to be invited: prompt, then `invite(peer)`. |
 
 0.4's `Incoming` is gone: inbound streams are always handled by the
 client. `TunnelUp` no longer carries an address.
@@ -146,19 +152,23 @@ Delivery contracts:
 
 - Events arrive on a client-owned thread. UIs hop to their main thread
   before touching UI state.
-- The channel is unbounded; drain it continuously anyway.
+- The channel is unbounded; drain it continuously anyway. `Event` is
+  `Clone`, so a UI can fan it out.
 - Nothing in the client prints; logging goes through `tracing`.
 
 ### Errors
 
-`ClientError`: `Identity(String) | Mesh(String) | Io(io::Error) | Stream(String)`.
+`ClientError`: `Identity(String) | Mesh(String) | Io(io::Error) | Stream(String) | Busy(PathBuf)`.
 Match on the variant, show the display string.
 
 ---
 
 ## noscat-ffi (Kotlin via UniFFI, Swift later)
 
-> Still describes 0.4.3; rewritten with the FFI in phase 4 of the 0.5.0 plan.
+A device directory holds one device (`identity.nsec`, mesh state) and at
+most one device runs per directory. The `mesh_*` functions use the app's
+running `NoscatClient` for that directory when there is one (pass the
+same `mesh_dir`), and otherwise run the device just for the call.
 
 ### Functions
 
@@ -166,21 +176,35 @@ Match on the variant, show the display string.
 |---|---|
 | `generate_identity()` | New `Identity` record. |
 | `identity_from_secret(secret)` | Restore from hex or nsec. |
-| `mesh_members(dir, relays?)` | Roster of a mesh device directory, names + `last_seen_secs` resolved from live adverts (None = offline). |
-| `mesh_prepare(dir, owner?, relays?)` | Publish this device's MLS key package as a join request, addressed to `owner_npub` when given. Returns this device's npub. |
-| `mesh_join(dir, timeout_secs, owner_npub, relays?)` | Wait for the owner's gift-wrapped invitation and join. Accepts a bare npub or a `noscat:<npub>?...` URI. The deadline is enforced INSIDE core (a caller timeout would leak the relay session); a too-short wait surfaces as a clean timeout error, not a hang. |
-| `mesh_sync(dir, for_secs, relays?)` | Merge the owner's epoch commits: backfill of stored commits first, then a live listen. |
-| `mesh_resend(dir, to_npub?, relays?)` | OWNER ONLY: replay the journaled commit chain so a stranded member catches up. Returns how many gift wraps were sent. Non-owners get a clear NotOwner error. |
+| `mesh_prepare(dir, owner?, relays?)` | This directory's npub, creating `identity.nsec` if missing. `owner` is unused (kept for call compatibility). |
+| `mesh_join(dir, timeout_secs, owner_npub, relays?)` | Wait for an invitation from `owner_npub` (bare npub or `noscat:` URI) and join; the inviter is sent a join request. Returns the members. A timeout is the error "no invitation arrived in time". |
+| `mesh_members(dir, relays?)` | The members. Presence (`online`, `last_seen_secs`) is only known while a client runs for `dir`. |
+| `mesh_sync(dir, wait_secs, relays?)` | The members after catching up: immediate when a client runs for `dir`, else after running the device for `wait_secs`. |
+| `mesh_create(dir, name, relays?)` | New mesh with this device as the only member. |
+| `mesh_invite(dir, npub, relays?)` | Add a device; it must be running or in `mesh_join`. |
+| `mesh_remove(dir, npub, relays?)` | Remove a member. |
+| `mesh_leave(dir, timeout_secs, relays?)` | Leave; waits for another member to complete it. |
+
+0.4's `mesh_resend` is gone: there is no owner journal to replay.
+
+### Records
+
+- `ClientConfig { identity_secret?, relays?, mesh_dir?, device_name?, listen_port? }`.
+  `listen_port` None = any free port (0.4 defaulted to 41641).
+- `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device }`.
+  0.4's `is_owner` is gone: every device is an admin.
+- `ForwardInfo { id, target, local }`.
 
 ### NoscatClient
 
-`NoscatClient(config, listener)`; mirror of the Rust `Client` above:
+`NoscatClient(config, listener)`, a mirror of the Rust `Client`:
 
-`npub()`, `forward(target, localPort)`, `listForwards()`,
-`cancelForward(id)`, `expose(toHost, toPort)`, `sendFile(path, target)`,
-`cancelTransfer(path, target)`, `receiveFile(outDir)`,
-`sendChat(target, text)`, `sendClipboard(target, text)`,
-`up(outDir, bridgePort?)`.
+`npub()`, `meshName()`, `members()`, `invite(npub)`, `remove(npub)`,
+`networkChanged()`, `forward(target, localPort)`, `listForwards()`,
+`cancelForward(id)`, `expose(toHost, toPort)`, `servePort(port, enabled)`,
+`sendFile(path, target)`, `cancelTransfer(path, target)`,
+`receiveFile(outDir)`, `sendChat(target, text)`,
+`sendClipboard(target, text)`, `up(outDir, bridgePort?)`.
 
 Threading contract (the Android app's rules 5 and 6, restated because they
 are the ones apps keep violating):
@@ -192,9 +216,12 @@ are the ones apps keep violating):
 
 ### Event (UniFFI enum, exhaustive when-match required)
 
-Same set as the Rust `Event` with `path: String` instead of `PathBuf`,
-`Listening { npub, port }` instead of a SocketAddr, and no `Incoming`
-(raw inbound streams are consumed by the node dispatcher, never surfaced).
+The Rust `Event` set with `path: String` instead of `PathBuf`,
+`Listening { npub, port }` instead of a SocketAddr, `TransferFailed`
+without `path`, and `Roster { members: List<MeshMember> }`. New in 0.5:
+`MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
+`JoinRequest { peer, name? }` (a device that scanned this one's QR asks
+to be invited: show a prompt, then `invite(peer)`).
 
 ---
 

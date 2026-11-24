@@ -135,7 +135,7 @@ pub struct Member {
 
 /// What the client does on its own, surfaced for UIs. Peers are bech32
 /// npubs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     /// Receiving is set up ([`Client::up`], [`Client::expose`]).
     Listening { npub: String, addr: SocketAddr },
@@ -175,6 +175,10 @@ pub enum Event {
     MeshChangeUndone,
     /// This device is no longer in a mesh.
     MeshLeft,
+    /// A device asks to be invited: it scanned this device's QR and is
+    /// waiting in [`Client::join`]. Show a prompt; [`Client::invite`]
+    /// with `peer` adds it.
+    JoinRequest { peer: String, name: Option<String> },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,6 +191,9 @@ pub enum ClientError {
     Io(#[from] io::Error),
     #[error("{0}")]
     Stream(String),
+    /// Another process is running a device on this state directory.
+    #[error("another noscat process is using {}", .0.display())]
+    Busy(PathBuf),
 }
 
 impl From<noscat_core::device::DeviceError> for ClientError {
@@ -264,12 +271,15 @@ struct Serving {
 }
 
 struct Inner {
-    rt: tokio::runtime::Runtime,
+    /// Always `Some` until drop.
+    rt: Option<tokio::runtime::Runtime>,
     device: Device,
     npub: String,
     dir: PathBuf,
     /// Removed on drop when the state was temporary.
     temp_dir: bool,
+    /// Held for the client's life: one process per state directory.
+    _lock: std::fs::File,
     events: std_mpsc::Sender<Event>,
     max_incoming: u64,
     serving: Mutex<Serving>,
@@ -283,10 +293,28 @@ struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         let device = self.device.clone();
-        self.rt.block_on(device.shutdown());
+        let rt = self.rt.take();
+        let stop = move || {
+            if let Some(rt) = rt {
+                rt.block_on(device.shutdown());
+            }
+        };
+        // Blocking on (or dropping) a runtime inside another one panics; a
+        // UI or CLI may drop its last clone from async code.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = std::thread::spawn(stop).join();
+        } else {
+            stop();
+        }
         if self.temp_dir {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+}
+
+impl Inner {
+    fn rt(&self) -> &tokio::runtime::Runtime {
+        self.rt.as_ref().expect("runtime lives until drop")
     }
 }
 
@@ -345,6 +373,12 @@ fn load_identity(src: &IdentitySource) -> Result<Identity, ClientError> {
     }
 }
 
+/// The npub an identity source resolves to, creating the identity file
+/// (owner-only) if it does not exist yet. Starts nothing.
+pub fn identity_npub(src: &IdentitySource) -> Result<String, ClientError> {
+    Ok(load_identity(src)?.npub())
+}
+
 fn parse_target(target: &str) -> Result<PublicKey, ClientError> {
     parse_pairing_target(target).map_err(ClientError::Mesh)
 }
@@ -396,7 +430,7 @@ impl Inner {
         let peer = npub_of(&c.peer);
         self.emit(Event::TunnelUp { peer: peer.clone() });
         let me = self.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             loop {
                 match apps::accept(&c).await {
                     Ok(Some(incoming)) => {
@@ -500,7 +534,7 @@ impl Inner {
     fn pump(self: &Arc<Self>) {
         let me = self.clone();
         let mut rx = self.device.subscribe();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             loop {
                 let ev = match rx.recv().await {
                     Ok(ev) => ev,
@@ -519,12 +553,15 @@ impl Inner {
                     DeviceEvent::Advert { device, name } => me.emit(Event::MemberSeen { peer: npub_of(&device), name }),
                     DeviceEvent::Superseded => me.emit(Event::MeshChangeUndone),
                     DeviceEvent::Removed => me.emit(Event::MeshLeft),
+                    DeviceEvent::JoinRequest { device, name } => {
+                        me.emit(Event::JoinRequest { peer: npub_of(&device), name });
+                    }
                     DeviceEvent::App(_) => {}
                 }
             }
         });
         let me = self.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             while let Some(c) = me.device.streams().accept().await {
                 me.adopt(c);
             }
@@ -536,14 +573,15 @@ impl Inner {
 /// it.
 pub struct Client {
     inner: Arc<Inner>,
-    events_rx: Option<std_mpsc::Receiver<Event>>,
+    /// Behind a mutex so `Client` is `Sync` (`Receiver` is not).
+    events_rx: Mutex<Option<std_mpsc::Receiver<Event>>>,
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            events_rx: None,
+            events_rx: Mutex::new(None),
         }
     }
 }
@@ -570,6 +608,16 @@ impl Client {
         };
         std::fs::create_dir_all(&dir)?;
         let key = canonical(&dir);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(ClientError::Busy(dir)),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
         if registry().lock().ok().and_then(|r| r.get(&key).and_then(Weak::upgrade)).is_some() {
             return Err(ClientError::Mesh(format!("a client is already running for {}", dir.display())));
         }
@@ -603,11 +651,12 @@ impl Client {
         let device = rt.block_on(Device::start(identity, cfg))?;
         let (tx, rx) = std_mpsc::channel();
         let inner = Arc::new(Inner {
-            rt,
+            rt: Some(rt),
             device,
             npub,
             dir,
             temp_dir,
+            _lock: lock,
             events: tx,
             max_incoming: config.max_incoming_bytes.unwrap_or(MAX_INCOMING_BYTES),
             serving: Mutex::new(Serving::default()),
@@ -621,14 +670,14 @@ impl Client {
             r.retain(|_, w| w.strong_count() > 0);
             r.insert(key, Arc::downgrade(&inner));
         }
-        Ok(Client { inner, events_rx: Some(rx) })
+        Ok(Client { inner, events_rx: Mutex::new(Some(rx)) })
     }
 
     /// The running client for a state directory, if any in this process.
     #[must_use]
     pub fn running(dir: &Path) -> Option<Client> {
         let inner = registry().lock().ok()?.get(&canonical(dir))?.upgrade()?;
-        Some(Client { inner, events_rx: None })
+        Some(Client { inner, events_rx: Mutex::new(None) })
     }
 
     /// This device's npub (bech32).
@@ -640,7 +689,7 @@ impl Client {
     /// Take the event stream (once per client). Events arrive on a
     /// client-owned thread; drain it continuously.
     pub fn events(&mut self) -> Option<std_mpsc::Receiver<Event>> {
-        self.events_rx.take()
+        self.events_rx.get_mut().ok()?.take()
     }
 
     // ---- mesh ------------------------------------------------------------
@@ -648,18 +697,18 @@ impl Client {
     /// Whether this device is in a mesh.
     #[must_use]
     pub fn in_mesh(&self) -> bool {
-        self.inner.rt.block_on(self.inner.device.in_mesh())
+        self.inner.rt().block_on(self.inner.device.in_mesh())
     }
 
     /// The mesh name, if in a mesh.
     #[must_use]
     pub fn mesh_name(&self) -> Option<String> {
-        self.inner.rt.block_on(self.inner.device.mesh_name())
+        self.inner.rt().block_on(self.inner.device.mesh_name())
     }
 
     /// Start a new mesh with this device as its only member.
     pub fn create_mesh(&self, name: &str) -> Result<(), ClientError> {
-        self.inner.rt.block_on(self.inner.device.create(name))?;
+        self.inner.rt().block_on(self.inner.device.create(name))?;
         Ok(())
     }
 
@@ -667,7 +716,7 @@ impl Client {
     /// running, or waiting in [`Client::join`].
     pub fn invite(&self, target: &str) -> Result<(), ClientError> {
         let pk = parse_target(target)?;
-        self.inner.rt.block_on(self.inner.device.invite(pk))?;
+        self.inner.rt().block_on(self.inner.device.invite(pk))?;
         Ok(())
     }
 
@@ -675,27 +724,27 @@ impl Client {
     /// `noscat:` URI; the scanned QR is the trust anchor) and join.
     pub fn join(&self, inviter: &str, timeout: Duration) -> Result<(), ClientError> {
         let pk = parse_target(inviter)?;
-        self.inner.rt.block_on(self.inner.device.join(pk, timeout))?;
+        self.inner.rt().block_on(self.inner.device.join(pk, timeout))?;
         Ok(())
     }
 
     /// Remove a member from the mesh.
     pub fn remove(&self, target: &str) -> Result<(), ClientError> {
         let pk = parse_target(target)?;
-        self.inner.rt.block_on(self.inner.device.remove(&[pk]))?;
+        self.inner.rt().block_on(self.inner.device.remove(&[pk]))?;
         Ok(())
     }
 
     /// Leave the mesh, waiting up to `timeout` for a member to confirm.
     pub fn leave(&self, timeout: Duration) -> Result<(), ClientError> {
-        self.inner.rt.block_on(self.inner.device.leave(timeout))?;
+        self.inner.rt().block_on(self.inner.device.leave(timeout))?;
         Ok(())
     }
 
     /// The members with names and presence.
     #[must_use]
     pub fn members(&self) -> Vec<Member> {
-        self.inner.rt.block_on(self.inner.members())
+        self.inner.rt().block_on(self.inner.members())
     }
 
     /// Seconds since a member's last advert (npub or hex); `None` = never
@@ -716,7 +765,7 @@ impl Client {
     /// Re-check network paths after a network change (Wi-Fi to mobile).
     pub fn network_changed(&self) {
         let dp = self.inner.device.dataplane().clone();
-        self.inner.rt.spawn(async move {
+        self.inner.rt().spawn(async move {
             let _ = dp.network_changed().await;
         });
     }
@@ -725,7 +774,7 @@ impl Client {
 
     fn local_addr(&self) -> SocketAddr {
         self.inner
-            .rt
+            .rt()
             .block_on(self.inner.device.dataplane().local_addrs())
             .ok()
             .and_then(|a| a.first().copied())
@@ -778,7 +827,7 @@ impl Client {
 
     /// A byte stream to the member's default service.
     pub fn connect(&self, target: &str) -> Result<MeshStream, ClientError> {
-        let (_, send, recv) = self.inner.rt.block_on(self.inner.open_forward(target, 0))?;
+        let (_, send, recv) = self.inner.rt().block_on(self.inner.open_forward(target, 0))?;
         Ok(MeshStream { send, recv })
     }
 
@@ -786,7 +835,7 @@ impl Client {
     /// Blocks until the stream closes.
     pub fn pipe_stdio(&self, target: &str) -> Result<(), ClientError> {
         let inner = self.inner.clone();
-        inner.rt.block_on(async {
+        inner.rt().block_on(async {
             let (peer, s, r) = inner.open_forward(target, 0).await?;
             let res = bridge_stdio(s, r).await;
             if let Err(e) = &res {
@@ -805,7 +854,7 @@ impl Client {
             s.stdio = Some(tx);
         }
         self.inner.emit(Event::Listening { npub: self.inner.npub.clone(), addr: self.local_addr() });
-        self.inner.rt.block_on(async {
+        self.inner.rt().block_on(async {
             let (_peer, s, r) = rx.await.map_err(|_| ClientError::Stream("stopped".into()))?;
             bridge_stdio(s, r).await
         })?;
@@ -816,13 +865,13 @@ impl Client {
     /// `ChatFailed`.
     pub fn send_chat(&self, target: &str, text: &str) {
         let inner = self.inner.clone();
-        self.inner.rt.spawn(inner.send_text(target.to_string(), TextKind::Chat, text.to_string()));
+        self.inner.rt().spawn(inner.send_text(target.to_string(), TextKind::Chat, text.to_string()));
     }
 
     /// Share text for the member's clipboard; same delivery events as chat.
     pub fn send_clipboard(&self, target: &str, text: &str) {
         let inner = self.inner.clone();
-        self.inner.rt.spawn(inner.send_text(target.to_string(), TextKind::Clipboard, text.to_string()));
+        self.inner.rt().spawn(inner.send_text(target.to_string(), TextKind::Clipboard, text.to_string()));
     }
 
     /// Send a file; progress and the outcome arrive as events.
@@ -830,7 +879,7 @@ impl Client {
         let inner = self.inner.clone();
         let target = target.to_string();
         let key = (target.clone(), path.clone());
-        let task = self.inner.rt.spawn({
+        let task = self.inner.rt().spawn({
             let inner = inner.clone();
             let key = key.clone();
             async move {
@@ -906,7 +955,7 @@ impl Client {
         }
         let inner = self.inner.clone();
         let target = target.to_string();
-        self.inner.rt.spawn(async move {
+        self.inner.rt().spawn(async move {
             let error = async {
                 let listener = tokio::net::TcpListener::bind(local).await?;
                 loop {

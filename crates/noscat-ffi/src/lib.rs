@@ -1,18 +1,19 @@
-//! UniFFI bindings over the noscat client stack for mobile apps.
+//! UniFFI bindings over `noscat-client` for mobile apps.
 //!
-//! The rule this crate enforces: the protocol lives in Rust. Kotlin (and,
-//! later, Swift via the same scaffolding) sees identities, plain commands
-//! (dial, forward, expose, send, receive, up), and an event callback - never
-//! Noise, UDP, or Nostr details. The Rust side is the `noscat-core` /
-//! `noscat-client` crates, wrapped here with FFI-safe types only (records,
-//! enums, callback interfaces).
+//! The protocol lives in Rust. Kotlin (and later Swift) sees identities,
+//! plain commands and an event callback, never MLS, FIPS or Nostr details.
+//!
+//! A device directory holds one device (`identity.nsec`, mesh state). At
+//! most one device runs per directory: the `mesh_*` functions use the
+//! app's running [`NoscatClient`] for that directory when there is one,
+//! and otherwise run the device just for the call.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 uniffi::setup_scaffolding!();
 
-/// The one FFI error: every exported fallible call surfaces its message
-/// through `Failed` (uniFFI needs a real error enum, not bare strings).
+/// The one FFI error: every fallible call surfaces its message here.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum NoscatError {
@@ -26,71 +27,131 @@ impl NoscatError {
     }
 }
 
-/// A noscat identity: the npub is the public mesh address, the secret hex is
-/// the credential (store it in the platform keystore, never in plain files if
-/// avoidable).
+/// A noscat identity: the npub is the device's address, the secret hex
+/// its credential (keep it in the platform keystore).
 #[derive(uniffi::Record)]
 pub struct Identity {
     pub npub: String,
     pub secret_hex: String,
 }
 
-/// Client configuration. `relays` defaults to the core's public relay set.
+/// Client configuration.
 #[derive(uniffi::Record)]
 pub struct ClientConfig {
-    /// The identity secret (hex or nsec). None = generate an ephemeral one.
+    /// The identity secret (hex or nsec). None = an ephemeral one.
     pub identity_secret: Option<String>,
     /// Relay URLs; None uses the defaults.
     pub relays: Option<Vec<String>>,
-    /// The mesh device directory to scope tunnels to, if any.
+    /// The device directory (mesh state). None = no mesh, state in a
+    /// temporary directory.
     pub mesh_dir: Option<String>,
-    /// Friendly device name shown to peers (published in the advert).
-    /// None = no name (UIs fall back to generic labels).
+    /// Name other members see. None = the hostname.
     pub device_name: Option<String>,
-    /// The UDP port to listen on for inbound tunnels. None = 41641.
+    /// UDP port of the data plane. None = any free port.
     pub listen_port: Option<u16>,
 }
 
-/// What the client does on its own, delivered to the registered listener.
+/// A member of the mesh, as the device list shows it.
+#[derive(uniffi::Record, Clone)]
+pub struct MeshMember {
+    /// bech32 npub: the target for sends and forwards.
+    pub npub: String,
+    /// Name from the member's latest advert; None = show a generic label.
+    pub name: Option<String>,
+    /// Seconds since its last advert; None = not seen since this device
+    /// started.
+    pub last_seen_secs: Option<u64>,
+    /// Its advert is fresh (seen within 10 minutes).
+    pub online: bool,
+    /// May add and remove members (every noscat device is an admin).
+    pub admin: bool,
+    /// This device.
+    pub this_device: bool,
+}
+
+fn member(m: noscat_client::Member) -> MeshMember {
+    MeshMember {
+        npub: m.npub,
+        name: m.name,
+        last_seen_secs: m.last_seen_secs,
+        online: m.online,
+        admin: m.admin,
+        this_device: m.this_device,
+    }
+}
+
+/// What the client does on its own, delivered to the listener.
 #[derive(uniffi::Enum)]
 pub enum Event {
-    /// The serve side is up (advert published): npub + local UDP port.
+    /// Receiving is set up: npub and the data plane's UDP port.
     Listening { npub: String, port: u16 },
-    /// A tunnel is ready for traffic: peer npub (or noise key fallback).
+    /// A connection with a member is up.
     TunnelUp { peer: String },
-    /// A tunnel ended; error is set when it was not a clean close.
+    /// It ended; `error` is set when not clean.
     TunnelClosed { peer: String, error: Option<String> },
-    /// A file transfer finished: the final verified path.
+    /// A transfer finished: on receive the final verified path, on send
+    /// the source.
     TransferDone { peer: String, path: String },
-    /// A receive ended WITHOUT a verified whole file: the kept
-    /// `.noscat-part` path is a resume seed only, not a usable file.
+    /// A receive ended without a whole file; the `.noscat-part` resumes
+    /// when the same file is sent again.
     TransferPartial { peer: String, path: String },
-    /// A file transfer is under way (sends only, one event per percent).
-    TransferProgress {
-        peer: String,
-        path: String,
-        sent: u64,
-        total: u64,
-    },
-    /// A file transfer failed.
+    /// Sends only, one event per percent.
+    TransferProgress { peer: String, path: String, sent: u64, total: u64 },
     TransferFailed { peer: String, error: String },
-    /// A file transfer was cancelled by this side (cancelTransfer): the
-    /// receiver keeps its resumable partial.
+    /// Cancelled by this side; the receiver keeps its partial.
     TransferCancelled { peer: String, path: String },
-    /// A forward ended: cancelled (error None) or failed (error set).
-    /// The id lets the UI drop it from its forward list.
+    /// A forward ended (cancelled: error None).
     ForwardStopped { id: u64, error: Option<String> },
-    /// A one-shot chat message arrived over the node dispatcher.
     ChatMessage { peer: String, text: String },
-    /// A peer shared their clipboard: put `text` on the system clipboard.
+    /// A member shared its clipboard.
     Clipboard { peer: String, text: String },
-    /// A chat message or clipboard share was delivered: the peer echoed
-    /// the tunnel's FIN. The "delivered" tick.
+    /// The member acknowledged the chat message or clipboard text.
     ChatDelivered { peer: String },
-    /// Sending a chat message failed.
     ChatFailed { peer: String, error: String },
-    /// A background operation stopped (the listener, a forward, ...).
+    /// A background operation stopped.
     Stopped { what: String, error: Option<String> },
+    /// This device is in a mesh now (created or joined).
+    MeshJoined { name: String },
+    /// The member list changed.
+    Roster { members: Vec<MeshMember> },
+    /// A member's advert arrived (presence, name).
+    MemberSeen { peer: String, name: Option<String> },
+    /// A membership change of ours lost a race with another member's and
+    /// did not happen; it may be retried.
+    MeshChangeUndone,
+    /// This device is no longer in a mesh.
+    MeshLeft,
+    /// A device that scanned this device's QR asks to be invited; call
+    /// `invite(peer)` to add it.
+    JoinRequest { peer: String, name: Option<String> },
+}
+
+fn event(ev: noscat_client::Event) -> Event {
+    use noscat_client::Event as E;
+    match ev {
+        E::Listening { npub, addr } => Event::Listening { npub, port: addr.port() },
+        E::TunnelUp { peer } => Event::TunnelUp { peer },
+        E::TunnelClosed { peer, error } => Event::TunnelClosed { peer, error },
+        E::TransferDone { peer, path } => Event::TransferDone { peer, path: path.display().to_string() },
+        E::TransferPartial { peer, path } => Event::TransferPartial { peer, path: path.display().to_string() },
+        E::TransferProgress { peer, path, sent, total } => {
+            Event::TransferProgress { peer, path: path.display().to_string(), sent, total }
+        }
+        E::TransferFailed { peer, error, .. } => Event::TransferFailed { peer, error },
+        E::TransferCancelled { peer, path } => Event::TransferCancelled { peer, path: path.display().to_string() },
+        E::ForwardStopped { id, error } => Event::ForwardStopped { id, error },
+        E::ChatMessage { peer, text } => Event::ChatMessage { peer, text },
+        E::Clipboard { peer, text } => Event::Clipboard { peer, text },
+        E::ChatDelivered { peer } => Event::ChatDelivered { peer },
+        E::ChatFailed { peer, error } => Event::ChatFailed { peer, error },
+        E::Stopped { what, error } => Event::Stopped { what: what.to_string(), error },
+        E::MeshJoined { name } => Event::MeshJoined { name },
+        E::Roster { members } => Event::Roster { members: members.into_iter().map(member).collect() },
+        E::MemberSeen { peer, name } => Event::MemberSeen { peer, name },
+        E::MeshChangeUndone => Event::MeshChangeUndone,
+        E::MeshLeft => Event::MeshLeft,
+        E::JoinRequest { peer, name } => Event::JoinRequest { peer, name },
+    }
 }
 
 /// The event sink the app registers; called from a background thread.
@@ -103,129 +164,83 @@ pub trait EventListener: Send + Sync {
 #[uniffi::export]
 pub fn generate_identity() -> Identity {
     let id = noscat_core::Identity::generate();
-    Identity {
-        npub: id.npub(),
-        secret_hex: id.secret_hex(),
-    }
+    Identity { npub: id.npub(), secret_hex: id.secret_hex() }
 }
 
 /// Restore an identity from its secret (hex or nsec).
 #[uniffi::export]
 pub fn identity_from_secret(secret: String) -> Result<Identity, NoscatError> {
     let id = noscat_core::Identity::from_secret(&secret).map_err(NoscatError::fail)?;
-    Ok(Identity {
-        npub: id.npub(),
-        secret_hex: id.secret_hex(),
-    })
+    Ok(Identity { npub: id.npub(), secret_hex: id.secret_hex() })
 }
 
-/// A forward the device is running: one local TCP listener whose
-/// connections each dial a tunnel to the target.
+/// A running forward.
 #[derive(uniffi::Record)]
 pub struct ForwardInfo {
     /// The id from `forward()`; the key for `cancelForward`.
     pub id: u64,
-    /// The npub every connection dials.
+    /// The member every connection goes to.
     pub target: String,
-    /// The local TCP address the listener is on (e.g. "127.0.0.1:8080").
+    /// The local TCP listen address (e.g. "127.0.0.1:8080").
     pub local: String,
 }
 
-/// A member device of a mesh group: how the UI's device list shows it.
-#[derive(uniffi::Record)]
-pub struct MeshMember {
-    /// The device's npub (bech32), the dial target for tunnels.
-    pub npub: String,
-    /// True for the device that owns (created) the mesh.
-    pub is_owner: bool,
-    /// The device's friendly name from its advert, when it is serving and
-    /// published one. None = show a generic label.
-    pub name: Option<String>,
-    /// Seconds since the device's advert was last seen (published or
-    /// received), when one is known. Online = within the advert TTL;
-    /// None = no advert on the relays, treat as offline.
-    pub last_seen_secs: Option<u64>,
+// ---- device directory functions ---------------------------------------------
+
+fn identity_file(dir: &Path) -> PathBuf {
+    dir.join("identity.nsec")
 }
 
-/// One shared runtime for the standalone mesh helpers: each would
-/// otherwise open a full multi-thread runtime per call (thread-pool
-/// spin-up per roster view on a phone).
-fn mesh_runtime() -> Result<&'static tokio::runtime::Runtime, NoscatError> {
-    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    let rt = RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime cannot fail to build")
-    });
-    Ok(rt)
+/// Run `f` on the device of `dir`: the running client, or one started for
+/// this call (identity `<dir>/identity.nsec`, created if missing).
+fn with_device<T>(
+    dir: &str,
+    relays: Option<Vec<String>>,
+    f: impl FnOnce(&noscat_client::Client) -> Result<T, NoscatError>,
+) -> Result<T, NoscatError> {
+    let dir = PathBuf::from(dir);
+    if let Some(c) = noscat_client::Client::running(&dir) {
+        return f(&c);
+    }
+    let c = noscat_client::Client::start(noscat_client::ClientConfig {
+        identity: noscat_client::IdentitySource::File(identity_file(&dir)),
+        relays,
+        mesh_dir: Some(dir),
+        ..noscat_client::ClientConfig::default()
+    })
+    .map_err(NoscatError::fail)?;
+    f(&c)
 }
 
-/// List the member devices of a mesh device directory, with each
-/// member's friendly name resolved from its current advert (concurrently;
-/// members that are offline simply come back unnamed). The directory is
-/// an enrolled mesh device (identity.nsec + MLS state), imported onto the
-/// device; membership is what authorizes mesh-scoped tunnels.
+fn members_of(c: &noscat_client::Client) -> Vec<MeshMember> {
+    c.members().into_iter().map(member).collect()
+}
+
+/// The members of the device directory's mesh, with names and presence.
+/// Presence is only known while the app's client runs for `dir`.
 #[uniffi::export]
 pub fn mesh_members(dir: String, relays: Option<Vec<String>>) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = mesh_runtime()?;
-    let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
-        .map_err(NoscatError::fail)?;
-    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    rt.block_on(async move {
-        let mut members = members_of(device)?;
-        let now = nostr::prelude::Timestamp::now().as_secs();
-        // Parse keys once, keeping their member index; fetch all concurrently.
-        let keyed: Vec<(usize, nostr::prelude::PublicKey)> = members
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| nostr::prelude::PublicKey::parse(&m.npub).ok().map(|k| (i, k)))
-            .collect();
-        let adverts =
-            noscat_core::relay::fetch_adverts_concurrent(&relays, keyed.iter().map(|(_, k)| *k).collect()).await;
-        for ((i, _), advert) in keyed.into_iter().zip(adverts) {
-            if let Some(a) = advert {
-                let member = &mut members[i];
-                member.name = a.name;
-                member.last_seen_secs = Some(now.saturating_sub(a.created_at));
-            }
-        }
-        Ok(members)
-    })
+    with_device(&dir, relays, |c| Ok(members_of(c)))
 }
 
-/// Prepare to join a mesh over the relays: open (creating if needed) this
-/// device's mesh device directory and publish its MLS key package. With
-/// `owner_npub`, the request is addressed to that owner alone (the one whose
-/// QR the user scanned); the returned npub is this device's address.
+/// This device directory's npub (creating its identity if needed): the
+/// address the inviting device adds. `owner_npub` is unused and kept for
+/// call compatibility; `mesh_join` names the inviter.
 #[uniffi::export]
-pub fn mesh_prepare(
-    dir: String,
-    owner_npub: Option<String>,
-    relays: Option<Vec<String>>,
-) -> Result<String, NoscatError> {
-    let rt = mesh_runtime()?;
-    let device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
-        .map_err(NoscatError::fail)?;
-    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    let target = match owner_npub {
-        Some(npub) => Some(
-            nostr::prelude::PublicKey::parse(&npub)
-                .map_err(NoscatError::fail)?,
-        ),
-        None => None,
-    };
-    rt.block_on(device.publish_key_package(&relays, target))
-        .map_err(NoscatError::fail)?;
-    Ok(device.identity.npub())
+pub fn mesh_prepare(dir: String, owner_npub: Option<String>, relays: Option<Vec<String>>) -> Result<String, NoscatError> {
+    let _ = (owner_npub, relays);
+    std::fs::create_dir_all(&dir).map_err(NoscatError::fail)?;
+    if let Some(c) = noscat_client::Client::running(Path::new(&dir)) {
+        return Ok(c.npub().to_string());
+    }
+    noscat_client::identity_npub(&noscat_client::IdentitySource::File(identity_file(Path::new(&dir))))
+        .map_err(NoscatError::fail)
 }
 
-/// Join the mesh: wait up to `timeout_secs` for the owner's gift-wrapped
-/// invitation on the relays and process it. `owner_npub` is the mesh
-/// owner's npub (from the QR the phone scanned): invitations from anyone
-/// else, or a mesh owned by anyone else, are refused. Returns the member
-/// list on success; a timeout error means the owner has not invited this
-/// npub yet.
+/// Wait up to `timeout_secs` for an invitation from `owner_npub` (a bare
+/// npub or the `noscat:` URI a QR scan gives) and join. The inviting
+/// device is asked to invite this one (`JoinRequest` there). Invitations
+/// from anyone else are ignored. Returns the members.
 #[uniffi::export]
 pub fn mesh_join(
     dir: String,
@@ -233,115 +248,67 @@ pub fn mesh_join(
     owner_npub: String,
     relays: Option<Vec<String>>,
 ) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = mesh_runtime()?;
-    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
-        .map_err(NoscatError::fail)?;
-    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    // Accept a bare npub or the full noscat: URI a QR scan hands over.
-    let expected = noscat_core::parse_pairing_target(&owner_npub).map_err(NoscatError::fail)?;
-    rt.block_on(async move {
-        // The wait bound lives in the device itself: the watcher ends
-        // cleanly at the deadline instead of the whole future being
-        // dropped mid-relay-session (the old websocket leak).
-        device
-            .join_mesh(&relays, expected, std::time::Duration::from_secs(timeout_secs))
-            .await
-            .map_err(|e| {
-                if matches!(e, noscat_core::mesh::MeshError::JoinTimeout) {
-                    NoscatError::Failed("no invitation arrived in time".into())
-                } else {
-                    NoscatError::fail(e)
-                }
-            })?;
-        members_of(device)
+    with_device(&dir, relays, |c| {
+        c.join(&owner_npub, Duration::from_secs(timeout_secs)).map_err(|e| match e {
+            noscat_client::ClientError::Mesh(m) if m.contains("timed out") => {
+                NoscatError::Failed("no invitation arrived in time".into())
+            }
+            e => NoscatError::fail(e),
+        })?;
+        Ok(members_of(c))
     })
 }
 
-/// Keep the membership current: merge the owner's epoch commits (invites,
-/// removals) that arrive while we listen, then return the member list.
+/// The members after catching up. A running client is always caught up;
+/// otherwise the device runs for `wait_secs` first.
 #[uniffi::export]
-pub fn mesh_sync(
-    dir: String,
-    wait_secs: u64,
-    relays: Option<Vec<String>>,
-) -> Result<Vec<MeshMember>, NoscatError> {
-    let rt = mesh_runtime()?;
-    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
-        .map_err(NoscatError::fail)?;
-    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    rt.block_on(async move {
-        device
-            .sync_mesh(&relays, std::time::Duration::from_secs(wait_secs))
-            .await
-            .map_err(NoscatError::fail)?;
-        members_of(device)
-    })
-}
-
-/// Re-publish the mesh owner's recorded commit chain (see `mesh_sync`)
-/// so a member stranded at a stale epoch can catch up. `to_npub` limits
-/// the resend to one member; `None` resends to every member. Run this on
-/// the OWNER's device: only the owner commits, so only the owner has the
-/// journal. Up-to-date members skip the replays by epoch.
-/// Returns how many gift wraps were sent.
-#[uniffi::export]
-pub fn mesh_resend(
-    dir: String,
-    to_npub: Option<String>,
-    relays: Option<Vec<String>>,
-) -> Result<u32, NoscatError> {
-    let rt = mesh_runtime()?;
-    let mut device = noscat_core::mesh::Device::open(std::path::Path::new(&dir))
-        .map_err(NoscatError::fail)?;
-    let relays = relays.unwrap_or_else(noscat_core::relay::default_relays);
-    let target = match &to_npub {
-        Some(npub) => Some(
-            nostr::prelude::PublicKey::parse(npub).map_err(NoscatError::fail)?,
-        ),
-        None => None,
-    };
-    let sent = rt
-        .block_on(device.resend_commits(target, &relays))
-        .map_err(NoscatError::fail)?;
-    Ok(sent as u32)
-}
-
-fn members_of(device: noscat_core::mesh::Device) -> Result<Vec<MeshMember>, NoscatError> {
-    use nostr::nips::nip19::ToBech32;
-    let mut out = Vec::new();
-    for m in device.list_members().map_err(NoscatError::fail)? {
-        let npub = nostr::prelude::PublicKey::from_hex(&m.npub)
-            .map_err(NoscatError::fail)?
-            .to_bech32()
-            .map_err(NoscatError::fail)?;
-        out.push(MeshMember {
-            npub,
-            is_owner: m.is_owner,
-            name: None,
-            last_seen_secs: None,
-        });
+pub fn mesh_sync(dir: String, wait_secs: u64, relays: Option<Vec<String>>) -> Result<Vec<MeshMember>, NoscatError> {
+    if let Some(c) = noscat_client::Client::running(Path::new(&dir)) {
+        return Ok(members_of(&c));
     }
-    Ok(out)
+    with_device(&dir, relays, |c| {
+        std::thread::sleep(Duration::from_secs(wait_secs));
+        Ok(members_of(c))
+    })
 }
 
-/// A running noscat client. Dropping the last reference stops the runtime
-/// and every background operation it owns.
+/// Start a new mesh with this device as its only member.
+#[uniffi::export]
+pub fn mesh_create(dir: String, name: String, relays: Option<Vec<String>>) -> Result<(), NoscatError> {
+    with_device(&dir, relays, |c| c.create_mesh(&name).map_err(NoscatError::fail))
+}
+
+/// Add a device (npub or `noscat:` URI); it must be running or joining.
+#[uniffi::export]
+pub fn mesh_invite(dir: String, npub: String, relays: Option<Vec<String>>) -> Result<(), NoscatError> {
+    with_device(&dir, relays, |c| c.invite(&npub).map_err(NoscatError::fail))
+}
+
+/// Remove a member.
+#[uniffi::export]
+pub fn mesh_remove(dir: String, npub: String, relays: Option<Vec<String>>) -> Result<(), NoscatError> {
+    with_device(&dir, relays, |c| c.remove(&npub).map_err(NoscatError::fail))
+}
+
+/// Leave the mesh, waiting up to `timeout_secs` for a member to complete it.
+#[uniffi::export]
+pub fn mesh_leave(dir: String, timeout_secs: u64, relays: Option<Vec<String>>) -> Result<(), NoscatError> {
+    with_device(&dir, relays, |c| c.leave(Duration::from_secs(timeout_secs)).map_err(NoscatError::fail))
+}
+
+// ---- the running client -------------------------------------------------------
+
+/// A running device. Dropping the last reference stops it.
 #[derive(uniffi::Object)]
 pub struct NoscatClient {
-    inner: Arc<ClientInner>,
-}
-
-struct ClientInner {
-    // noscat_client::Client is Send but not Sync (it carries a std mpsc
-    // receiver), and uniffi objects must be Sync: pin it behind a mutex.
-    // Every method on it is blocking anyway, so the lock never awaits.
-    client: std::sync::Mutex<noscat_client::Client>,
+    client: noscat_client::Client,
 }
 
 #[uniffi::export]
 impl NoscatClient {
-    /// Start the client: resolve the identity and config, spin the runtime.
-    /// `listener` receives every subsequent event from a background thread.
+    /// Start the device. Blocks for a few seconds (relays); never call it
+    /// on the main thread. `listener` gets every event from a background
+    /// thread.
     #[uniffi::constructor]
     pub fn new(config: ClientConfig, listener: Box<dyn EventListener>) -> Result<Self, NoscatError> {
         let mut client = noscat_client::Client::start(noscat_client::ClientConfig {
@@ -350,197 +317,117 @@ impl NoscatClient {
                 None => noscat_client::IdentitySource::Ephemeral,
             },
             relays: config.relays.clone(),
-            listen: Some(
-                std::net::SocketAddr::from((
-                    [0, 0, 0, 0],
-                    config
-                        .listen_port
-                        .unwrap_or(noscat_core::relay::DEFAULT_LISTEN_PORT),
-                )),
-            ),
-            mesh_dir: config.mesh_dir.as_ref().map(std::path::PathBuf::from),
+            listen: config.listen_port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p))),
+            mesh_dir: config.mesh_dir.as_ref().map(PathBuf::from),
             device_name: config.device_name,
-            advert_ttl_secs: noscat_core::advert::ADVERT_TTL_SECS,
-            max_incoming_bytes: None,
+            ..noscat_client::ClientConfig::default()
         })
         .map_err(NoscatError::fail)?;
-
-        // Pump client events into the app's callback. The channel dies with
-        // the client; the thread ends with it.
-        let rx = client
-            .events()
-            .ok_or_else(|| NoscatError::Failed("event receiver already taken".into()))?;
-        let pump = std::thread::spawn(move || {
+        let rx = client.events().ok_or_else(|| NoscatError::Failed("event receiver already taken".into()))?;
+        std::thread::spawn(move || {
             for ev in rx {
-                let event = match ev {
-                    noscat_client::Event::Listening { npub, addr } => Event::Listening {
-                        npub,
-                        port: addr.port(),
-                    },
-                    noscat_client::Event::TunnelUp { peer, .. } => Event::TunnelUp { peer },
-                    noscat_client::Event::TunnelClosed { peer, error } => {
-                        Event::TunnelClosed { peer, error }
-                    }
-                    noscat_client::Event::TransferDone { peer, path } => {
-                        Event::TransferDone { peer, path: path.display().to_string() }
-                    }
-                    noscat_client::Event::TransferPartial { peer, path } => {
-                        Event::TransferPartial { peer, path: path.display().to_string() }
-                    }
-                    noscat_client::Event::TransferProgress { peer, path, sent, total } => {
-                        Event::TransferProgress {
-                            peer,
-                            path: path.display().to_string(),
-                            sent,
-                            total,
-                        }
-                    }
-                    noscat_client::Event::TransferFailed { peer, error, .. } => {
-                        Event::TransferFailed { peer, error }
-                    }
-                    noscat_client::Event::TransferCancelled { peer, path } => {
-                        Event::TransferCancelled { peer, path: path.display().to_string() }
-                    }
-                    noscat_client::Event::ForwardStopped { id, error } => {
-                        Event::ForwardStopped { id, error }
-                    }
-                    noscat_client::Event::ChatMessage { peer, text } => {
-                        Event::ChatMessage { peer, text }
-                    }
-                    noscat_client::Event::Clipboard { peer, text } => {
-                        Event::Clipboard { peer, text }
-                    }
-                    noscat_client::Event::ChatFailed { peer, error } => {
-                        Event::ChatFailed { peer, error }
-                    }
-                    noscat_client::Event::ChatDelivered { peer } => {
-                        Event::ChatDelivered { peer }
-                    }
-                    noscat_client::Event::Stopped { what, error } => {
-                        Event::Stopped { what: what.to_string(), error }
-                    }
-                    // Phase 1 does not surface raw streams: listeners are
-                    // consumed internally by expose/listen/up operations.
-                    noscat_client::Event::Incoming { .. } => continue,
-                };
-                // A throwing app callback must not kill event delivery
-                // permanently (the client keeps running; the UI would go
-                // deaf): unwind at the loop, keep pumping.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    listener.on_event(event);
-                }));
+                let ev = event(ev);
+                // A throwing callback must not end event delivery.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(ev)));
             }
         });
-        std::mem::forget(pump); // detach: runs until the channel closes
-
-        Ok(Self {
-            inner: Arc::new(ClientInner {
-                client: std::sync::Mutex::new(client),
-            }),
-        })
+        Ok(Self { client })
     }
 
-    /// This device's npub (the mesh address to share with peers).
+    /// This device's npub.
     pub fn npub(&self) -> String {
-        self.lock().npub().to_string()
+        self.client.npub().to_string()
     }
 
-    /// Forward a local port over a tunnel to a peer running `expose`:
-    /// localhost:port on this device becomes the peer's service. Returns
-    /// immediately; progress arrives as events.
+    /// The mesh name, if in a mesh.
+    pub fn mesh_name(&self) -> Option<String> {
+        self.client.mesh_name()
+    }
+
+    /// The members with names and presence.
+    pub fn members(&self) -> Vec<MeshMember> {
+        members_of(&self.client)
+    }
+
+    /// Add a device (npub or `noscat:` URI), e.g. after a `JoinRequest`.
+    pub fn invite(&self, npub: String) -> Result<(), NoscatError> {
+        self.client.invite(&npub).map_err(NoscatError::fail)
+    }
+
+    /// Remove a member.
+    pub fn remove(&self, npub: String) -> Result<(), NoscatError> {
+        self.client.remove(&npub).map_err(NoscatError::fail)
+    }
+
+    /// Re-check network paths after a network change (Wi-Fi to mobile).
+    pub fn network_changed(&self) {
+        self.client.network_changed();
+    }
+
+    /// Listen on 127.0.0.1:local_port; each connection goes to the
+    /// member's default service. Returns the forward id.
     pub fn forward(&self, target_npub: String, local_port: u16) -> Result<u64, NoscatError> {
-        Ok(self.lock().forward(
-            &target_npub,
-            std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
-        ))
+        Ok(self.client.forward(&target_npub, std::net::SocketAddr::from(([127, 0, 0, 1], local_port))))
     }
 
-    /// The forwards currently running (id, dial target, local listen
-    /// address): the UI's per-device forwards list.
+    /// The running forwards.
     pub fn list_forwards(&self) -> Vec<ForwardInfo> {
-        self.lock()
+        self.client
             .list_forwards()
             .into_iter()
-            .map(|f| ForwardInfo {
-                id: f.id,
-                target: f.target,
-                local: f.local.to_string(),
-            })
+            .map(|f| ForwardInfo { id: f.id, target: f.target, local: f.local.to_string() })
             .collect()
     }
 
-    /// Stop a forward by id (listener closes; live connections finish
-    /// naturally). Returns false when no such forward is running. A
-    /// confirming Event::ForwardStopped (error None) follows.
+    /// Stop a forward; `ForwardStopped` confirms it. False if no such forward.
     pub fn cancel_forward(&self, id: u64) -> bool {
-        self.lock().cancel_forward(id)
+        self.client.cancel_forward(id)
     }
 
-    /// Expose a peer-reachable TCP service of this device (host:port) over
-    /// tunnels. Returns immediately; progress arrives as events.
+    /// Make the TCP service host:port this device's default service for
+    /// members. Returns the data plane's UDP port.
     pub fn expose(&self, to_host: String, to_port: u16) -> Result<u16, NoscatError> {
-        let to: std::net::SocketAddr = format!("{to_host}:{to_port}")
-            .parse()
-            .map_err(NoscatError::fail)?;
-        self.lock()
-            .expose(to)
-            .map(|addr| addr.port())
-            .map_err(NoscatError::fail)
+        let to: std::net::SocketAddr = format!("{to_host}:{to_port}").parse().map_err(NoscatError::fail)?;
+        self.client.expose(to).map(|a| a.port()).map_err(NoscatError::fail)
     }
 
-    /// Send a file to a peer. Returns immediately; the outcome arrives as
-    /// TransferDone / TransferFailed. Resume-aware, sha256-verified at the peer.
+    /// Let members forward to 127.0.0.1:port here by number.
+    pub fn serve_port(&self, port: u16, enabled: bool) {
+        self.client.serve_port(port, enabled);
+    }
+
+    /// Send a file; the outcome arrives as events. Resumes a partial the
+    /// member kept.
     pub fn send_file(&self, path: String, target_npub: String) {
-        self.lock().send_file(std::path::PathBuf::from(path), &target_npub);
+        self.client.send_file(PathBuf::from(path), &target_npub);
     }
 
-    /// Cancel an in-flight send (same path and peer the send was started
-    /// with). The transfer stops between chunks, TransferCancelled fires,
-    /// and the receiver keeps its resumable partial. Returns false when no
-    /// such send is in flight (it may have already finished).
+    /// Cancel a send (same path and member it started with).
     pub fn cancel_transfer(&self, path: String, target_npub: String) -> bool {
-        self.lock()
-            .cancel_transfer(&target_npub, std::path::Path::new(&path))
+        self.client.cancel_transfer(&target_npub, Path::new(&path))
     }
 
-    /// Receive one file into out_dir. Returns immediately; the outcome
-    /// arrives as TransferDone (with the verified final path) / TransferFailed.
+    /// Accept files from members into out_dir.
     pub fn receive_file(&self, out_dir: String) {
-        self.lock().receive_file(std::path::PathBuf::from(out_dir));
+        self.client.receive_file(PathBuf::from(out_dir));
     }
 
-    /// Send a one-shot chat message to a peer. Returns immediately; a
-    /// failure arrives as ChatFailed (delivery is FIN-confirmed otherwise).
+    /// Send a chat message; delivery arrives as ChatDelivered or ChatFailed.
     pub fn send_chat(&self, target_npub: String, text: String) {
-        self.lock().send_chat(&target_npub, &text);
+        self.client.send_chat(&target_npub, &text);
     }
 
-    /// Share this device's clipboard text with a peer: it becomes the
-    /// clipboard on the receiving device. Returns immediately; a failure
-    /// arrives as ChatFailed, delivery is FIN-confirmed otherwise.
+    /// Share text for the member's clipboard; same delivery events as chat.
     pub fn send_clipboard(&self, target_npub: String, text: String) {
-        self.lock().send_clipboard(&target_npub, &text);
+        self.client.send_clipboard(&target_npub, &text);
     }
 
-    /// Node mode (requires a mesh-scoped client: membership is the
-    /// authorization). Advertises and accepts any number of inbound peers
-    /// until the client is dropped: files are saved into out_dir, and raw
-    /// inbound tunnels are bridged to 127.0.0.1:bridge_port when given.
-    /// Returns the advertised UDP port.
+    /// Receive files into out_dir and bridge members' default-service
+    /// streams to 127.0.0.1:bridge_port when given. Returns the data
+    /// plane's UDP port.
     pub fn up(&self, out_dir: String, bridge_port: Option<u16>) -> Result<u16, NoscatError> {
-        let bridge_to = bridge_port
-            .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)));
-        self.lock()
-            .up(std::path::PathBuf::from(out_dir), bridge_to)
-            .map(|addr| addr.port())
-            .map_err(NoscatError::fail)
-    }
-}
-
-// Not exported: a plain private helper (MutexGuard cannot cross the FFI).
-impl NoscatClient {
-    fn lock(&self) -> std::sync::MutexGuard<'_, noscat_client::Client> {
-        self.inner.client.lock().unwrap_or_else(|p| p.into_inner())
+        let bridge_to = bridge_port.map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)));
+        self.client.up(PathBuf::from(out_dir), bridge_to).map(|a| a.port()).map_err(NoscatError::fail)
     }
 }
 
@@ -559,5 +446,15 @@ mod tests {
     #[test]
     fn bad_secret_is_an_error() {
         assert!(identity_from_secret("not-a-key".into()).is_err());
+    }
+
+    #[test]
+    fn prepare_creates_a_stable_identity() {
+        let dir = std::env::temp_dir().join(format!("noscat-ffi-{}", std::process::id()));
+        let a = mesh_prepare(dir.display().to_string(), None, None).unwrap();
+        let b = mesh_prepare(dir.display().to_string(), None, None).unwrap();
+        assert_eq!(a, b);
+        assert!(a.starts_with("npub1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
