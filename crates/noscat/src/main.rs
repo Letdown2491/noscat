@@ -382,7 +382,7 @@ fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce
         eprintln!("# not in a mesh yet: `noscat mesh create <name>` or `noscat mesh join <npub>` (in another terminal)");
     }
     print_qr(ctx.client.npub());
-    ui::spawn_chat_repl(ctx.client.clone());
+    ui::spawn_chat_repl(ctx.client.clone(), name_file(dir));
     loop {
         std::thread::park();
     }

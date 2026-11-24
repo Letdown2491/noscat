@@ -148,9 +148,9 @@ fn list(members: &[Member]) {
 
 /// Chat from the `up` terminal: `to` lists members, `to <name|prefix>`
 /// picks one, other lines go to them; `clip` shares the clipboard;
-/// `name <new name>` renames this device for this run (`noscat name`
-/// saves it).
-pub fn spawn_chat_repl(client: Client) {
+/// `name <new name>` renames this device and saves it to `name_file`,
+/// like `noscat name`.
+pub fn spawn_chat_repl(client: Client, name_file: std::path::PathBuf) {
     std::thread::spawn(move || {
         let mut target: Option<String> = None;
         eprintln!("# 💬 chat: 'to' lists members, 'to <name>' picks one, then type; 'clip' shares your clipboard; 'invite <npub>' adds a device; 'name <new>' renames this device");
@@ -165,8 +165,12 @@ pub fn spawn_chat_repl(client: Client) {
                 continue;
             }
             if let Some(name) = line.strip_prefix("name ") {
-                client.set_device_name(name.trim());
-                eprintln!("# ✅ members now see this device as {:?}", name.trim());
+                let name = name.trim();
+                if let Err(e) = std::fs::write(&name_file, format!("{name}\n")) {
+                    eprintln!("# ⚠️  could not save the name ({e}); it lasts for this run");
+                }
+                client.set_device_name(name);
+                eprintln!("# ✅ members now see this device as {name:?}");
                 continue;
             }
             if let Some(who) = line.strip_prefix("invite ") {
