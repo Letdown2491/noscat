@@ -93,12 +93,18 @@ Implementation notes from the rig:
 - [ ] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB).
 - [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android.
 
+## Decisions (2026-11-24)
+
+- **Every mesh needs one reachable member** in 0.5.0 (home server, VPS, port forward, or public IPv6). Setup flows say so when no member is reachable. The upstream signaling hook (draft 05) may lift this for cone NATs later.
+- **MeshGroup builds on OpenMLS 0.10.0-rc.1**; switch to 0.10 stable when released.
+- **Fresh start from 0.4**: no 0.4 state is read, including identities. 0.5 keeps its state in a new location so 0.4 files are left alone.
+- **Git**: work on `v0.5.0` branches in all three repos, pushed to GitHub for backup; no merges to main and no crates.io publishing until release. The apps use noscat by path during development.
+
 ## Open questions
 
-- First contact between NATed devices in External mode (Phase 1).
-- `nostr` version skew: the FIPS crates use 0.44, we use 0.45. Two copies get compiled, and events passed to FIPS must be its version's type.
+- `nostr` version skew: the FIPS crates use 0.44, we use 0.45. Two copies get compiled; adverts cross the Dataplane seam as JSON.
 - Key storage at rest: Android Keystore and the desktop keyring are cheap upgrades over today's 0600 hex file. In 0.5 or later?
-- Whether to offer an opt-in public mode (relay adverts, dial any npub) in 0.5 or later.
+- Whether to offer an opt-in public mode (relay adverts, dial any npub): not in 0.5.0.
 
 ## Spike evidence (2026-11-23)
 
