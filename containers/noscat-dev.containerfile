@@ -6,7 +6,10 @@
 #
 # Fedora 43 base keeps the built binaries' glibc in step with the host
 # (f43 carries 2.42-era glibc). gcc is needed for the C glue in ring and
-# rust-secp256k1 (nostr's crypto stack). Nothing else is native yet.
+# rust-secp256k1 (nostr's crypto stack). dbus-devel and clang-devel are for
+# nvpn-fips-core on glibc, which always pulls in bluer (libdbus) and
+# rustables (bindgen/libclang); drop them once the optional-features patch
+# (docs/upstream/02-optional-native-deps.md) is released upstream.
 
 FROM fedora:43
 
@@ -18,5 +21,5 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:/usr/bin:/bin
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 
-RUN dnf -y install gcc pkgconf-pkg-config git \
+RUN dnf -y install gcc pkgconf-pkg-config git dbus-devel clang-devel \
   && dnf clean all

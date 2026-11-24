@@ -66,11 +66,12 @@ Implementation notes from the rig:
 
 ## Phase 2: noscat-core rewrite
 
-- [ ] **Dataplane**: FIPS endpoint lifecycle from the device identity; `configured_only` admission; advert export and ingest; network-change handling (`rebind_network_transports`, `refresh_peer_paths`); no other module imports `fips_*`.
-- [ ] **Streams**: quinn over a custom socket on one FIPS service port (prototype in ADR 0003 works: sync `try_send` via `send_datagram(..).now_or_never()`, receive pump into a channel); BBR; warm-up datagram before connect; npub-bound certificates; quinn at 1200 with PMTUD off; FIPS UDP MTU set to 1320 (relayed paths carry at most MTU minus 110 bytes, and FIPS's default 1280 breaks relayed QUIC; see ADR 0003).
+- [x] **Dataplane** (`crates/noscat-core/src/dataplane.rs`): FIPS endpoint lifecycle from the device identity; `configured_only` admission; advert export and ingest; network-change handling (`rebind_network_transports`, `refresh_peer_paths`); no other module imports `fips_*`. Also: LAN discovery on by default (FIPS drops private addresses from adverts), optional static addresses per member, adverts accepted only from members, a reachable device must use a fixed port.
+- [x] **Streams** (`crates/noscat-core/src/streams.rs`): quinn over a custom socket on one FIPS service port (prototype in ADR 0003 works: sync `try_send` via `send_datagram(..).now_or_never()`, receive pump into a channel); BBR; a probe port so `connect` waits for a real round trip instead of a warm-up guess; identity from FIPS with a certificate name check against mis-routing (ADR 0003); `retain_members` closes removed members' connections, including handshakes in flight, before the data plane drops them; quinn at 1200 with PMTUD off; FIPS UDP MTU set to 1320 (relayed paths carry at most MTU minus 110 bytes, and FIPS's default 1280 breaks relayed QUIC; see ADR 0003).
 - [ ] **MeshGroup**: Marmot subset on OpenMLS 0.10 (develop on 0.10.0-rc.1, switch to stable on release). Key packages (30443), Welcomes (444 in 1059 to 10050 inbox relays), group events (445 under the exporter key), routing component, admin policy with every device an admin, and a noscat app component for adverts and device names. Reliable commit delivery (relay ACK checks, resend) carries over from 0.4.
 - [ ] **MDK interop suite** in CI via a git dev-dependency: MDK creates and we join, we commit and MDK merges, and the reverse. Confirm `cargo publish --dry-run` passes with it.
 - [ ] **App protocols over QUIC**: port forward, file transfer (resumable, sha256-verified), chat and clipboard with a delivery acknowledgement, presence from adverts.
+- [ ] Switch `tests/netrig` from its experiment node to a node built on Dataplane and Streams.
 - [ ] **Delete**: `tunnel.rs`, `noise.rs`, `stun.rs`, `traversal.rs`, `advert.rs`, and the 0.4 parts of `mesh.rs`.
 - [ ] `cargo audit` clean (or each remaining finding explained); `openmls_rust_crypto`'s `test-utils` feature off in production.
 
@@ -88,7 +89,7 @@ Implementation notes from the rig:
 
 ## Phase 5: release
 
-- [ ] All five platforms green in CI, plus the netns NAT and loss suite.
+- [ ] All five platforms green in CI, plus the netns NAT and loss suite. **FreeBSD blocks on upstream draft 01** (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands.
 - [ ] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB).
 - [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android.
 

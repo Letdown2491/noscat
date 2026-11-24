@@ -11,10 +11,12 @@
 //! - `mesh` - MLS group control plane per mesh (Marmot component model).
 
 pub mod advert;
+pub mod dataplane;
 pub mod fsutil;
 pub mod identity;
 pub mod noise;
 pub mod relay;
+pub mod streams;
 pub mod stun;
 pub mod mesh;
 pub mod traversal;
