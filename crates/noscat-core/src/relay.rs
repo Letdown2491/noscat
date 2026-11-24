@@ -10,13 +10,16 @@ use std::time::Duration;
 
 
 /// Relays used when the operator does not configure any. Overridable with
-/// `--relay`. Currently ONE relay: two of the three defaults have proven
-/// unreachable from real phone networks (a black-holed path fails every
-/// relay op - see issue #16 - and with one healthy relay left the fan-out
-/// buys nothing). A relay that rate-limits us is backed off (see
-/// [`note_relay_failure`]) rather than hammered. Re-broaden this list only
-/// with relays verified reachable from mobile paths.
-pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.primal.net"];
+/// `--relay`. Three independent operators, so one relay being slow or down
+/// never stops a device. Each was checked (2026-11-24) to accept and serve
+/// every kind noscat uses (10050, 10002, 30443, 445, 1059) to a brand-new
+/// key without auth or a web-of-trust gate, to complete a real join on its
+/// own, and to be reachable from a phone on a mobile network (issue #16).
+/// Dropped then: relay.primal.net (acknowledgements 25 to 35 seconds late),
+/// relay.damus.io (no connection), offchain.pub and nostr.bitcoiner.social
+/// (web of trust), relay.nostr.net and relay.nostr.com (auth for the
+/// inbox). nos.lol also passed and is the first alternate.
+pub const DEFAULT_RELAYS: &[&str] = &["wss://relay.snort.social", "wss://relay.ditto.pub", "wss://nostr.mom"];
 
 /// How long to wait for a fetch (key packages, relay lists) to finish.
 pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(15);

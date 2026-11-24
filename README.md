@@ -218,6 +218,25 @@ Settings) and sends it with its advert, inside the group, every two
 minutes. A member is online while its latest advert is under ten minutes
 old.
 
+### Relays
+
+Relays carry only the mesh's encrypted control traffic (membership changes,
+invitations, key packages, relay lists and presence adverts); data goes
+device to device. By default noscat uses three relays from different
+operators: `wss://relay.snort.social`, `wss://relay.ditto.pub` and
+`wss://nostr.mom`, chosen because each accepts every event kind noscat uses
+from a brand-new key, completes a join on its own, and is reachable from
+mobile networks. A mesh also remembers the relays it was created with, and
+members use both sets.
+
+`--relay <url>` (repeatable) replaces the defaults, for example with your own
+relay. Each relay connects in the background and is retried for as long as
+the device runs, so one being down at start, or dropping later, costs
+nothing: a publish goes to all of them and succeeds on the first that
+accepts. noscat sends each event once per relay (again only if that relay
+was not connected), and republishes the device's relay lists only when they
+change or once a week.
+
 ## Development
 
 The project targets atomic/bootc hosts: there is no toolchain on the host, builds run

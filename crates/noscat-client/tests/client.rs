@@ -197,3 +197,93 @@ fn dropping_the_client_frees_the_directory() {
     drop(again);
     drop(relay);
 }
+
+fn free_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Two devices join a mesh over `url`; `a_relays` are alpha's relays.
+fn join_over(rt: &tokio::runtime::Runtime, a_relays: Vec<String>, url: &str) {
+    let _ = rt;
+    let (ida, idb) = (noscat_core::Identity::generate(), noscat_core::Identity::generate());
+    let cfg = |id: &noscat_core::Identity, relays: Vec<String>, name: &str| ClientConfig {
+        identity: IdentitySource::Secret(id.secret_hex()),
+        relays: Some(relays),
+        listen: Some(free_udp()),
+        mesh_dir: Some(tmp(name)),
+        lan_discovery: false,
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
+        ..ClientConfig::default()
+    };
+    let a = Client::start(cfg(&ida, a_relays, "relay-a")).unwrap();
+    let b = Client::start(cfg(&idb, vec![url.to_string()], "relay-b")).unwrap();
+    a.create_mesh("home").unwrap();
+    let joiner = {
+        let b = b.clone();
+        let inviter = a.npub().to_string();
+        std::thread::spawn(move || b.join(&inviter, T))
+    };
+    a.invite(b.npub()).unwrap();
+    joiner.join().unwrap().unwrap();
+    assert_eq!(a.members().len(), 2);
+}
+
+/// A dead relay in the list must neither slow the start down nor stop
+/// publishing: the live relay carries everything.
+#[test]
+fn a_dead_relay_does_not_block() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let dead = format!("ws://127.0.0.1:{}", free_tcp_port());
+    let t0 = std::time::Instant::now();
+    join_over(&rt, vec![dead, url.clone()], &url);
+    assert!(t0.elapsed() < Duration::from_secs(20), "took {:?}", t0.elapsed());
+    drop(relay);
+}
+
+/// A relay that is down when the device starts is connected once it comes
+/// up (nostr-sdk's connection task keeps retrying), and then carries the
+/// device's publishes and subscriptions.
+#[test]
+fn a_relay_that_comes_up_later_is_used() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let port = free_tcp_port();
+    let url = format!("ws://127.0.0.1:{port}");
+    let (ida, idb) = (noscat_core::Identity::generate(), noscat_core::Identity::generate());
+    let cfg = |id: &noscat_core::Identity, name: &str| ClientConfig {
+        identity: IdentitySource::Secret(id.secret_hex()),
+        relays: Some(vec![url.clone()]),
+        listen: Some(free_udp()),
+        mesh_dir: Some(tmp(name)),
+        lan_discovery: false,
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
+        ..ClientConfig::default()
+    };
+    let a = Client::start(cfg(&ida, "late-a")).unwrap();
+    let relay = nostr_relay_builder::LocalRelay::new(nostr_relay_builder::RelayBuilder::default().port(port));
+    rt.block_on(relay.run()).unwrap();
+    let b = Client::start(cfg(&idb, "late-b")).unwrap();
+    // alpha's connection task retries every 10 seconds at first.
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        if a.create_mesh("home").is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "alpha never reached the relay");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let joiner = {
+        let b = b.clone();
+        let inviter = a.npub().to_string();
+        std::thread::spawn(move || b.join(&inviter, T))
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    while a.invite(b.npub()).is_err() {
+        assert!(std::time::Instant::now() < deadline, "alpha could not invite over the late relay");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    joiner.join().unwrap().unwrap();
+    assert_eq!(a.members().len(), 2);
+    relay.shutdown();
+}

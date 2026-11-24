@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use nostr::prelude::{Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
-use nostr_sdk::prelude::{Client, ClientNotification, SubscriptionId};
+use nostr_sdk::prelude::{Client, ClientNotification, RelayStatus, SubscriptionId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
@@ -43,8 +43,14 @@ use crate::streams::{Streams, StreamsError};
 /// [`relay::PRESENCE_TTL_SECS`].
 pub const ADVERT_INTERVAL: Duration = Duration::from_secs(120);
 /// How long a publish waits for relay acknowledgements per attempt.
-const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a publish waits for the first relay to accept.
+const PUBLISH_WAIT: Duration = Duration::from_secs(15);
+/// Sends per relay when it is not connected (never when it is slow).
 const PUBLISH_ATTEMPTS: u32 = 3;
+/// How long relay setup waits for the first relay to connect.
+const RELAY_CONNECT_WAIT: Duration = Duration::from_secs(10);
+/// Relay lists are republished after this even when unchanged.
+const RELAY_LIST_REFRESH_SECS: u64 = 7 * 24 * 3600;
 /// Gift wraps carry a created_at randomized up to two days into the past.
 const GIFT_WRAP_LOOKBACK_SECS: u64 = 3 * 24 * 60 * 60;
 /// Overlap when resuming the group subscription after a restart.
@@ -133,6 +139,11 @@ pub enum DeviceEvent {
 struct SyncState {
     /// Newest group event created_at processed.
     since: u64,
+    /// Relay lists last published, by kind: the relays and when. They are
+    /// republished only when the relays change or the copy gets old, not on
+    /// every start (each one-shot CLI command starts the device).
+    #[serde(default)]
+    relay_lists: HashMap<u16, (Vec<String>, u64)>,
 }
 
 struct Inner {
@@ -172,6 +183,41 @@ impl std::fmt::Debug for Device {
 
 fn now() -> u64 {
     Timestamp::now().as_secs()
+}
+
+fn save_sync(dir: &std::path::Path, s: &SyncState) {
+    if let Ok(b) = serde_json::to_vec(s) {
+        let _ = crate::fsutil::write_atomic(&dir.join(SYNC_FILE), &b);
+    }
+}
+
+/// Send `event` to one relay. Re-sends only when the relay was not
+/// connected (its connection task is retrying), with a growing pause.
+async fn publish_one(client: &Client, event: &Event, relay_url: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..PUBLISH_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+        }
+        let err = match client.send_event(event).to([relay_url]).await {
+            Ok(out) if !out.success.is_empty() => {
+                relay::note_relay_success(relay_url);
+                return Ok(());
+            }
+            Ok(out) => out.failed.into_values().next().unwrap_or_default(),
+            Err(e) => e.to_string(),
+        };
+        relay::note_relay_failure(relay_url, &err);
+        let lower = err.to_lowercase();
+        let unconnected = ["not connected", "disconnected", "terminated", "not ready", "connection", "closed"]
+            .iter()
+            .any(|w| lower.contains(w));
+        if !unconnected {
+            return Err(err);
+        }
+        last = err;
+    }
+    Err(last)
 }
 
 fn union(a: &[String], b: &[String]) -> Vec<String> {
@@ -219,7 +265,10 @@ impl Device {
         dev.subscribe_inbox().await;
         dev.apply_roster().await?;
         dev.resubscribe_group(true).await;
-        dev.publish_profile().await;
+        // In the background: a slow relay must not hold up the start.
+        let d = dev.clone();
+        let h = tokio::spawn(async move { d.publish_profile().await });
+        dev.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
         dev.spawn_advert_ticker();
         Ok(dev)
     }
@@ -294,57 +343,77 @@ impl Device {
         union(&self.inner.cfg.relays, &group)
     }
 
+    /// Add the relays this device does not have yet and wait (up to
+    /// [`RELAY_CONNECT_WAIT`]) until one of `relays` is connected. Each relay
+    /// gets nostr-sdk's connection task, which keeps retrying for the life of
+    /// the device (10 seconds, backing off to a minute), so a relay that is
+    /// down at start joins later and a dropped one comes back.
     async fn ensure_relays(&self, relays: &[String]) {
-        let have: BTreeSet<String> = self.inner.client.relays().await.keys().map(ToString::to_string).collect();
+        let have: BTreeSet<String> =
+            self.inner.client.relays().await.keys().map(|u| u.as_str().trim_end_matches('/').to_string()).collect();
         for r in relays {
-            let norm = r.trim_end_matches('/');
-            if have.iter().any(|h| h.trim_end_matches('/') == norm) {
+            if have.contains(r.trim_end_matches('/')) {
                 continue;
             }
             if let Err(e) = self.inner.client.add_relay(r.as_str()).await {
                 tracing::warn!(relay = %r, "cannot add relay: {e}");
                 continue;
             }
-            if let Err(e) = self.inner.client.try_connect_relay(r.as_str(), Duration::from_secs(10)).await {
-                relay::note_relay_failure(r, &e.to_string());
+            if let Err(e) = self.inner.client.connect_relay(r.as_str()).await {
                 tracing::warn!(relay = %r, "relay connect failed: {e}");
-            } else {
-                relay::note_relay_success(r);
             }
+        }
+        let wanted: BTreeSet<&str> = relays.iter().map(|r| r.trim_end_matches('/')).collect();
+        let deadline = tokio::time::Instant::now() + RELAY_CONNECT_WAIT;
+        loop {
+            let up = self.inner.client.relays().await.iter().any(|(u, r)| {
+                wanted.contains(u.as_str().trim_end_matches('/')) && r.status() == RelayStatus::Connected
+            });
+            if up || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
-    /// Publish to `relays`, retrying; succeeds when any relay acknowledges.
+    /// Publish to `relays`; succeeds on the first relay that accepts it.
+    /// Each relay is sent to on its own task: the call returns as soon as one
+    /// accepts (or every relay has answered, or [`PUBLISH_WAIT`] passes),
+    /// and slower relays finish in the background. A relay is sent the event
+    /// again only when it was not connected; one that is merely slow to
+    /// answer is never re-sent to, and a rejection is final.
     async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), DeviceError> {
-        let relays = union(relays, &[]);
+        let relays = relay::healthy_relays(&union(relays, &[]));
         if relays.is_empty() {
             return Err(DeviceError::Publish("no relays".into()));
         }
         self.ensure_relays(&relays).await;
-        let mut last = String::new();
-        for attempt in 0..PUBLISH_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-            }
-            let send = self.inner.client.send_event(event).to(relays.iter().map(String::as_str));
-            match tokio::time::timeout(PUBLISH_TIMEOUT, send).await {
-                Ok(Ok(out)) if !out.success.is_empty() => {
-                    for r in out.success.keys() {
-                        relay::note_relay_success(r.as_str());
-                    }
-                    return Ok(());
-                }
-                Ok(Ok(out)) => {
-                    for (r, e) in &out.failed {
-                        relay::note_relay_failure(r.as_str(), e);
-                        last = format!("{r}: {e}");
-                    }
-                }
-                Ok(Err(e)) => last = e.to_string(),
-                Err(_) => last = "timed out".into(),
-            }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(relays.len());
+        for r in relays {
+            let client = self.inner.client.clone();
+            let event = event.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let res = publish_one(&client, &event, &r).await;
+                let _ = tx.send((r, res)).await;
+            });
         }
-        Err(DeviceError::Publish(last))
+        drop(tx);
+        let first = async {
+            let mut errors = Vec::new();
+            while let Some((r, res)) = rx.recv().await {
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) => errors.push(format!("{r}: {e}")),
+                }
+            }
+            Err(errors.join("; "))
+        };
+        match tokio::time::timeout(PUBLISH_WAIT, first).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(DeviceError::Publish(e)),
+            Err(_) => Err(DeviceError::Publish("no relay answered in time".into())),
+        }
     }
 
     async fn fetch(&self, filter: Filter, relays: &[String]) -> Vec<Event> {
@@ -359,18 +428,32 @@ impl Device {
         }
     }
 
-    /// Relay lists and, outside a mesh, a key package, so others can
-    /// invite this device.
+    /// Relay lists (when they changed or got old) and, outside a mesh, a
+    /// key package, so others can invite this device.
     async fn publish_profile(&self) {
         let keys = self.inner.identity.keys();
         let relays = self.inner.cfg.relays.clone();
+        let mut sorted = relays.clone();
+        sorted.sort();
         for kind in [INBOX_RELAYS_KIND, RELAY_LIST_KIND] {
+            let fresh = {
+                let s = self.inner.sync.lock().unwrap_or_else(|p| p.into_inner());
+                s.relay_lists
+                    .get(&kind)
+                    .is_some_and(|(r, at)| *r == sorted && now().saturating_sub(*at) < RELAY_LIST_REFRESH_SECS)
+            };
+            if fresh {
+                continue;
+            }
             match marmot::transport::relay_list_event(keys, kind, &relays) {
-                Ok(ev) => {
-                    if let Err(e) = self.publish(&ev, &relays).await {
-                        tracing::warn!(kind, "relay list not published: {e}");
+                Ok(ev) => match self.publish(&ev, &relays).await {
+                    Ok(()) => {
+                        let mut s = self.inner.sync.lock().unwrap_or_else(|p| p.into_inner());
+                        s.relay_lists.insert(kind, (sorted.clone(), now()));
+                        save_sync(&self.inner.cfg.dir, &s);
                     }
-                }
+                    Err(e) => tracing::warn!(kind, "relay list not published: {e}"),
+                },
                 Err(e) => tracing::warn!("relay list: {e}"),
             }
         }
@@ -441,9 +524,7 @@ impl Device {
         let capped = created_at.min(now());
         if capped > s.since {
             s.since = capped;
-            if let Ok(b) = serde_json::to_vec(&*s) {
-                let _ = crate::fsutil::write_atomic(&self.inner.cfg.dir.join(SYNC_FILE), &b);
-            }
+            save_sync(&self.inner.cfg.dir, &s);
         }
     }
 
