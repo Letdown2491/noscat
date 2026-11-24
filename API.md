@@ -93,7 +93,7 @@ Mesh:
 | `invite(target)` | `()` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. |
 | `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
-| `leave(timeout)` | `()` | Leave; waits for another member to commit it. The last member just forgets the mesh. |
+| `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
 | `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs`. |
 | `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
 | `network_changed()` | `()` | Re-check paths after a network switch. |
@@ -192,7 +192,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 | `mesh_create(dir, name, relays?)` | New mesh with this device as the only member. |
 | `mesh_invite(dir, npub, relays?)` | Add a device; it must be running or in `mesh_join`. |
 | `mesh_remove(dir, npub, relays?)` | Remove a member. |
-| `mesh_leave(dir, timeout_secs, relays?)` | Leave; waits for another member to complete it. |
+| `mesh_leave(dir, timeout_secs, relays?)` | Leave; waits for another member to complete it (see `leave` above for the timeout case). Deleting `dir` afterwards, once no client runs on it, makes the next join a new device. |
 
 0.4's `mesh_resend` is gone: there is no owner journal to replay.
 
@@ -213,7 +213,10 @@ same `mesh_dir`), and otherwise run the device just for the call.
 `NoscatClient(config, listener)`, a mirror of the Rust `Client`. The
 `listener` implements the `EventListener` callback interface
 (`onEvent(event)`). Releasing the last reference stops the device and
-frees its directory, like dropping a Rust `Client`.
+frees its directory, like dropping a Rust `Client`. In Kotlin that means
+`close()` (the class is `AutoCloseable`): an object merely dropped keeps
+the device running until the garbage collector frees it, and a new client
+on the same directory fails with `Busy` until then.
 
 `npub()`, `meshName()`, `members()`, `invite(npub)`, `remove(npub)`,
 `networkChanged()`, `forward(target, localPort)`, `listForwards()`,
