@@ -21,7 +21,14 @@ pub const ADVERT_IDENTIFIER: &str = "noscat-overlay-v1";
 /// counts as online while their freshest advert was received (or was
 /// published, for point-in-time checks) within this many seconds. Defined
 /// here, next to the advert code it belongs to, so every consumer agrees.
-pub const ADVERT_TTL_SECS: u64 = 3600;
+///
+/// There is no disconnect signal in the protocol, so going offline is
+/// visible only when the advert lapses: a device that dies right after
+/// publishing reads online for up to this long (issue #15). 600 s keeps
+/// the lag between one and two refresh intervals (refresh is ttl/2 =
+/// 5 min) instead of the user-visible half hour the 3600 s default
+/// caused, at relay volume that is trivial at mesh scale.
+pub const ADVERT_TTL_SECS: u64 = 600;
 
 /// How a node is reachable. Mirrors the FIPS `OverlayAdvert` endpoint shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
