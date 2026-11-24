@@ -372,7 +372,13 @@ fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let filter = if cli.verbose { "noscat=info,noscat_core=info,noscat_client=info,nostr_sdk=off,fips_core=warn" } else { "warn,nostr_sdk=off,nostr_relay_pool=off" };
+    // openmls logs at ERROR for routine cases noscat already handles (an
+    // old advert from the backlog a restarted device fetches), so it is off.
+    let filter = if cli.verbose {
+        "noscat=info,noscat_core=info,noscat_client=info,nostr_sdk=off,fips_core=warn,openmls=off"
+    } else {
+        "warn,nostr_sdk=off,nostr_relay_pool=off,openmls=off"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
     tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();

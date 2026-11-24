@@ -16,7 +16,11 @@ fn free_udp() -> SocketAddr {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("noscat-cli-{}-{}-{tag}", std::process::id(), rand_u32()));
+    // The tests run in parallel threads of one process: a counter keeps
+    // their directories apart (the clock alone collided).
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("noscat-cli-{}-{n}-{}-{tag}", std::process::id(), rand_u32()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
