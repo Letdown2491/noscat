@@ -147,11 +147,13 @@ fn list(members: &[Member]) {
 }
 
 /// Chat from the `up` terminal: `to` lists members, `to <name|prefix>`
-/// picks one, other lines go to them; `clip` shares the clipboard.
+/// picks one, other lines go to them; `clip` shares the clipboard;
+/// `name <new name>` renames this device for this run (`noscat name`
+/// saves it).
 pub fn spawn_chat_repl(client: Client) {
     std::thread::spawn(move || {
         let mut target: Option<String> = None;
-        eprintln!("# 💬 chat: 'to' lists members, 'to <name>' picks one, then type; 'clip' shares your clipboard; 'invite <npub>' adds a device");
+        eprintln!("# 💬 chat: 'to' lists members, 'to <name>' picks one, then type; 'clip' shares your clipboard; 'invite <npub>' adds a device; 'name <new>' renames this device");
         for line in std::io::stdin().lines().map_while(Result::ok) {
             let line = line.trim();
             if line.is_empty() {
@@ -160,6 +162,11 @@ pub fn spawn_chat_repl(client: Client) {
             let members = client.members();
             if line == "to" {
                 list(&members);
+                continue;
+            }
+            if let Some(name) = line.strip_prefix("name ") {
+                client.set_device_name(name.trim());
+                eprintln!("# ✅ members now see this device as {:?}", name.trim());
                 continue;
             }
             if let Some(who) = line.strip_prefix("invite ") {

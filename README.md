@@ -212,10 +212,12 @@ invite <npub>            # add a device that asked to join
 
 ### Names and presence
 
-Each device has a name (`--name`, default the hostname; the desktop app
-uses the hostname and the Android app the phone model, both changeable in
+Each device has a name (`noscat name <new name>` saves one, `--name`
+overrides it for a run, default the hostname; the desktop app uses the
+hostname and the Android app the phone model, both changeable in
 Settings) and sends it with its advert, inside the group, every two
-minutes. A member is online while its latest advert is under ten minutes
+minutes. A rename goes out at once, so members see it within seconds,
+with no restart. A member is online while its latest advert is under ten minutes
 old.
 
 ### Relays

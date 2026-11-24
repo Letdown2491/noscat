@@ -127,6 +127,15 @@ fn two_clients_end_to_end() {
     });
     wait(&ea, "chat delivered", |e| matches!(e, Event::ChatDelivered { .. }).then_some(()));
 
+    // Rename: the other member hears it now, not on the next advert tick.
+    a.set_device_name("renamed laptop");
+    assert_eq!(a.device_name(), "renamed laptop");
+    let a_npub = a.npub().to_string();
+    wait(&eb, "rename", |e| match e {
+        Event::MemberSeen { peer, name } if *peer == a_npub && name.as_deref() == Some("renamed laptop") => Some(()),
+        _ => None,
+    });
+
     // File.
     let src = tmp("src").join("notes.txt");
     let body: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_le_bytes()).collect();

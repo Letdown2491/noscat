@@ -156,6 +156,8 @@ struct Inner {
     events: broadcast::Sender<DeviceEvent>,
     presence: Presence,
     names: StdMutex<HashMap<PublicKey, String>>,
+    /// This device's name: the configured one until [`Device::set_name`].
+    my_name: StdMutex<String>,
     /// Accept a Welcome only from this device (set by [`Device::join`]).
     expected_inviter: StdMutex<Option<PublicKey>>,
     subscribed: StdMutex<Vec<[u8; 32]>>,
@@ -234,6 +236,7 @@ impl Device {
         let group = MeshGroup::open(&cfg.dir, &identity)?;
         let dp = Arc::new(Dataplane::start(&identity, cfg.dataplane.clone()).await?);
         let streams = Arc::new(Streams::start(dp.clone()).await?);
+        let my_name = cfg.name.clone();
         let sync: SyncState = std::fs::read(cfg.dir.join(SYNC_FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -249,6 +252,7 @@ impl Device {
             events,
             presence: Presence::new(),
             names: StdMutex::new(HashMap::new()),
+            my_name: StdMutex::new(my_name),
             expected_inviter: StdMutex::new(None),
             subscribed: StdMutex::new(Vec::new()),
             sync: StdMutex::new(sync),
@@ -315,7 +319,7 @@ impl Device {
             .map(|m| {
                 let hex = m.device.to_hex();
                 let name = if m.this_device {
-                    Some(self.inner.cfg.name.clone())
+                    Some(self.name())
                 } else {
                     names.get(&m.device).cloned()
                 };
@@ -747,6 +751,28 @@ impl Device {
         Ok(())
     }
 
+    /// This device's name, as members see it.
+    pub fn name(&self) -> String {
+        self.inner.my_name.lock().map(|n| n.clone()).unwrap_or_else(|_| self.inner.cfg.name.clone())
+    }
+
+    /// Rename this device and tell the members now (an advert carries the
+    /// name), instead of on the next advert tick or restart. Blank names
+    /// are ignored.
+    pub async fn set_name(&self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Ok(mut n) = self.inner.my_name.lock() {
+            if *n == name {
+                return;
+            }
+            *n = name.to_string();
+        }
+        self.send_advert().await;
+    }
+
     /// Send this device's advert to the group now.
     pub async fn send_advert(&self) {
         let advert = match self.inner.dp.local_advert().await {
@@ -761,7 +787,7 @@ impl Device {
             if !g.in_mesh() {
                 return;
             }
-            g.send_advert(advert.as_deref(), &self.inner.cfg.name)
+            g.send_advert(advert.as_deref(), &self.name())
         };
         match ev {
             Ok(ev) => {
@@ -898,7 +924,7 @@ impl Device {
         self.publish_key_package().await?;
         // Ask the inviter's device to prompt its user. Best effort: an
         // invite by npub works without it.
-        match marmot::transport::wrap_join_request(self.inner.identity.keys(), &inviter, &self.inner.cfg.name) {
+        match marmot::transport::wrap_join_request(self.inner.identity.keys(), &inviter, &self.name()) {
             Ok(wrap) => {
                 let relays = self.inbox_relays(&inviter).await;
                 if let Err(e) = self.publish(&wrap, &relays).await {

@@ -745,6 +745,19 @@ impl Client {
         self.inner.rt().block_on(self.inner.device.mesh_name())
     }
 
+    /// This device's name, as members see it.
+    #[must_use]
+    pub fn device_name(&self) -> String {
+        self.inner.device.name()
+    }
+
+    /// Rename this device. Members see the new name within seconds: an
+    /// advert goes out now, and this returns once it is published (or
+    /// failed). Blocking. The caller persists the name for the next start.
+    pub fn set_device_name(&self, name: &str) {
+        self.inner.rt().block_on(self.inner.device.set_name(name));
+    }
+
     /// Start a new mesh with this device as its only member.
     pub fn create_mesh(&self, name: &str) -> Result<(), ClientError> {
         self.inner.rt().block_on(self.inner.device.create(name))?;

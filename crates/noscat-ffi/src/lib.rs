@@ -355,6 +355,18 @@ impl NoscatClient {
         self.client.mesh_name()
     }
 
+    /// This device's name, as members see it.
+    pub fn device_name(&self) -> String {
+        self.client.device_name()
+    }
+
+    /// Rename this device; members see it within seconds. Blocking (it
+    /// publishes an advert). Persist the name yourself and pass it as the
+    /// config's name on the next start.
+    pub fn set_device_name(&self, name: String) {
+        self.client.set_device_name(&name);
+    }
+
     /// The members with names and presence.
     pub fn members(&self) -> Vec<MeshMember> {
         members_of(&self.client)

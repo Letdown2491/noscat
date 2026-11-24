@@ -89,6 +89,8 @@ Mesh:
 |---|---|---|
 | `npub()` | `&str` | This device's address. Cheap. |
 | `in_mesh()` / `mesh_name()` | `bool` / `Option<String>` | |
+| `device_name()` | `String` | This device's name, as members see it. |
+| `set_device_name(name)` | `()` | Rename; blocks until the advert carrying it is published, so members see it within seconds. Blank is ignored. The caller saves the name for the next start (config `device_name`). |
 | `create_mesh(name)` | `()` | New mesh with this device as the only member. |
 | `invite(target)` | `()` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. |
 | `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. |
@@ -219,7 +221,7 @@ frees its directory, like dropping a Rust `Client`. In Kotlin that means
 the device running until the garbage collector frees it, and a new client
 on the same directory fails with `Busy` until then.
 
-`npub()`, `meshName()`, `members()`, `invite(npub)`, `remove(npub)`,
+`npub()`, `meshName()`, `deviceName()`, `setDeviceName(name)` (blocking), `members()`, `invite(npub)`, `remove(npub)`,
 `networkChanged()`, `forward(target, localPort)`, `listForwards()`,
 `cancelForward(id)`, `expose(toHost, toPort)`, `servePort(port, enabled)`,
 `sendFile(path, target)` (returns the transfer id), `cancelTransfer(path, target)`,

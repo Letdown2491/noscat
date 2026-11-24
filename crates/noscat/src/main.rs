@@ -26,7 +26,7 @@ use crate::control::{Ctx, Op, Reply};
     about = "like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts"
 )]
 struct Cli {
-    /// Info-level logs, plus the FIPS warnings hidden by default (routine at startup). RUST_LOG overrides.
+    /// Info-level logs, plus the routine FIPS warnings hidden by default (startup, path upgrades, congestion). RUST_LOG overrides.
     #[arg(long, global = true)]
     verbose: bool,
     /// Device state directory (identity, mesh). Also NOSCAT_DIR.
@@ -48,7 +48,8 @@ struct DeviceArgs {
     /// UDP address of the data plane [default: any free port, 41641 with --reachable].
     #[arg(long, global = true)]
     listen: Option<SocketAddr>,
-    /// Name other members see [default: the hostname].
+    /// Name other members see, for this run [default: the name saved by
+    /// `noscat name`, else the hostname].
     #[arg(long, global = true)]
     name: Option<String>,
     /// This device is reachable from the internet (port forward, server,
@@ -71,6 +72,12 @@ struct DeviceArgs {
 enum Command {
     /// Print this device's npub and pairing QR.
     Id,
+    /// Print this device's name, or rename it: saved for every later run,
+    /// and a running device tells the members right away.
+    Name {
+        /// The new name; the words are joined with spaces.
+        name: Vec<String>,
+    },
     /// Generate a throwaway identity (devices create their own on first use).
     Keygen {
         /// Also print the secret key (hex). Handle with care.
@@ -220,6 +227,17 @@ fn identity(dir: &Path) -> IdentitySource {
     }
 }
 
+/// The name saved by `noscat name`, kept in the device directory.
+fn name_file(dir: &Path) -> PathBuf {
+    dir.join("name")
+}
+
+fn saved_name(dir: &Path) -> Option<String> {
+    let n = std::fs::read_to_string(name_file(dir)).ok()?;
+    let n = n.trim();
+    (!n.is_empty()).then(|| n.to_string())
+}
+
 fn config(dir: &Path, d: &DeviceArgs) -> Result<ClientConfig> {
     let reachable = match d.reachable.as_deref() {
         None => None,
@@ -236,7 +254,7 @@ fn config(dir: &Path, d: &DeviceArgs) -> Result<ClientConfig> {
         relays: (!d.relays.is_empty()).then(|| d.relays.clone()),
         listen: d.listen,
         mesh_dir: Some(dir.to_path_buf()),
-        device_name: d.name.clone(),
+        device_name: d.name.clone().or_else(|| saved_name(dir)),
         reachable,
         lan_discovery: !d.no_lan,
         static_peers,
@@ -385,7 +403,7 @@ fn main() -> Result<()> {
         "warn,nostr_sdk=off,nostr_relay_pool=off,openmls=off,\
          fips_core::transport::udp::socket::platform=error,\
          fips_core::node::lifecycle::peer_config=error,\
-         fips_core::node::retry=error"
+         fips_core::node::retry=error,fips_core::node::lifecycle::discovery=error,fips_core::node::handlers::mmp=error,fips_core::node::handlers::forwarding=error"
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
@@ -462,6 +480,18 @@ fn main() -> Result<()> {
         }
         Command::Forward { target, port, bind, remote_port } => {
             run_op(&dir, d, Op::Forward { target, local: SocketAddr::new(bind, port), remote_port })?;
+        }
+        Command::Name { name } => {
+            let name = name.join(" ");
+            let name = name.trim();
+            if name.is_empty() {
+                let n = d.name.clone().or_else(|| saved_name(&dir)).unwrap_or_else(noscat_core::default_device_name);
+                println!("{n}");
+            } else {
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(name_file(&dir), format!("{name}\n"))?;
+                run_op(&dir, d, Op::Rename { name: name.to_string() })?;
+            }
         }
         Command::Mesh(cmd) => {
             let op = match cmd {

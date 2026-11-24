@@ -41,6 +41,7 @@ pub enum Op {
     Text { target: String, text: String, clipboard: bool },
     Forward { target: String, local: SocketAddr, remote_port: u16 },
     Pipe { target: String },
+    Rename { name: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,6 +231,15 @@ pub async fn exec(
                 err = stopped => if let Some(e) = err { return Err(e) },
                 () = stop => { ctx.client.cancel_forward(id); }
             }
+        }
+        Op::Rename { name } => {
+            let n = name.clone();
+            ctx.blocking(move |c| {
+                c.set_device_name(&n);
+                Ok::<_, noscat_client::ClientError>(())
+            })
+            .await?;
+            line(out, format!("this device is now {name:?}"));
         }
         Op::Pipe { .. } => return Err("pipe is not an exec op".into()),
     }
