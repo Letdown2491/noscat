@@ -40,3 +40,10 @@ _Avoid_: pairing request, join request (0.4 terms)
 
 **Leave**:
 A member asking the others to remove it. Someone else completes it; the last device of a mesh just forgets the mesh.
+
+**Reachable device**:
+A member that the others can reach directly from the internet (a forwarded port, a server, a public IPv6 address). Every mesh needs at least one; members behind NAT reach each other through it when they cannot connect directly.
+_Avoid_: relay (that is a Nostr relay), server, exit node
+
+**Default service**:
+What a member exposes to the rest of the mesh without naming a port, such as a local web server or the far end of a netcat session. Other local ports are reachable only if the member serves them by number.

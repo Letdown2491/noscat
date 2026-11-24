@@ -78,9 +78,9 @@ Implementation notes from the rig:
 
 ## Phase 3: client, API and spec
 
-- [ ] `noscat-client` surface for the new model; API.md rewritten in the same commits (stamp 0.5.0).
-- [ ] `docs/nip-noscat.md` rewritten to cover only what is ours: the Marmot mesh profile (our app component, roster-to-admission rule, adverts in the group) and the app stream protocols. FIPS and Marmot are referenced, not restated.
-- [ ] AGENTS.md layout sections updated in all three repos.
+- [x] `noscat-client` surface for the new model; API.md rewritten in the same commits (stamp 0.5.0). One `Client` per device on the device runtime; mesh operations (`create_mesh`, `invite`, `join`, `remove`, `leave`, `members`) next to the 0.4 app operations; the 0.4 events kept (minus `Incoming`) plus mesh events. `tests/client.rs` runs two clients end to end. The FFI section of API.md follows in phase 4.
+- [x] `docs/nip-noscat.md` rewritten to cover only what is ours: the Marmot mesh profile (our app component, roster-to-admission rule, adverts in the group) and the app stream protocols. FIPS and Marmot are referenced, not restated.
+- [ ] AGENTS.md layout sections updated in all three repos. Done here (and CONTEXT.md gained Reachable device and Default service); the app repos' AGENTS.md describe their 0.4 glue and are rewritten with it in phase 4.
 
 ## Phase 4: clients
 

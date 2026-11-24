@@ -8,11 +8,17 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-noscat-core = { path = "../noscat-core", version = "0.4.3" }
+noscat-core = { path = "../noscat-core", version = "0.5.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+nostr = { workspace = true }
+quinn = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+nostr-relay-builder = "0.44"
+rand = { workspace = true }
 
 [lints]
 workspace = true

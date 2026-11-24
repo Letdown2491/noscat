@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use nostr_sdk::prelude::*;
 
 
 /// Relays used when the operator does not configure any. Overridable with

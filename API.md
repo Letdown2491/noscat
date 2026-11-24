@@ -4,7 +4,7 @@ The public surface the client apps consume: `noscat-client` (Rust, embedded
 directly by noscat-desktop) and `noscat-ffi` (UniFFI, consumed by
 noscat-android and later mobile platforms).
 
-> **Current as of 0.4.3.** If your `Cargo.lock` pins a newer version than
+> **Current as of 0.5.0.** If your `Cargo.lock` pins a newer version than
 > this stamp, distrust this file and read the crate source; if you change
 > the public surface, update this file in the same commit.
 
@@ -22,13 +22,18 @@ Rules that keep this file true:
 
 | Crate | Consumers | Contents |
 |---|---|---|
-| `noscat-client` | noscat-desktop (direct dep) | `Client`, `Event`, config, identity sources |
-| `noscat-ffi` | noscat-android (UniFFI bridge) | `NoscatClient`, `Event`, mesh helpers, identity helpers |
-| `noscat-core` | private (client + ffi + cli) | Noise tunnels, MLS mesh, relay clients, the wire spec |
+| `noscat-client` | noscat-desktop (direct dep), the CLI | `Client`, `Event`, `Member`, config, identity sources |
+| `noscat-ffi` | noscat-android (UniFFI bridge) | `NoscatClient`, `Event`, mesh functions, identity helpers |
+| `noscat-core` | private (client + ffi + cli) | FIPS data plane, QUIC streams, Marmot mesh group, device runtime, app protocols |
 
 ---
 
 ## noscat-client (Rust)
+
+A `Client` is one running device: identity, state directory, mesh
+membership, data plane and an event stream. 0.5 is a fresh start: no 0.4
+state is read, and a 0.4 identity file still works as an identity but
+its old mesh is not carried over.
 
 ### Identity and config
 
@@ -36,116 +41,124 @@ Rules that keep this file true:
 pub enum IdentitySource {
     Ephemeral,       // fresh keypair per process
     Secret(String),  // hex secret or nsec1...
-    File(PathBuf),   // created 0600 on first use if missing
+    File(PathBuf),   // created 0600 on first use; refused if group/world readable
 }
 
 pub struct ClientConfig {
-    pub identity: IdentitySource,          // default: Ephemeral
-    pub relays: Option<Vec<String>>,       // None = default public relay set
-    pub listen: Option<SocketAddr>,        // default: 0.0.0.0:41641
-    pub mesh_dir: Option<PathBuf>,         // mesh-scoped tunnels (see Mesh)
-    pub device_name: Option<String>,       // published in the advert
-    pub advert_ttl_secs: u64,              // default: core ADVERT_TTL_SECS
-    pub max_incoming_bytes: Option<u64>,   // None = wire ceiling (~5.4 TiB)
+    pub identity: IdentitySource,              // default: Ephemeral
+    pub relays: Option<Vec<String>>,           // None = DEFAULT_RELAYS
+    pub listen: Option<SocketAddr>,            // FIPS UDP bind; None = any port (41641 when reachable)
+    pub mesh_dir: Option<PathBuf>,             // device state dir; None = temp dir, gone on drop
+    pub device_name: Option<String>,           // shown to members (advert)
+    pub reachable: Option<Option<SocketAddr>>, // Some(None) = STUN, Some(Some(a)) = advertise a
+    pub lan_discovery: bool,                   // default: true (mDNS)
+    pub max_incoming_bytes: Option<u64>,       // None = MAX_INCOMING_BYTES (64 GiB)
+    pub static_peers: Vec<(String, SocketAddr)>, // known addresses (npub or hex)
+    pub stun_servers: Option<Vec<String>>,     // None = data plane defaults
 }
 ```
 
-`ClientConfig::default()` is intentionally conservative; UIs set `identity`,
-`mesh_dir`, and `device_name`.
+Every mesh needs at least one reachable member (a port forward, a VPS, a
+public IPv6 address); members behind NAT reach each other through it.
 
 ### Client
 
-`Client::start(config) -> Result<Client, ClientError>`. Cloning shares one
-node; dropping the last reference stops the runtime and every background
-operation it owns.
+`Client::start(config) -> Result<Client, ClientError>` starts the device
+right away (relay connections, key package, data plane). It blocks for a
+few seconds; call it from a worker thread, never from inside an async
+runtime. Cloning shares the device; dropping the last clone stops it.
+Only one `Client` may run per state directory in a process;
+`Client::running(dir)` returns it.
 
-Connection and lifecycle:
-
-| Method | Returns | Contract |
-|---|---|---|
-| `npub()` | `&str` | This node's address. Cheap. |
-| `connect(target)` | `TunnelStream` | Dial a peer npub (or `noscat:<npub>?...` URI). |
-| `listen()` | `SocketAddr` | Serve mode: publish the advert, accept inbound tunnels. Emits `Listening` + `Incoming`. |
-| `up(out_dir, bridge_to)` | `SocketAddr` | listen + auto-receive files into `out_dir` + optional TCP bridge for non-file streams. |
-| `pipe_stdio(target)` | `()` | Dial and bridge the tunnel to stdio (netcat mode). |
-| `serve_stdio()` | `()` | listen and bridge the FIRST inbound tunnel to stdio. |
-| `expose(to)` | `SocketAddr` | Local TCP listener; every accept dials `to` over a tunnel. |
-
-Transfers:
+Mesh:
 
 | Method | Returns | Contract |
 |---|---|---|
-| `send_file(path, target)` | `()` | Async; progress/completion arrives as events. Whole-file sha256 in the header. |
-| `cancel_transfer(target, path)` | `bool` | Receiver keeps its resumable partial; a resend of the same file resumes. |
-| `receive_file(out_dir)` | `()` | Accept inbound transfers into `out_dir` (mesh-scoped auth). |
-| `send_chat(target, text)` | `()` | Fire and forget; delivery is `ChatDelivered`/`ChatFailed`. |
-| `send_clipboard(target, text)` | `()` | Same delivery semantics as chat. |
+| `npub()` | `&str` | This device's address. Cheap. |
+| `in_mesh()` / `mesh_name()` | `bool` / `Option<String>` | |
+| `create_mesh(name)` | `()` | New mesh with this device as the only member. |
+| `invite(target)` | `()` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. |
+| `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. |
+| `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
+| `leave(timeout)` | `()` | Leave; waits for another member to commit it. The last member just forgets the mesh. |
+| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs`. |
+| `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
+| `network_changed()` | `()` | Re-check paths after a network switch. |
+| `events()` | `Option<Receiver<Event>>` | Take the receiver once; pump it forever. |
 
-Forwards:
-
-| Method | Returns | Contract |
-|---|---|---|
-| `forward(target, local)` | `u64` | id; every local accept dials `target` over a tunnel. |
-| `list_forwards()` | `Vec<ForwardInfo>` | |
-| `cancel_forward(id)` | `bool` | Emits `ForwardStopped`. |
-
-Mesh (read paths the UI uses at runtime):
+Receiving:
 
 | Method | Returns | Contract |
 |---|---|---|
-| `member_age_secs(npub_hex)` | `Option<u64>` | Seconds since the member's freshest advert; `None` = unknown/offline. |
-| `member_online(npub_hex)` | `bool` | Advert fresher than the TTL. |
-| `events()` | `Option<Receiver<Event>>` | Take the event receiver once, pump it forever. |
+| `up(out_dir, bridge_to)` | `SocketAddr` | Accept files into `out_dir`; bridge default-service streams to `bridge_to` when set. Emits `Listening`. |
+| `receive_file(out_dir)` | `()` | Accept files into `out_dir` without touching the bridge. |
+| `expose(to)` | `SocketAddr` | Bridge default-service streams to the TCP service `to`. Emits `Listening`. |
+| `serve_port(port, enabled)` | `()` | Let members forward to `127.0.0.1:port` here by number. |
+| `serve_stdio()` | `()` | Netcat mode: bridge the first default-service stream to stdio. Blocks. |
 
-Mesh-scoped behavior (when `mesh_dir` is set):
+Sending:
 
-- Only mesh members can connect or be dialed: tunnels are sealed with the
-  group's epoch PSK.
-- The PSK is RE-READ FROM DISK on every dial/accept: membership changes
-  made by other processes (a `mesh invite` while `up` runs) pick up on the
-  next tunnel without a restart.
-- Mesh join/sync/resend are NOT on `Client`: they live in `Device`
-  (core, used via the CLI) or the `noscat-ffi` `mesh_*` functions.
+| Method | Returns | Contract |
+|---|---|---|
+| `connect(target)` | `MeshStream` | `AsyncRead + AsyncWrite` to the member's default service. |
+| `pipe_stdio(target)` | `()` | Netcat mode, dial side. Blocks. |
+| `send_file(path, target)` | `()` | Async; progress and outcome as events. Resumes a partial the receiver kept. |
+| `cancel_transfer(target, path)` | `bool` | The receiver keeps its partial for a resume. |
+| `send_chat(target, text)` / `send_clipboard(target, text)` | `()` | Delivery is `ChatDelivered` or `ChatFailed`. Text up to 64 KiB. |
+| `forward(target, local)` | `u64` | Listen on `local`; each TCP connection goes to the member's default service. |
+| `forward_port(target, local, remote_port)` | `u64` | Same, to a port the member serves (`serve_port`). |
+| `list_forwards()` / `cancel_forward(id)` | `Vec<ForwardInfo>` / `bool` | `cancel_forward` is confirmed by `ForwardStopped`. |
+
+Scope: only members of this device's mesh can reach it or be reached.
+Streams from anyone else never get past the data plane. A device that is
+in no mesh can do nothing but create, join and be invited.
 
 ### Event (exhaustive; UIs must match every variant)
 
+Peers are bech32 npubs.
+
 | Variant | Fields | Meaning |
 |---|---|---|
-| `Listening` | `npub, addr` | Serve side is up; the pairing QR banner belongs here. |
-| `Incoming` | `peer, addr, stream` | Inbound tunnel accepted (listener mode). The stream carries one sniffed prefix byte. |
-| `TunnelUp` | `peer, addr` | A dialed or accepted tunnel is ready. |
-| `TunnelClosed` | `peer, error` | Tunnel ended; `error` set when not a clean close. |
-| `TransferDone` | `peer, path` | Whole file verified (sha256) and renamed into place. On send, `path` is the source. |
-| `TransferPartial` | `peer, path` | Receive ended WITHOUT a verified whole file: `.noscat-part` is a resume seed only. |
+| `Listening` | `npub, addr` | Receiving is set up; the pairing QR banner belongs here. |
+| `TunnelUp` | `peer` | A connection with a member is up (dialed or accepted). |
+| `TunnelClosed` | `peer, error` | It ended; `error` set when not a clean close. |
+| `TransferDone` | `peer, path` | Whole file verified (sha256) and in place. On send, `path` is the source. |
+| `TransferPartial` | `peer, path` | Receive ended without a whole file; the `.noscat-part` resumes on resend. |
 | `TransferProgress` | `peer, path, sent, total` | Sends only, one event per percent. |
-| `TransferFailed` | `peer, path, error` | |
+| `TransferFailed` | `peer, path, error` | `path` is `None` for a receive that never started. |
 | `TransferCancelled` | `peer, path` | Cancelled by this side. |
-| `ForwardStopped` | `id, error` | Forward ended (cancel or failure); drop it from the UI list. |
-| `ChatMessage` | `peer, text` | One-shot chat arrival. |
-| `ChatDelivered` | `peer` | The peer echoed FIN with the text in hand. |
+| `ForwardStopped` | `id, error` | Drop it from the UI list. |
+| `ChatMessage` | `peer, text` | |
+| `ChatDelivered` | `peer` | The member acknowledged the text. |
 | `ChatFailed` | `peer, error` | Keep the optimistic copy, mark undelivered. |
 | `Clipboard` | `peer, text` | Put `text` on the system clipboard. |
-| `Stopped` | `what, error` | A background op (listener, expose, forward) stopped. |
+| `Stopped` | `what, error` | A background operation stopped. |
+| `MeshJoined` | `name` | This device is in a mesh now (created or joined). |
+| `Roster` | `members` | The member list changed. |
+| `MemberSeen` | `peer, name` | A member's advert arrived. |
+| `MeshChangeUndone` | | A membership change of ours lost a race with another member's; retry it. |
+| `MeshLeft` | | Removed, or left. |
+
+0.4's `Incoming` is gone: inbound streams are always handled by the
+client. `TunnelUp` no longer carries an address.
 
 Delivery contracts:
 
-- Events arrive on a client-owned thread. UIs must hop to their main
-  thread before touching UI state (the Android app's rule 5).
-- The event channel is bounded; the pump must drain it continuously or
-  the node stalls.
-- Nothing in the client prints to stderr: if a UI needs narration it
-  renders its own from events. Logging goes through `tracing` at warn
-  level by default.
+- Events arrive on a client-owned thread. UIs hop to their main thread
+  before touching UI state.
+- The channel is unbounded; drain it continuously anyway.
+- Nothing in the client prints; logging goes through `tracing`.
 
 ### Errors
 
-`ClientError`: `Identity(String) | Mesh(String) | Io(io::Error) | Tunnel(TunnelError)`.
-`TunnelError` variants are core-internal; match on the display string, do
-not exhaustively match core errors.
+`ClientError`: `Identity(String) | Mesh(String) | Io(io::Error) | Stream(String)`.
+Match on the variant, show the display string.
 
 ---
 
 ## noscat-ffi (Kotlin via UniFFI, Swift later)
+
+> Still describes 0.4.3; rewritten with the FFI in phase 4 of the 0.5.0 plan.
 
 ### Functions
 
@@ -187,27 +200,20 @@ Same set as the Rust `Event` with `path: String` instead of `PathBuf`,
 
 ## Mesh behavior contracts (both surfaces)
 
-- One identity per device dir (`identity.nsec`); the mesh group state
-  (`mls.sqlite3`, `mesh.json`) is per-dir. A device directory is enrolled
-  exactly once.
-- `mesh_join` refuses invitations from anyone but `owner_npub`, and
-  refuses groups whose policy does not name that owner: the scanned QR is
-  the trust anchor.
-- Only the owner commits. Members enforce this at commit-merge time
-  (signed credential vs. the policy extension).
-- GroupContext extensions are set at creation and propagate unchanged:
-  wire-format changes to the policy are NOT backward compatible by
-  design. Groups created before 0.4.1 are unsupported; recreate the mesh
-  on the owner and re-invite. (`docs/nip-noscat.md` is the wire contract.)
-- Join-request journaling (`join-requests/`, `mesh requests/accept/
-  decline` in the CLI) is CLI-only today; the FFI/client surface for it
-  is a fast-follow when an app needs it.
-- Device-state diagnostics: `noscat_core::mesh::store_report(dir)`
-  returns a `StoreReport` (row counts for the OpenMLS tables, sidecar
-  and journal presence) with `looks_wiped()` / `packages_without_keys()`
-  detecting the wiped-store signature of issue #14 - a device holding
-  no usable keys cannot decrypt Welcomes and needs the remove + re-join
-  recovery. The CLI exposes it as `noscat mesh doctor`.
+- One device per state directory: `mesh-state.json` (group keys and
+  membership, written 0600 and atomically) and `relay-sync.json` (where
+  the relay subscription resumes). The identity lives wherever
+  `IdentitySource` says; the CLI and apps keep `identity.nsec` next to
+  the state.
+- A mesh is a Marmot group (MLS). noscat meshes interoperate with
+  White Noise and other MDK clients: a White Noise account can be invited
+  into a mesh and a noscat device into a White Noise group. Only noscat
+  devices use the data plane.
+- Every member is an admin. Two members changing membership within
+  seconds of each other converge on one result; the loser sees
+  `MeshChangeUndone` (ADR 0007).
+- `join` accepts only an invitation from the named inviter.
+- Adverts (name, presence) travel inside the group, so relays see neither.
 
 ## Versioning
 

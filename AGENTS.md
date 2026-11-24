@@ -4,9 +4,11 @@ Guidance for AI agents working in this repo.
 
 ## What this project is
 
-noscat: a Nostr-native, userspace mesh VPN (Noise XK over UDP, relays for
-discovery), packaged as a Rust CLI (`crates/noscat`) and reusable client library
-(`crates/noscat-client`). Build/test in the podman container only; the host has no
+noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
+group carried by Nostr relays; data goes device to device over FIPS with QUIC
+streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
+library (`crates/noscat-client`). `docs/plan-0.5.0.md` tracks the 0.5.0
+rewrite and `docs/adr/` records why things are the way they are. Build/test in the podman container only; the host has no
 toolchain:
 
 ```
@@ -40,10 +42,11 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
    idempotent on reruns. The crates.io token allowlists `noscat`, `noscat-core`,
    `noscat-client`, `noscat-ffi` - a new crate name needs a dashboard update
    before its first publish.
-5. **Several noscat-core tests are network-dependent** (they talk to the public
-   relays). A lone spurious failure in one of those is usually relay flakiness;
-   rerun with `--no-fail-fast` and check which test failed before assuming a
-   regression.
+5. **Tests are offline.** They run against an in-process relay
+   (`nostr-relay-builder` `MockRelay`) and loopback FIPS. `tests/mdk-interop`
+   (MDK's `wn` CLI against noscat) and `tests/netrig` (network namespaces) are
+   separate harnesses with their own `run.sh`; run them after touching the
+   Marmot group or the data plane.
 
 ## Layout
 
@@ -52,14 +55,16 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   of those two crates updates API.md in the same commit, even when only the
   semantics changed. The app-repo agents rely on it being current.
 
-- `crates/noscat-core` - the data plane: Noise XK tunnels, UDP traversal, adverts
-  (kind 37195), meshes (MLS), file transfer framing.
-- `crates/noscat-client` - the reusable client: identity/relay config resolution,
-  event stream, `serve`/`pipe`/`expose`/`forward`/`send`/`receive` operations.
-- `crates/noscat-ffi` - UniFFI bridge for mobile apps (Kotlin now, Swift later):
+- `crates/noscat-core` - `dataplane` (FIPS), `streams` (QUIC over FIPS),
+  `marmot` (the mesh group: `MeshGroup`, Marmot codecs, Nostr transport),
+  `device` (the runtime tying them to relays), `apps` (file, text, forward).
+- `crates/noscat-client` - the reusable client: one `Client` per device,
+  identity sources, mesh operations, an event stream, and the app operations
+  (`up`/`expose`/`forward`/`send_file`/`send_chat`/stdio).
+- `crates/noscat-ffi` - (being moved to 0.5 in phase 4) UniFFI bridge for mobile apps (Kotlin now, Swift later):
   `NoscatClient`, `Event` callback, identity/mesh helpers. The Android app
   (`~/Documents/noscat-android`) consumes the published crate.
-- `crates/noscat` - the CLI: a thin skin over the client.
+- `crates/noscat` - (being moved to 0.5 in phase 4) the CLI: a thin skin over the client.
 - `docs/nip-noscat.md` - the wire protocol spec (the interop contract).
 - `packaging/` - nfpm, AUR prep, bottle script; `.github/workflows/release.yml` -
   the whole release pipeline (builds, crates.io, tap, scoop, pacman).
