@@ -2,7 +2,7 @@
 
 `draft` `optional`
 
-Version: noscat 0.5.0. 0.4 is not wire compatible with this document.
+Version: noscat 0.5.0.
 
 ---
 

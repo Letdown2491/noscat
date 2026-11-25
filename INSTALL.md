@@ -5,10 +5,8 @@ tap, the pacman repository, the Scoop bucket, and crates.io are all updated
 automatically per release. Latest release page:
 <https://github.com/Letdown2491/noscat/releases>.
 
-> 0.5 does not talk to 0.4: upgrade every device, then create the mesh
-> again (see the README's Status section). The from-git methods
-> (`cargo install --git`, `nix run`) build `main`, which may be ahead of
-> the latest release.
+> The from-git methods (`cargo install --git`, `nix run`) build `main`,
+> which may be ahead of the latest release.
 
 ## Quick install (Linux and macOS)
 
@@ -46,9 +44,9 @@ Server = https://letdown2491.github.io/noscat/x86_64
 then `pacman -Sy noscat`; normal `pacman -Syu` upgrades pick up new releases.
 
 An AUR source package is prepared in [`packaging/PKGBUILD`](packaging/PKGBUILD)
-for when AUR account registration reopens. It is still pinned at 0.1.1, so
-use the pacman repository above instead; the PKGBUILD is refreshed at its
-submission.
+for when AUR account registration reopens: each release attaches it,
+filled in, as `noscat-aur-<tag>.tar.gz`. Until then, use the pacman
+repository above.
 
 ## Windows
 
@@ -95,13 +93,12 @@ extra.
 
 ## BSDs (FreeBSD, OpenBSD, NetBSD)
 
-There are no prebuilt BSD packages yet; `cargo install` above is the
-install method. 0.4.3 builds on all three. 0.5 does not build on FreeBSD
-yet: one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket
-option, and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
-BSD support comes back after the 0.5.0 release
+There are no BSD packages yet, and noscat does not build on FreeBSD yet:
+one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket option,
+and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
+BSD support follows the 0.5.0 release
 ([#19](https://github.com/Letdown2491/noscat/issues/19)).
-OpenBSD and NetBSD have not been tried with 0.5. A FreeBSD port (and then
+OpenBSD and NetBSD have not been tried. A FreeBSD port (and then
 pkgsrc-wip) is on the table if there is demand.
 
 ## Every package ships

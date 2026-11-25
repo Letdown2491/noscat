@@ -26,17 +26,14 @@ Think Tailscale, but:
 
 The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-noscat.md).
 
-> **0.5 is a rewrite and does not talk to 0.4.** Upgrade every device, then
-> create the mesh again (see Status).
-
 ## Install
 
 noscat is a single binary, packaged for every major platform (the Linux
 packages are static, with no dependencies): Linux (x86_64 and aarch64: deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
 bottles), and Windows (Scoop and winget, winget in community review). Nix
-and cargo cover everything else (the BSDs from source with 0.4.3; 0.5
-waits on an upstream fix, [#19](https://github.com/Letdown2491/noscat/issues/19)).
+and cargo cover everything else (the BSDs wait on an upstream fix,
+[#19](https://github.com/Letdown2491/noscat/issues/19)).
 
 **All installation options: [`INSTALL.md`](INSTALL.md)**
 
@@ -78,12 +75,7 @@ interoperable by construction.
 
 ## Status
 
-0.5.0 is a rewrite on FIPS and Marmot and does not talk to 0.4. It starts
-fresh: no 0.4 state or identity is read (0.5 keeps its state in a new
-place), so every device gets a new npub and the mesh is created again after
-upgrading every device. The plan it was built from is
-[`docs/plan-0.5.0.md`](docs/plan-0.5.0.md); the design decisions are in
-[`docs/adr/`](docs/adr/).
+Version 0.5.0. The design decisions are in [`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them

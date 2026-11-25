@@ -31,9 +31,7 @@ Rules that keep this file true:
 ## noscat-client (Rust)
 
 A `Client` is one running device: identity, state directory, mesh
-membership, data plane and an event stream. 0.5 is a fresh start: it
-reads no 0.4 state, and the CLI and apps keep 0.5 state in new
-locations, so every device gets a new identity.
+membership, data plane and an event stream.
 
 ### Identity and config
 
@@ -181,8 +179,7 @@ Peers are bech32 npubs.
 | `MeshLeft` | | Removed, or left. |
 | `JoinRequest` | `peer, name` | A device that scanned this device's QR (or otherwise knows its npub) asks to be invited: prompt, then `invite(peer)`. Only while in a mesh; at most once per request. |
 
-0.4's `Incoming` is gone: inbound streams are always handled by the
-client. `TunnelUp` no longer carries an address.
+Inbound streams are always handled by the client.
 
 Delivery contracts:
 
@@ -223,16 +220,14 @@ same `mesh_dir`), and otherwise run the device just for the call.
 | `mesh_remove(dir, npub, relays?)` | Remove a member. |
 | `mesh_leave(dir, timeout_secs, relays?)` | Leave; waits for another member to complete it (see `leave` above for the timeout case). Deleting `dir` afterwards, once no client runs on it, makes the next join a new device. |
 
-0.4's `mesh_resend` is gone: there is no owner journal to replay.
-
 ### Records
 
 - `ClientConfig { identity_secret?, relays?, mesh_dir?, device_name?, listen_port? }`. With `mesh_dir` and no `identity_secret`, the client uses the
   dir's `identity.nsec`; apps should do that rather than read the file,
   which is sealed under a storage key.
-  `listen_port` None = any free port (0.4 defaulted to 41641).
+  `listen_port` None = any free port.
 - `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device, reachable, connected }` (see `members()`).
-  0.4's `is_owner` is gone: every device is an admin.
+  Every device is an admin.
 - `ForwardInfo { id, target, local }` (`local` as a string, e.g.
   `"127.0.0.1:8080"`).
 - `Identity { npub, secret_hex }`.

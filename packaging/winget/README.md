@@ -4,4 +4,4 @@
 # the release as noscat-winget-<tag>.tar.gz. They go to
 #   manifests/l/Letdown2491/noscat/<version>/
 # in a fork of https://github.com/microsoft/winget-pkgs, then a PR titled
-# "Add: Letdown2491.noscat version <version>" (0.1.1 was PR #486661).
+# "Add: Letdown2491.noscat version <version>".

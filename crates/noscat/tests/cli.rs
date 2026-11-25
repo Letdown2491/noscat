@@ -48,7 +48,9 @@ impl Rig {
         for p in &self.peers {
             c.args(["--peer", p]);
         }
-        c.args(args).env_remove("NOSCAT_IDENTITY").env("RUST_LOG", "warn");
+        // NOSCAT_TEST_LOG sets every device's RUST_LOG (to debug a failure).
+        let log = std::env::var("NOSCAT_TEST_LOG").unwrap_or_else(|_| "warn".into());
+        c.args(args).env_remove("NOSCAT_IDENTITY").env("RUST_LOG", log);
         c
     }
 
@@ -106,6 +108,18 @@ fn capture(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
     log
 }
 
+/// Prints a running device's log if the test fails while it is held: a
+/// failing command shows only its own side.
+struct ShowOnFailure(&'static str, std::sync::Arc<std::sync::Mutex<String>>);
+
+impl Drop for ShowOnFailure {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("--- {}'s log:\n{}", self.0, self.1.lock().unwrap_or_else(|p| p.into_inner()));
+        }
+    }
+}
+
 fn wait_for(log: &std::sync::Mutex<String>, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !log.lock().unwrap().contains(what) {
@@ -158,6 +172,7 @@ fn cli_end_to_end() {
         .spawn()
         .unwrap();
     let log = capture(&mut up);
+    let _show = ShowOnFailure("A", log.clone());
     wait_for(&log, "up as");
     let members = rig.ok(&a, &["mesh", "members"]);
     assert!(members.contains("2 member(s)"), "{members}");
