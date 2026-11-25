@@ -247,6 +247,13 @@ the internet.
 
 ### Relays
 
+**Run your own:** [noscat-relay](https://github.com/Letdown2491/noscat-relay)
+is a members-only relay for one mesh. It carries only noscat's events and
+serves only your devices, so who is in the mesh, who gets invited and when
+each device is online stay off third-party relays. Put it on the server that
+runs your reachable member, then make the mesh private (below). Without one,
+noscat uses public relays.
+
 Relays carry only the mesh's encrypted control traffic (membership changes,
 invitations, key packages, relay lists and presence adverts); data goes
 device to device. By default noscat uses three relays from different
@@ -277,10 +284,8 @@ noscat mesh shared                         # devices use their own relays too
 
 In a private mesh every device uses only the mesh's relays, logs in to
 them with its device key (NIP-42), and drops its own and the public ones.
-That is meant for a members-only relay you run yourself,
-[noscat-relay](https://github.com/Letdown2491/noscat-relay), which keeps
-who is in the mesh, who gets invited and when each device is online off
-third-party relays. noscat never logs in to any other relay. Add the relay
+That is meant for a members-only relay you run yourself, such as
+noscat-relay. noscat never logs in to any other relay. Add the relay
 first and check members reach it, then go private. A private mesh's QR
 (`noscat mesh qr`, or the one `up` prints) names its relays
 (`noscat:<npub>?relay=wss%3A%2F%2F...`), so a new device that scans it
