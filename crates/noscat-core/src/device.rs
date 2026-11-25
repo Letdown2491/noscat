@@ -59,6 +59,8 @@ const GIFT_WRAP_LOOKBACK_SECS: u64 = 3 * 24 * 60 * 60;
 /// Overlap when resuming the group subscription after a restart.
 /// Join requests older than this are stale (the asker stopped waiting).
 const JOIN_REQUEST_TTL_SECS: u64 = 15 * 60;
+/// How often a joining device repeats its join request while it waits.
+const JOIN_REQUEST_REPEAT: Duration = Duration::from_secs(15);
 /// Least time between adverts sent in answer to a returning member.
 const ADVERT_REPLY_DEBOUNCE: Duration = Duration::from_secs(10);
 const RESUME_OVERLAP_SECS: u64 = 15 * 60;
@@ -935,7 +937,12 @@ impl Device {
         }
         {
             let mut seen = self.inner.join_requests.lock().unwrap_or_else(|p| p.into_inner());
-            if seen.get(&req.sender).is_some_and(|t| *t >= req.created_at) {
+            // A joiner repeats its request while it waits: report a device
+            // once per request lifetime, not on every repeat.
+            if seen
+                .get(&req.sender)
+                .is_some_and(|t| req.created_at < t.saturating_add(JOIN_REQUEST_TTL_SECS))
+            {
                 return;
             }
             seen.insert(req.sender, req.created_at);
@@ -1238,6 +1245,9 @@ impl Device {
     /// Add a device to the mesh by its key. Its newest key package is
     /// fetched from this device's relays and the ones it lists.
     pub async fn invite(&self, device: PublicKey) -> Result<(), DeviceError> {
+        // Answered: a later request from this device (after a removal,
+        // say) is reported again.
+        self.inner.join_requests.lock().unwrap_or_else(|p| p.into_inner()).remove(&device);
         let mine = self.all_relays().await;
         let mut relays = mine.clone();
         let lists = self
@@ -1336,6 +1346,19 @@ impl Device {
         r
     }
 
+    /// Send `inviter` a join request (best effort).
+    async fn ask_to_join(&self, inviter: &PublicKey) {
+        match marmot::transport::wrap_join_request(self.inner.identity.keys(), inviter, &self.name()) {
+            Ok(wrap) => {
+                let relays = self.inbox_relays(inviter).await;
+                if let Err(e) = self.publish(&wrap, &relays).await {
+                    tracing::warn!("join request not delivered: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("join request: {e}"),
+        }
+    }
+
     async fn join_inner(&self, inviter: PublicKey, relays: &[String], timeout: Duration) -> Result<(), DeviceError> {
         let hints = union(relays, &[]);
         if !relays.is_empty() && hints.is_empty() {
@@ -1350,15 +1373,7 @@ impl Device {
         self.publish_key_package().await?;
         // Ask the inviter's device to prompt its user. Best effort: an
         // invite by npub works without it.
-        match marmot::transport::wrap_join_request(self.inner.identity.keys(), &inviter, &self.name()) {
-            Ok(wrap) => {
-                let relays = self.inbox_relays(&inviter).await;
-                if let Err(e) = self.publish(&wrap, &relays).await {
-                    tracing::warn!("join request not delivered: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("join request: {e}"),
-        }
+        self.ask_to_join(&inviter).await;
         // An invitation that arrived before now is still on the relays.
         let relays = self.all_relays().await;
         let stored = self
@@ -1377,13 +1392,23 @@ impl Device {
             }
         }
         let wait = async {
+            // Ask again now and then: one request can be lost (a relay
+            // connection still coming up, the inviter not yet listening).
+            // The inviter reports the device once either way.
+            let mut again = tokio::time::interval_at(
+                tokio::time::Instant::now() + JOIN_REQUEST_REPEAT,
+                JOIN_REQUEST_REPEAT,
+            );
             loop {
-                match rx.recv().await {
-                    Ok(DeviceEvent::Joined) => return Ok(()),
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(DeviceError::Other("device stopped".into()));
-                    }
+                tokio::select! {
+                    ev = rx.recv() => match ev {
+                        Ok(DeviceEvent::Joined) => return Ok(()),
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(DeviceError::Other("device stopped".into()));
+                        }
+                    },
+                    _ = again.tick() => self.ask_to_join(&inviter).await,
                 }
             }
         };

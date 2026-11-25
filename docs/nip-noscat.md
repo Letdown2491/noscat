@@ -163,7 +163,11 @@ A member that receives one from a non-member, with a rumor no older than
 15 minutes, MAY show it to its user. A join request grants nothing: the
 device is added only if a member then commits an Add for its key
 package. Receivers MUST ignore requests from current members and SHOULD
-show at most one prompt per request time per device.
+show at most one prompt per device per 15 minutes, until they answer it.
+
+A joining device SHOULD repeat its request while it waits (noscat every
+15 seconds): a single gift wrap can be lost while relay connections come
+up.
 
 A device keeps at most its two newest key packages and deletes consumed
 ones after joining.
