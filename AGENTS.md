@@ -88,6 +88,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   (builds, crates.io, tap, scoop, pacman, AUR and winget files).
 - `containers/noscat-dev.containerfile`: the dev image (Rust plus the
   libdbus and libclang the FIPS crates need on glibc).
+- `docs/plan-0.6.0.md`: next release (Bluetooth on Linux and Android,
+  relays through the mesh), then 0.7.0 (macOS desktop app and Bluetooth).
 - `docs/releasing.md`: the release checklist across the repos, from the
   tag on (crates.io first, then the desktop drops its git patch, then the
   Android release APK).
