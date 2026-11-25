@@ -1,4 +1,4 @@
-# noscat 0.6.0 plan: Bluetooth
+# noscat 0.6.0 plan: Bluetooth and a fully private mesh
 
 0.6.0 lets a device with no working network (no Wi-Fi, no mobile data)
 stay in the mesh through a nearby member over Bluetooth LE. It ships in
@@ -17,6 +17,9 @@ Decided 2026-11-25:
 - **Relays through the mesh in the same release**: without it, a
   Bluetooth-only device would miss membership changes, invites and names
   until it was back online.
+- **STUN from the mesh's own relay** ([#1](https://github.com/Letdown2491/noscat/issues/1)):
+  a private mesh then reaches no third party at all. Its protocol change
+  ships with the relay-proxy one, so the protocol moves once.
 
 ## How it fits
 
@@ -40,6 +43,25 @@ discoveries); noscat answers them per platform.
 ```
 
 Admission is unchanged: links of any kind are members only (ADR 0005).
+
+## Phase 0: STUN for private meshes (#1)
+
+Independent of Bluetooth; first, while the spike answers its questions.
+
+- [ ] noscat-relay serves STUN on UDP (`STUN_PORT`, off by default), with
+      pion/stun next to the relay: same box and operator as the relay, so
+      no new exposure. Its own release, before noscat 0.6.0.
+- [ ] The mesh carries its STUN servers like its relays: in the group
+      state of a private mesh and in the pairing QR
+      (`noscat:<npub>?relay=...&stun=...`), so a joining device uses them
+      from its first moment. Spec change in `docs/nip-noscat.md`.
+- [ ] A private mesh never falls back to the public defaults: with no
+      STUN of its own, its devices advertise no NAT address and connect
+      through the reachable member.
+- [ ] CLI: `--stun` shown in `--help` and the man page; `noscat mesh stun
+      add|remove`. Apps show the mesh's STUN servers next to its relays.
+- [ ] Deployment note: Caddy proxies TCP only, so STUN needs UDP 3478
+      open on the relay's host (on vm-2252, ask before changing it).
 
 ## Phase 1: spike (Linux)
 
