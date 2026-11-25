@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
 
 PackageIdentifier: Letdown2491.noscat
-PackageVersion: 0.1.1
+PackageVersion: __VERSION__
 PackageLocale: en-US
 Publisher: Letdown2491
 PublisherUrl: https://github.com/Letdown2491
@@ -12,13 +12,22 @@ License: MIT
 LicenseUrl: https://github.com/Letdown2491/noscat/blob/main/LICENSE
 Copyright: Copyright (c) 2026 noscat contributors
 CopyrightUrl: https://github.com/Letdown2491/noscat/blob/main/LICENSE
-ShortDescription: Like netcat, but over a Nostr-native mesh - npub-addressed tunnels, no root, no accounts
+ShortDescription: Like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts
 Description: |-
-  noscat gives every machine a self-generated Nostr identity (a keypair) and
-  tunnels encrypted traffic between machines by that identity. Direct
-  end-to-end encryption over UDP with NAT hole punching; Nostr relays are
-  only the discovery channel. Includes tailnet (MLS group) scoping, file
-  transfer with resume, and TCP port forwarding.
+  noscat joins your devices into a private mesh. Each device has its own
+  self-generated Nostr identity (no account). Membership is a Marmot (MLS)
+  group carried by Nostr relays, so every member can verify who is in the
+  mesh and any member can manage it; there is no coordinator. Data goes
+  device to device over FIPS, an end-to-end encrypted overlay keyed by the
+  same identities, with QUIC streams on top: file transfer with resume,
+  chat, clipboard sharing and TCP port forwarding, all in userspace.
 Moniker: noscat
+Tags:
+- netcat
+- nostr
+- mesh
+- p2p
+- tunnel
+- networking
 ManifestType: defaultLocale
 ManifestVersion: 1.28.0

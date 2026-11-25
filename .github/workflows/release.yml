@@ -8,7 +8,9 @@
 #   curl|sh install script.
 # - macOS (aarch64 + x86_64): unsigned tarballs; the publish job generates
 #   the Homebrew formula (noscat.rb) with real sha256s for the tap.
-# - Windows (x86_64): zip for the winget manifest (packaging/winget/).
+# - Windows (x86_64): zip for Scoop and the winget manifests.
+# - The publish job also fills the AUR and winget templates
+#   (packaging/PKGBUILD, .SRCINFO, packaging/winget/) and attaches them.
 name: release
 
 on:
@@ -218,6 +220,26 @@ jobs:
           path: dist/noscat.rb
           retention-days: 1
 
+      - name: Fill the AUR and winget templates
+        # Ready-to-submit files attached to the release: the AUR package
+        # (PKGBUILD and .SRCINFO, with the b2sum of the tag's source
+        # tarball) and the three winget manifests (sha256 of the Windows
+        # zip). Submitting them stays a manual step.
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          B2=$(curl -fsSL "https://github.com/${{ github.repository }}/archive/refs/tags/$GITHUB_REF_NAME.tar.gz" | b2sum | cut -d' ' -f1)
+          WIN_SHA=$(sha256sum dist/noscat-$GITHUB_REF_NAME-windows-amd64.zip | cut -d' ' -f1)
+          DATE=$(date -u +%Y-%m-%d)
+          fill() { sed -e "s/__VERSION__/$VERSION/g" -e "s/__B2SUM__/$B2/g" -e "s/__SHA256__/$WIN_SHA/g" -e "s/__DATE__/$DATE/g" "$1" > "$2"; }
+          mkdir -p aur winget
+          fill packaging/PKGBUILD aur/PKGBUILD
+          fill packaging/.SRCINFO aur/.SRCINFO
+          for f in packaging/winget/*.yaml; do fill "$f" "winget/$(basename "$f")"; done
+          ! grep -rE '__(VERSION|B2SUM|SHA256|DATE)__' aur winget
+          tar -czf dist/noscat-aur-$GITHUB_REF_NAME.tar.gz aur
+          tar -czf dist/noscat-winget-$GITHUB_REF_NAME.tar.gz winget
+          cat aur/PKGBUILD winget/*.yaml
+
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -288,7 +310,7 @@ jobs:
           cat > bucket/bucket/noscat.json <<EOF
           {
               "version": "$VERSION",
-              "description": "Like netcat, but over a Nostr-native mesh: npub-addressed tunnels, no root, no accounts. Identity-addressed encrypted tunnels over UDP with NAT hole punching; Nostr relays are only the discovery channel.",
+              "description": "Like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts. Membership is a Marmot (MLS) group on Nostr relays; data goes device to device over FIPS.",
               "homepage": "https://github.com/Letdown2491/noscat",
               "license": "MIT",
               "architecture": {

@@ -56,6 +56,17 @@ fn wait<T>(rx: &Receiver<Event>, what: &str, mut f: impl FnMut(&Event) -> Option
     }
 }
 
+/// Wait until `a` lists `npub`'s join request. A joiner publishes its key
+/// package before it asks, so inviting after this cannot outrun the key
+/// package (inviting at once could, on a slow machine).
+fn asked(a: &Client, npub: &str) {
+    let deadline = Instant::now() + T;
+    while !a.join_requests().iter().any(|r| r.npub == npub) {
+        assert!(Instant::now() < deadline, "no join request from {npub}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn roundtrip(local: SocketAddr, msg: &[u8]) -> Vec<u8> {
     let deadline = Instant::now() + T;
     loop {
@@ -106,6 +117,7 @@ fn two_clients_end_to_end() {
         let inviter = a.npub().to_string();
         std::thread::spawn(move || b.join(&inviter, T))
     };
+    asked(&a, b.npub());
     a.invite(b.npub()).unwrap();
     joiner.join().unwrap().unwrap();
     wait(&eb, "b joined", |e| matches!(e, Event::MeshJoined { name } if name == "home").then_some(()));
@@ -268,6 +280,7 @@ fn join_over(rt: &tokio::runtime::Runtime, a_relays: Vec<String>, url: &str) {
         let inviter = a.npub().to_string();
         std::thread::spawn(move || b.join(&inviter, T))
     };
+    asked(&a, b.npub());
     a.invite(b.npub()).unwrap();
     joiner.join().unwrap().unwrap();
     assert_eq!(a.members().len(), 2);

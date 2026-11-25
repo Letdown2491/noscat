@@ -33,9 +33,11 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
      Windows/BSD fallback or a graceful degradation.
    - BSDs are tested only by compilation (`cargo install`); keep dependencies
      portable and avoid Linux-only crates (io_uring, procfs) unless gated.
-   - The release workflow (.github/workflows/release.yml) is the compile gate for
-     all five targets; a tag push runs it. Local container has the Linux target
-     only, so lean on cfg hygiene and CI for the rest.
+   - CI (.github/workflows/ci.yml) is the compile gate for the release
+     targets: it builds and tests Linux, macOS and Windows on every push to
+     main. Check it after pushing (`gh run list --workflow ci.yml`); the
+     local container has the Linux target only, so lean on cfg hygiene and
+     CI for the rest.
 2. **No em or en dashes anywhere in the repo, and no hyphen standing in for
    one** (" - " between words): use a colon, semicolon, comma or parentheses.
    Code comments, UI text, docs and commit messages alike.
@@ -77,10 +79,13 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   (`packaging/noscat.1`) is written by hand: a change to commands, flags or
   defaults updates it, README's CLI section and the `--help` text together.
 - `docs/nip-noscat.md`: the wire protocol spec (the interop contract).
-- `packaging/`: man page, nfpm, AUR prep (pinned at 0.1.1), winget (the
-  0.1.1 submission), bottle script; `flake.nix` at the root;
-  `.github/workflows/release.yml`: the whole release pipeline (builds,
-  crates.io, tap, scoop, pacman).
+- `packaging/`: man page, nfpm, the AUR package and winget manifests
+  (templates the release workflow fills and attaches to each release),
+  bottle script; `flake.nix` at the root;
+  `.github/workflows/ci.yml`: build and test on every release platform
+  for each push to main, plus a crates.io dry run;
+  `.github/workflows/release.yml`: the whole release pipeline on a tag
+  (builds, crates.io, tap, scoop, pacman, AUR and winget files).
 - `containers/noscat-dev.containerfile`: the dev image (Rust plus the
   libdbus and libclang the FIPS crates need on glibc).
 - `docs/upstream/`: drafts of issues and patches for FIPS. Never post them

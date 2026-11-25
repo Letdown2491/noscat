@@ -131,7 +131,18 @@ fn cli_end_to_end() {
     // One-shot mesh commands, each starting and stopping its device.
     rig.ok(&a, &["mesh", "create", "home"]);
     let join = rig.cmd(&b, &["mesh", "join", &a.npub, "--timeout", "60"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    // `mesh requests` (not in a terminal, so it only lists) shows B once
+    // B has asked; B published its key package before asking.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let out = rig.cmd(&a, &["mesh", "requests"]).stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "mesh requests failed: {}", String::from_utf8_lossy(&out.stderr));
+        if String::from_utf8_lossy(&out.stdout).contains(&b.npub) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "B's join request never showed in `mesh requests`");
+        std::thread::sleep(Duration::from_millis(500));
+    }
     rig.ok(&a, &["mesh", "invite", &b.npub]);
     let joined = join.wait_with_output().unwrap();
     assert!(joined.status.success(), "join failed: {}", String::from_utf8_lossy(&joined.stderr));
