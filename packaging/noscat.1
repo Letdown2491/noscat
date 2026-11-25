@@ -161,8 +161,11 @@ Leave the mesh. Another member completes it;
 waits for that (default 120). The last member just forgets the mesh.
 .TP
 .B mesh members
-List the members, their names, presence and which are reachable, with a
-note when none is.
+List the members, their names, presence, which are connected (data can
+flow to them now; only known while
+.B up
+runs) and which are reachable, with a note when none is. A member can be
+online (its advert arrived over the relays) without being connected.
 .TP
 .B mesh qr
 Print this device's pairing QR (same as

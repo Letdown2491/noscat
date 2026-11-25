@@ -126,6 +126,10 @@ fn two_clients_end_to_end() {
         _ => None,
     });
     wait(&ea, "chat delivered", |e| matches!(e, Event::ChatDelivered { .. }).then_some(()));
+    // A live connection counts as connected, both ways.
+    let b_npub = b.npub().to_string();
+    assert!(a.members().iter().any(|m| m.npub == b_npub && m.connected));
+    assert!(b.members().iter().all(|m| !m.this_device || !m.connected));
 
     // Rename: the other member hears it now, not on the next advert tick.
     a.set_device_name("renamed laptop");

@@ -60,7 +60,10 @@ pub fn print_members(mesh: Option<&str>, rows: &[Row]) {
             }
         };
         let reach = if r.reachable { ", reachable" } else { "" };
-        println!("{}  {:<20} {presence}{reach}", r.npub, r.name.as_deref().unwrap_or("-"));
+        // Only a running `up` keeps connections, so only say "connected"
+        // when it is; its absence claims nothing.
+        let conn = if r.connected { ", connected" } else { "" };
+        println!("{}  {:<20} {presence}{conn}{reach}", r.npub, r.name.as_deref().unwrap_or("-"));
     }
     if let Some(note) = no_reachable_note(rows.iter().map(|r| (r.reachable, r.this_device || r.last_seen_secs.is_some()))) {
         println!("{note}");

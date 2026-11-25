@@ -71,7 +71,9 @@ pub struct MeshMember {
     pub this_device: bool,
     /// Reachable from the internet, per its latest advert. Every mesh
     /// needs one such member for devices on different networks to meet.
-    pub reachable: bool,
+    pub reachable: bool,    /// Data can flow to it right now (a direct link or a live, possibly
+    /// relayed, connection). `online` only means its advert arrived.
+    pub connected: bool,
 }
 
 fn member(m: noscat_client::Member) -> MeshMember {
@@ -83,6 +85,7 @@ fn member(m: noscat_client::Member) -> MeshMember {
         admin: m.admin,
         this_device: m.this_device,
         reachable: m.reachable,
+        connected: m.connected,
     }
 }
 

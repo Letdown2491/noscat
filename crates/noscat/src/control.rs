@@ -60,6 +60,9 @@ pub struct Row {
     pub last_seen_secs: Option<u64>,
     #[serde(default)]
     pub reachable: bool,
+    /// Data can flow to it right now (see `noscat_client::Member`).
+    #[serde(default)]
+    pub connected: bool,
 }
 
 /// One reply line.
@@ -139,6 +142,7 @@ pub async fn exec(
                     online: m.online,
                     last_seen_secs: m.last_seen_secs,
                     reachable: m.reachable,
+                    connected: m.connected,
                 })
                 .collect();
             let _ = out.send(Reply::Members { mesh, members });

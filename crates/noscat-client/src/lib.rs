@@ -45,6 +45,9 @@ pub use noscat_core::relay::{DEFAULT_RELAYS, default_relays};
 
 /// How long a dial waits for a member to become reachable.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the prober (`start_probing`) dials online members it has no
+/// connection to.
+const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 /// Default receive cap per file transfer: 64 GiB.
 pub const MAX_INCOMING_BYTES: u64 = 64 << 30;
 /// Default UDP port for a reachable device.
@@ -134,6 +137,11 @@ pub struct Member {
     /// Reachable from the internet, per its latest advert (this device:
     /// per its own config). Every mesh needs one.
     pub reachable: bool,
+    /// Data can flow to it right now: a direct link, or a live connection
+    /// (possibly relayed through another member). `online` only says its
+    /// advert arrived over the relays; a member can be online and still
+    /// unreachable (different network, no reachable member).
+    pub connected: bool,
 }
 
 /// What the client does on its own, surfaced for UIs. Peers are bech32
@@ -293,6 +301,10 @@ struct Inner {
     next_transfer_id: AtomicU64,
     forwards: Mutex<HashMap<u64, ForwardEntry>>,
     next_forward_id: AtomicU64,
+    /// The connection prober runs (started by `up`/`expose`).
+    probing: std::sync::atomic::AtomicBool,
+    /// Members a probe is connecting to right now.
+    probes: Mutex<std::collections::HashSet<PublicKey>>,
 }
 
 /// What only [`Client`] handles hold: the runtime, the directory lock and
@@ -430,6 +442,20 @@ impl Inner {
     }
 
     async fn members(&self) -> Vec<Member> {
+        let direct: std::collections::HashSet<PublicKey> = self
+            .device
+            .peers()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.direct)
+            .map(|p| p.device)
+            .collect();
+        let live: std::collections::HashSet<PublicKey> = self
+            .conns
+            .lock()
+            .map(|m| m.iter().filter(|(_, c)| c.inner.close_reason().is_none()).map(|(k, _)| *k).collect())
+            .unwrap_or_default();
         self.device
             .members()
             .await
@@ -442,8 +468,49 @@ impl Inner {
                 online: m.online,
                 last_seen_secs: m.last_seen_secs,
                 reachable: m.reachable,
+                connected: !m.this_device && (direct.contains(&m.device) || live.contains(&m.device)),
             })
             .collect()
+    }
+
+    /// While serving, keep a connection to every member whose advert is
+    /// fresh, so `connected` tells "reachable now" from "seen on the
+    /// relays". Each round dials the online members without a live
+    /// connection; keep-alives hold the rest open and their close shows.
+    fn start_probing(self: &Arc<Self>) {
+        if self.probing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        self.rt().spawn(async move {
+            loop {
+                for m in me.device.members().await {
+                    if m.this_device || !m.online {
+                        continue;
+                    }
+                    let open = me
+                        .conns
+                        .lock()
+                        .is_ok_and(|c| c.get(&m.device).is_some_and(|c| c.inner.close_reason().is_none()));
+                    // Skip members with a live connection or a probe already
+                    // under way.
+                    if open || !me.probes.lock().is_ok_and(|mut p| p.insert(m.device)) {
+                        continue;
+                    }
+                    let me2 = me.clone();
+                    tokio::spawn(async move {
+                        let ok = me2.conn(m.device).await.is_ok();
+                        if let Ok(mut p) = me2.probes.lock() {
+                            p.remove(&m.device);
+                        }
+                        if !ok {
+                            tracing::debug!(peer = %npub_of(&m.device), "probe: no connection");
+                        }
+                    });
+                }
+                tokio::time::sleep(PROBE_INTERVAL).await;
+            }
+        });
     }
 
     /// A live connection to `peer`, reusing one if it is open.
@@ -473,6 +540,9 @@ impl Inner {
         self.emit(Event::TunnelUp { peer: peer.clone() });
         let me = self.clone();
         self.rt().spawn(async move {
+            // `connected` changed: refresh the roster for UIs.
+            let members = me.members().await;
+            me.emit(Event::Roster { members });
             loop {
                 match apps::accept(&c).await {
                     Ok(Some(incoming)) => {
@@ -495,6 +565,8 @@ impl Inner {
                 Some(e) => Some(e.to_string()),
             };
             me.emit(Event::TunnelClosed { peer, error });
+            let members = me.members().await;
+            me.emit(Event::Roster { members });
         });
     }
 
@@ -725,6 +797,8 @@ impl Client {
             next_transfer_id: AtomicU64::new(1),
             forwards: Mutex::new(HashMap::new()),
             next_forward_id: AtomicU64::new(1),
+            probing: std::sync::atomic::AtomicBool::new(false),
+            probes: Mutex::new(std::collections::HashSet::new()),
         });
         inner.pump();
         let owner = Arc::new(Owner { rt: Some(rt), inner: inner.clone(), dir, temp_dir, _lock: lock });
@@ -864,6 +938,7 @@ impl Client {
             s.inbox = Some(out_dir);
             s.bridge = bridge_to;
         }
+        self.inner.start_probing();
         let addr = self.local_addr();
         self.inner.emit(Event::Listening { npub: self.inner.npub.clone(), addr });
         Ok(addr)
@@ -881,6 +956,7 @@ impl Client {
         if let Ok(mut s) = self.inner.serving.lock() {
             s.bridge = Some(to);
         }
+        self.inner.start_probing();
         let addr = self.local_addr();
         self.inner.emit(Event::Listening { npub: self.inner.npub.clone(), addr });
         Ok(addr)
