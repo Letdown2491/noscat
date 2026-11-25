@@ -15,8 +15,9 @@ what happens from the tag on, in order.
       step refuses a mismatch). The desktop's `Cargo.toml` and the Android
       app's `versionName` carry the same version; `versionCode` is bumped.
 - [ ] The netns suite passes: `tests/netrig/run.sh`.
-- [ ] Drop the "not released yet" notes (README, INSTALL, AGENTS here; the
-      app READMEs and AGENTS), and say the packages install this version.
+- [ ] No "not released yet" notes are left in noscat's docs (done for
+      0.5.0). The apps' notes about building from noscat's git branch or a
+      local checkout go in steps 2 and 3, with the build change.
 
 ## 1. noscat
 

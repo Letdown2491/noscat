@@ -7,8 +7,8 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). `main` is 0.5.0, not released yet (the
-last release is 0.4.3); `docs/plan-0.5.0.md` tracks what is left and
+library (`crates/noscat-client`). Version 0.5.0; `docs/releasing.md` is the
+release checklist, `docs/plan-0.5.0.md` the plan it came from, and
 `docs/adr/` records why things are the way they are. Build/test in the
 podman container only; the host has no toolchain:
 
@@ -71,7 +71,7 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   `NoscatClient`, `Event` callback, identity and `mesh_*` functions (which use
   the app's running client for a directory, or run the device for the call).
   The Android app (`~/Documents/noscat-android`) builds it from this
-  checkout (`scripts/build-native.sh local`) until 0.5.0 is published.
+  checkout (`scripts/build-native.sh local`) or a published version.
 - `crates/noscat`: the CLI: a thin skin over the client. One process runs a
   device (`Client::start` locks the state directory); `control.rs` is the
   loopback channel every other command on that directory goes through.

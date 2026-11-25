@@ -5,10 +5,10 @@ tap, the pacman repository, the Scoop bucket, and crates.io are all updated
 automatically per release. Latest release page:
 <https://github.com/Letdown2491/noscat/releases>.
 
-> Every channel below installs the latest **release**, currently 0.4.3. The
-> `main` branch is 0.5.0, which is not released yet and does not talk to
-> 0.4. Only the from-git methods (`cargo install --git`, `nix run`) build
-> `main`.
+> 0.5 does not talk to 0.4: upgrade every device, then create the mesh
+> again (see the README's Status section). The from-git methods
+> (`cargo install --git`, `nix run`) build `main`, which may be ahead of
+> the latest release.
 
 ## Quick install (Linux and macOS)
 
@@ -72,7 +72,7 @@ nix run github:Letdown2491/noscat
 
 A flake is at the repo root; `nix profile install github:Letdown2491/noscat`
 adds it to a profile. Linux and macOS, x86_64 and aarch64. It builds the
-`main` branch (0.5.0 today); add `?ref=v0.4.3` for the release.
+`main` branch; add `?ref=v0.5.0` for the release.
 
 ## cargo (any platform with a Rust toolchain)
 

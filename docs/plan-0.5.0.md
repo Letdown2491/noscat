@@ -112,7 +112,7 @@ Implementation notes from the rig:
 - [x] Android release build: `PROFILE=release scripts/build-native.sh` builds the Rust library with LTO (symbols kept until the bindings are generated, then stripped), and `scripts/build-release.sh` makes a signed release APK from the git-ignored `keystore.properties` (release key generated 2026-11-25, kept outside the repo).
 - [x] Packaging refresh: `packaging/PKGBUILD`, `.SRCINFO` and the winget manifests are templates the release workflow fills (version, source b2sum, Windows zip sha256) and attaches to the release, ready to submit; the AUR package depends on dbus and builds with clang. Scoop's description is 0.5's.
 - [x] Desktop release ships two Linux binaries: `noscat-desktop` (Wayland only, the default build) and `noscat-desktop-x11` (`--features x11`, needs libxkbcommon-x11 at run time). noscat-desktop's `release.yml` builds both on a tag (Ubuntu 22.04, for an old enough glibc) and attaches them; its `ci.yml` builds both on every push.
-- [ ] Remove the "not released yet" notes from README.md, INSTALL.md and AGENTS.md (and the apps'): the last step before the tag, in `docs/releasing.md`.
+- [x] Remove the "not released yet" notes from README.md, INSTALL.md and AGENTS.md (2026-11-25; also noscat-relay's README). The apps' notes about building from noscat's git branch go with the build change, steps 2 and 3 of `docs/releasing.md`.
 
 ## Decisions (2026-11-24)
 

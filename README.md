@@ -26,10 +26,8 @@ Think Tailscale, but:
 
 The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-noscat.md).
 
-> **This branch is 0.5.0, which is not released yet.** The packages below
-> install the latest release, 0.4.3, which works differently (Noise tunnels
-> and an owner device) and cannot talk to 0.5. To try 0.5 now, build from
-> source (see Development).
+> **0.5 is a rewrite and does not talk to 0.4.** Upgrade every device, then
+> create the mesh again (see Status).
 
 ## Install
 
@@ -80,12 +78,12 @@ interoperable by construction.
 
 ## Status
 
-0.5.0 (unreleased; this branch) is a rewrite on FIPS and Marmot and does
-not talk to 0.4. It starts fresh: no 0.4 state or identity is read (0.5
-keeps its state in a new place), so every device gets a new npub and the
-mesh is created again after upgrading every device. The release plan and
-what still blocks it are in [`docs/plan-0.5.0.md`](docs/plan-0.5.0.md);
-the design decisions are in [`docs/adr/`](docs/adr/).
+0.5.0 is a rewrite on FIPS and Marmot and does not talk to 0.4. It starts
+fresh: no 0.4 state or identity is read (0.5 keeps its state in a new
+place), so every device gets a new npub and the mesh is created again after
+upgrading every device. The plan it was built from is
+[`docs/plan-0.5.0.md`](docs/plan-0.5.0.md); the design decisions are in
+[`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them
