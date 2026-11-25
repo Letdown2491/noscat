@@ -20,6 +20,9 @@ Decided 2026-11-25:
 - **STUN from the mesh's own relay** ([#1](https://github.com/Letdown2491/noscat/issues/1)):
   a private mesh then reaches no third party at all. Its protocol change
   ships with the relay-proxy one, so the protocol moves once.
+- **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19)):
+  FreeBSD built with our two small patches in its own CI job, not waiting
+  on upstream; OpenBSD and NetBSD tried in the same pass.
 
 ## How it fits
 
@@ -107,6 +110,27 @@ Independent of Bluetooth; first, while the spike answers its questions.
       end to end through the proxy.
 - [ ] Invites, removals, names and presence arrive on a Bluetooth-only
       device; it catches up when its relay route comes back.
+
+## Phase 4b: BSDs (#19)
+
+Decided 2026-11-25 (option A): ship BSD binaries built with our patches
+instead of waiting for upstream. Independent of everything else.
+
+- [ ] The two patches from `docs/upstream/01-freebsd-build.md` live in the
+      repo (`packaging/bsd/patches/`): `nvpn-mdns-sd` on `socket-pktinfo`
+      0.4, and the `bind_socket_to_interface` fallback in
+      `nvpn-fips-core`. Only the BSD CI job adds the `[patch]` section, so
+      every other platform keeps building pure crates.io code.
+- [ ] CI: FreeBSD build and tests (a FreeBSD VM action, or cross with a
+      sysroot as in the spike); the release attaches
+      `noscat-<tag>-x86_64-unknown-freebsd.tar.gz`.
+- [ ] OpenBSD and NetBSD: try the same; ship binaries for those that
+      build and pass, and record what fails for the others.
+- [ ] Docs: INSTALL's BSD section points at the binaries (`cargo install
+      noscat` keeps failing on the BSDs until upstream fixes it). A
+      FreeBSD port (with the patches) and pkgsrc-wip later, on demand.
+- [ ] When upstream ships the fixes, drop the patches; the upstream
+      draft stays unposted unless approved.
 
 ## Splits and healing
 
