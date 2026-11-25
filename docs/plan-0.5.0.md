@@ -84,9 +84,9 @@ Implementation notes from the rig:
 
 ## Phase 4: clients
 
-- [x] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events (debug APK builds and runs on a Pixel 9a; device dir `filesDir/device`, `members.json`; ten minute presence; `JoinRequest` only logged, inviting from the phone needs UI). FFI done (same function names; `mesh_*` use the running client; `MeshMember.admin/online/this_device` replace `is_owner`; new mesh events and `JoinRequest`). Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
+- [x] `noscat-ffi` surface and Kotlin bindings; Android app moved to the new events (debug APK builds and runs on a Pixel 9a; device dir `filesDir/device`, `members.json`; ten minute presence; `JoinRequest` only logged at first; both apps approve join requests since, see below). FFI done (same function names; `mesh_*` use the running client; `MeshMember.admin/online/this_device` replace `is_owner`; new mesh events and `JoinRequest`). Android needs no root for the optional full-VPN mode (`VpnService`), which becomes cheap once mesh addresses exist; still out of scope for 0.5.
 - [x] `noscat up --accept-joins` invites every device that sends a join request (the 0.4 `--auto-accept-joins` workflow); off by default, and the banner says anyone who knows the npub can ask.
-- [x] noscat-desktop moved to the new client; its `src/mesh.rs` glue shrinks or disappears (`mesh.rs` is a thin layer over `Client`; `[patch.crates-io]` points at this repo's `main` until release; device dir `device/`, `members.json`; dev image gains dbus-devel, clang-devel and the Vulkan/Wayland runtime, and `scripts/run.sh` runs the app in it, since the host is immutable). Neither app can create a mesh or approve a join request yet: both need new UI, which the user chose to keep unchanged for now, so a CLI device creates the mesh and invites.
+- [x] noscat-desktop moved to the new client; its `src/mesh.rs` glue shrinks or disappears (`mesh.rs` is a thin layer over `Client`; `[patch.crates-io]` points at this repo's `main` until release; device dir `device/`, `members.json`; dev image gains dbus-devel, clang-devel and the Vulkan/Wayland runtime, and `scripts/run.sh` runs the app in it, since the host is immutable). Neither app could create a mesh or approve a join request at first; approving came later (below), creating a mesh stays CLI only.
 - [x] CLI commands mapped onto the new model: `id`, `up`, `expose`, `serve`, `pipe`, `send`, `chat`, `clip`, `forward`, `mesh create|invite|join|remove|leave|members|qr`. One process runs a device (directory lock); other commands go through its loopback control channel or start the device themselves. State moved to the platform data directory. `tests/cli.rs` drives the binary end to end.
 - [x] Join requests (kind 21196 gift wrap to the scanned device) so the inviting side gets a prompt instead of typing an npub; restores 0.4's approve-on-request flow without an owner.
 - [x] Devices send their advert at start and answer a returning member's advert, so a just-started device (a one-shot CLI command) reaches members in seconds.
@@ -123,6 +123,11 @@ Implementation notes from the rig:
 - **Phase 5 waits for the user's test pass** of all three apps.
 - **Private meshes are in 0.5.0** (2026-11-25), so the user can test with noscat-relay on a new VPS.
 - **Git**: work happened on `v0.5.0` branches and moved to each repo's default branch (`main`, `master` for noscat-android) on 2026-11-24; all work continues there. No crates.io publishing and no tags until release. The apps build against noscat `main` until then.
+
+## Deferred until after the test pass (2026-11-25)
+
+- A device outside a mesh publishes its key package to the public default relays at start, even when it will join a private mesh through its own relay. Decide after testing whether to hold it back until a pairing code names relays.
+- The desktop app does not call `network_changed` on a network switch (the Android app does since 2026-11-25); paths recover by timeout.
 
 ## Open questions
 

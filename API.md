@@ -1,4 +1,4 @@
-# API.md - the app-facing API contract
+# API.md: the app-facing API contract
 
 The public surface the client apps consume: `noscat-client` (Rust, embedded
 directly by noscat-desktop) and `noscat-ffi` (UniFFI, consumed by
@@ -162,11 +162,11 @@ Peers are bech32 npubs.
 | `ForwardStopped` | `id, error` | Drop it from the UI list. |
 | `ChatMessage` | `peer, text` | |
 | `ChatDelivered` | `peer` | The member acknowledged the text. |
-| `ChatFailed` | `peer, error` | Keep the optimistic copy, mark undelivered. |
+| `ChatFailed` | `peer, error` | Keep the optimistic copy, mark undelivered, and offer a manual retry (noscat already tried a fresh connection once). |
 | `Clipboard` | `peer, text` | Put `text` on the system clipboard. |
 | `Stopped` | `what, error` | A background operation stopped. |
 | `MeshJoined` | `name` | This device is in a mesh now (created or joined). |
-| `Roster` | `members` | The member list changed. |
+| `Roster` | `members` | The member list changed; `members` is in `members()` order. |
 | `MemberSeen` | `peer, name` | A member's advert arrived. |
 | `MeshChangeUndone` | | A membership change of ours lost a race with another member's; retry it. |
 | `MeshLeft` | | Removed, or left. |

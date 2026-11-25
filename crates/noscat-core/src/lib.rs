@@ -1,17 +1,17 @@
 //! noscat-core: a decentralized mesh of devices over Nostr.
 //!
 //! Layering (ADR 0001 to 0007):
-//! - `identity` - one secp256k1 keypair per device: its Nostr identity,
+//! - `identity`: one secp256k1 keypair per device: its Nostr identity,
 //!   its FIPS node address, and its Marmot account.
-//! - `marmot` - the control plane: the mesh is a Marmot group on OpenMLS;
+//! - `marmot`: the control plane: the mesh is a Marmot group on OpenMLS;
 //!   membership, admin policy and endpoint adverts live there.
-//! - `dataplane` - the FIPS data plane: encrypted, NAT-traversing links to
+//! - `dataplane`: the FIPS data plane: encrypted, NAT-traversing links to
 //!   member devices, gated to the current roster.
-//! - `streams` - QUIC over FIPS: reliable streams between members.
-//! - `relay` - relay connections, back-off and presence bookkeeping.
-//! - `device` - the runtime: keeps relays, group, data plane and streams
+//! - `streams`: QUIC over FIPS: reliable streams between members.
+//! - `relay`: relay connections, back-off and presence bookkeeping.
+//! - `device`: the runtime: keeps relays, group, data plane and streams
 //!   in step for one device.
-//! - `apps` - the app protocols over streams: file transfer, chat and
+//! - `apps`: the app protocols over streams: file transfer, chat and
 //!   clipboard text, TCP forwarding.
 
 pub mod apps;
@@ -99,7 +99,7 @@ fn percent_decode(s: &str) -> Option<String> {
 }
 
 /// A sensible default friendly name for this device: the hostname on unix
-/// systems (Android reports "localhost" - apps should pass something better,
+/// systems (Android reports "localhost"; apps should pass something better,
 /// e.g. the device model). Falls back to "noscat".
 pub fn default_device_name() -> String {
     #[cfg(unix)]

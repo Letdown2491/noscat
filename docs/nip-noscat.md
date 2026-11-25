@@ -1,4 +1,4 @@
-# NIP-draft: noscat - a private device mesh on Marmot and FIPS
+# NIP-draft: noscat, a private device mesh on Marmot and FIPS
 
 `draft` `optional`
 

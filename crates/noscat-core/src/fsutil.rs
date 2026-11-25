@@ -1,13 +1,13 @@
 //! Durable small-file writes: the crash windows an audit found around
 //! the identity, mesh sidecar, and journal files. Three primitives:
 //!
-//! - [`write_atomic`] - temp file, fsync, rename: a crash mid-write
+//! - [`write_atomic`]: temp file, fsync, rename: a crash mid-write
 //!   leaves the previous contents intact instead of a truncated file
 //!   that fails to parse on every later start.
-//! - [`create_secret_file`] - create-new with owner-only mode on unix;
+//! - [`create_secret_file`]: create-new with owner-only mode on unix;
 //!   the create-race loser gets `Ok(false)` and reads the winner, so
 //!   two concurrent initializations never clobber each other's key.
-//! - [`heal_secret_mode`] - best-effort chmod 0600 for files written
+//! - [`heal_secret_mode`]: best-effort chmod 0600 for files written
 //!   by older versions with default permissions.
 //!
 //! Secret files (the identity and the mesh state) can also be sealed at
@@ -190,7 +190,7 @@ fn new_secret_options() -> std::fs::OpenOptions {
 /// Create `path` with `contents` ONLY if it does not already exist.
 /// Returns `Ok(true)` when this call created the file, `Ok(false)` when
 /// it already existed (a concurrent initialization won the create race:
-/// the caller must then READ the file and adopt that identity - it must
+/// the caller must then READ the file and adopt that identity; it must
 /// never overwrite, which would silently fork the device's key).
 /// `Err` is a real I/O failure.
 pub fn create_secret_file(path: &Path, contents: &str) -> io::Result<bool> {

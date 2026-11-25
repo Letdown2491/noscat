@@ -106,7 +106,7 @@ pub fn note_relay_success(url: &str) {
 }
 
 /// The relays worth dialing right now: those not in a rate-limit
-/// cool-down. Never returns an empty list - if every relay is cooling
+/// cool-down. Never returns an empty list: if every relay is cooling
 /// down, all of them come back (a backed-off relay is still better than
 /// going dark; the worst it does is hit a 429 again).
 pub fn healthy_relays(relays: &[String]) -> Vec<String> {
@@ -135,7 +135,7 @@ pub fn healthy_relays(relays: &[String]) -> Vec<String> {
 /// Presence tracking for mesh-mates: when each member's advert was last
 /// received. Keyed by hex npub (the mesh roster's native form), so the
 /// client and UIs never need the nostr types to query it. Held by the
-/// caller (the node's client), so relay reconnects never wipe it - only
+/// caller (the node's client), so relay reconnects never wipe it; only
 /// fresh arrivals update it, and a member with no recent advert simply
 /// reads as offline rather than erroring.
 pub struct Presence {
@@ -153,7 +153,7 @@ impl Presence {
     /// node feeds every valid advert on the relays, so a flood of
     /// distinct npubs must not grow the map without end on a long-running
     /// process. Entries older than the advert TTL already read as
-    /// offline - expired ones are dropped; past that, the oldest evicts.
+    /// offline; expired ones are dropped; past that, the oldest evicts.
     pub fn note_at(&self, npub: &str, at: std::time::Instant) {
         let mut map = self.last_seen.lock().unwrap_or_else(|p| p.into_inner());
         if !map.contains_key(npub) && map.len() >= PRESENCE_CAP {

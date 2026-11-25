@@ -33,7 +33,7 @@ The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-nos
 ## Install
 
 noscat is a single binary, packaged for every major platform (the Linux
-packages are static, with no dependencies): Linux (x86_64 and aarch64 - deb, rpm, apk, and a live pacman
+packages are static, with no dependencies): Linux (x86_64 and aarch64: deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
 bottles), and Windows (Scoop and winget, winget in community review). Nix
 and cargo cover everything else, including the BSDs from source.
@@ -59,20 +59,20 @@ and a man page.
 
 ## Clients
 
-The CLI is not the only way to use noscat - the same protocol crate powers
+The CLI is not the only way to use noscat: the same protocol crate powers
 native GUI clients:
 
-- **[noscat-android](https://github.com/Letdown2491/noscat-android)** - native
+- **[noscat-android](https://github.com/Letdown2491/noscat-android)**: native
   Kotlin (Compose) app over a Rust UniFFI bridge: chat, file send/receive,
   port forwards, and joining a mesh by scanning a member's QR.
-- **[noscat-desktop](https://github.com/Letdown2491/noscat-desktop)** - pure
+- **[noscat-desktop](https://github.com/Letdown2491/noscat-desktop)**: pure
   Rust desktop app (GPUI), embedding `noscat-client` directly with no FFI
   layer: feature parity with the Android client plus expose/serve.
 
-Neither app can create a mesh or approve a join request yet: a CLI device
-creates the mesh and invites the apps.
+Neither app can create a mesh yet: a CLI device creates it. Once in, the
+apps approve join requests like any member (Devices tab).
 
-Both repos contain no protocol code - the wire format lives in this
+Both repos contain no protocol code; the wire format lives in this
 workspace and is specified in the draft NIP above, so the clients are
 interoperable by construction.
 
@@ -85,14 +85,14 @@ mesh is created again after upgrading every device. The release plan and
 what still blocks it are in [`docs/plan-0.5.0.md`](docs/plan-0.5.0.md);
 the design decisions are in [`docs/adr/`](docs/adr/).
 
-- `crates/noscat-core` - the library: `dataplane` (FIPS), `streams` (QUIC
+- `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them
   to relays), `apps` (file transfer, text, TCP forwarding).
-- `crates/noscat-client` - the UI-facing layer: one `Client` per device
+- `crates/noscat-client`: the UI-facing layer: one `Client` per device
   with an event stream. Graphical clients embed it.
-- `crates/noscat-ffi` - UniFFI bindings over `noscat-client` for mobile
+- `crates/noscat-ffi`: UniFFI bindings over `noscat-client` for mobile
   apps (Kotlin today, Swift later).
-- `crates/noscat` - the CLI: a terminal skin over `noscat-client`.
+- `crates/noscat`: the CLI: a terminal skin over `noscat-client`.
 
 ## Using the CLI
 
@@ -105,7 +105,7 @@ Windows); `--dir` or `NOSCAT_DIR` picks another. `NOSCAT_IDENTITY` (hex
 or nsec) supplies the identity instead of the stored file.
 
 ```
-noscat id      # this device's npub and pairing QR
+noscat id      # this device's npub and its QR (in a mesh, `noscat mesh qr`)
 noscat up      # run it: receive files, chat, serve members (Ctrl-C to stop)
 ```
 
@@ -147,10 +147,11 @@ noscat up --reachable          # this one has UDP 41641 forwarded, or a public a
 On each new device:
 
 ```
-noscat mesh join <npub of a device in the mesh>
+noscat mesh join <pairing code or npub of a device in the mesh>
 ```
 
-`mesh join` prints the new device's npub and QR, sends the device it
+The pairing code is what `noscat mesh qr` (or `up`) prints on a member:
+`noscat:<npub>`, plus the mesh's relays in a private mesh. `mesh join` prints the new device's npub and QR, sends the device it
 names a join request and waits. On that device, `up` prints
 
 ```

@@ -30,7 +30,7 @@ Works on Linux without a C toolchain: Linux users get a prebuilt bottle
 ## Linux packages
 
 `.deb`, `.rpm`, and `.apk` attach to every release, built from static musl
-binaries - no dependencies. Grab them from the release page.
+binaries with no dependencies. Grab them from the release page.
 
 ## Arch Linux
 

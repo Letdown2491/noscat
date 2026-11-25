@@ -1,6 +1,6 @@
 //! Node identity: one secp256k1 keypair serves as the Nostr identity, the mesh
-//! identity, and (later) the Noise static key - the same pattern FIPS uses
-//! ("there is no separate Nostr key" - the FIPS design this mirrors).
+//! identity, and (later) the Noise static key, the same pattern FIPS uses
+//! ("there is no separate Nostr key": the FIPS design this mirrors).
 
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::*;

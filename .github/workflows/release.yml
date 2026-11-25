@@ -1,6 +1,6 @@
 # Release: tag v* builds every package and attaches it to the GitHub
 # release. One leg per architecture, each on a native runner (no cross
-# toolchains - musl.cc is unreachable from runners, and native musl-gcc
+# toolchains: musl.cc is unreachable from runners, and native musl-gcc
 # comes from the distro's musl-tools package).
 #
 # - Linux (x86_64 + aarch64): static musl binaries -> deb/rpm/apk/archlinux
