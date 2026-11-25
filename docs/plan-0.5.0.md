@@ -129,6 +129,7 @@ Implementation notes from the rig:
 - [x] (Decided 2026-11-25: when the pairing code names relays, use only those.) A device started to join with a code naming relays (`mesh join`, the apps' join) uses only them from its first moment: `DeviceConfig.join_relays` / `ClientConfig.join_relays`. Before, it published its key package and relay lists to the public defaults at start. The private-mesh test checks a live public relay gets nothing from the joiner.
 - [x] The desktop app watches this machine's addresses (every 3 s, `if-addrs`) and calls `network_changed` when they change, as the Android app does on a new default network.
 - [x] FreeBSD build moved out of the 0.5.0 release (2026-11-25): [#19](https://github.com/Letdown2491/noscat/issues/19), done after release.
+- [ ] After 0.5.0: STUN for private meshes ([#1](https://github.com/Letdown2491/noscat/issues/1)). noscat-relay serves STUN, the mesh and its QR carry their STUN servers like their relays, so a private mesh reaches no third party at all. STUN today goes to Google and Cloudflare, which see each device's IP.
 
 ## Open questions
 
