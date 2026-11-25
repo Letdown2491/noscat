@@ -699,7 +699,19 @@ impl Device {
         let Ok(_one) = self.inner.catching_up.try_lock() else {
             return false;
         };
-        let pages = relays.iter().map(|r| self.page_relay(r, ids, since));
+        // Only relays that are up: a dead one would hold the catch-up (and
+        // the subscription after it) for the whole fetch timeout. One that
+        // comes up later gets the live subscription.
+        let up: BTreeSet<String> = self
+            .inner
+            .client
+            .relays()
+            .await
+            .iter()
+            .filter(|(_, r)| r.status() == RelayStatus::Connected)
+            .map(|(u, _)| relay_key(u.as_str()))
+            .collect();
+        let pages = relays.iter().filter(|r| up.contains(&relay_key(r))).map(|r| self.page_relay(r, ids, since));
         let mut events: HashMap<EventId, Event> = HashMap::new();
         for evs in futures_util::future::join_all(pages).await {
             events.extend(evs.into_iter().map(|e| (e.id, e)));
@@ -757,12 +769,13 @@ impl Device {
             match oldest {
                 Some(o) if o.as_secs() <= since => break,
                 Some(o) if fresh > 0 => until = Some(o),
-                // Nothing new, but the page reached back only to the second
-                // it started from: that second holds more events than the
-                // relay returns at once. Nostr pages by whole seconds, so
-                // step past it; some of its events may be missed.
+                // Nothing new, and the page reached back only to the second
+                // it started from: usually that second is done (the walk
+                // reached the oldest event), rarely it holds more events
+                // than the relay returns at once (Nostr pages by whole
+                // seconds, so some of those would be missed). Either way,
+                // step past it; that costs one more query.
                 Some(o) if until == Some(o) => {
-                    tracing::warn!(relay, at = o.as_secs(), "more group events in one second than the relay returns; some may be missed");
                     until = Some(Timestamp::from_secs(o.as_secs().saturating_sub(1)));
                 }
                 _ => break,

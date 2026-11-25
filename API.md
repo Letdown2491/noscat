@@ -111,9 +111,9 @@ Mesh:
 | `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
-| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, connected`. `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. |
+| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, connected`. `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. Sorted for display: this device first, then by name (case-insensitive), then unnamed devices, ties by npub; presence never reorders it, and `Roster` events carry the same order. |
 | `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
-| `network_changed()` | `()` | Re-check paths after a network switch. |
+| `network_changed()` | `()` | Re-check paths after a network switch. Apps call it when the platform reports a new default network (Wi-Fi to cellular and back): without it, paths through the old address take minutes to time out. |
 | `events()` | `Option<Receiver<Event>>` | Take the receiver once; pump it forever. |
 
 Receiving:
@@ -134,7 +134,7 @@ Sending:
 | `pipe_stdio(target)` | `()` | Netcat mode, dial side. Blocks. |
 | `send_file(path, target)` | `u64` | Async; returns the transfer id that its `Transfer*` events carry. Resumes a partial the receiver kept. |
 | `cancel_transfer(target, path)` | `bool` | The receiver keeps its partial for a resume. |
-| `send_chat(target, text)` / `send_clipboard(target, text)` | `()` | Delivery is `ChatDelivered` or `ChatFailed`. Text up to 64 KiB. |
+| `send_chat(target, text)` / `send_clipboard(target, text)` | `()` | Delivery is `ChatDelivered` or `ChatFailed`. Text up to 64 KiB. A send that fails on an existing connection is tried once more on a fresh one. Never resent automatically after `ChatFailed` (the member may have it already); apps offer a manual retry. |
 | `forward(target, local)` | `u64` | Listen on `local`; each TCP connection goes to the member's default service. |
 | `forward_port(target, local, remote_port)` | `u64` | Same, to a port the member serves (`serve_port`). |
 | `list_forwards()` / `cancel_forward(id)` | `Vec<ForwardInfo>` / `bool` | `ForwardInfo { id, target, local, remote_port }` (`remote_port` 0 = default service). `cancel_forward` is confirmed by `ForwardStopped`. |

@@ -456,7 +456,8 @@ impl Inner {
             .lock()
             .map(|m| m.iter().filter(|(_, c)| c.inner.close_reason().is_none()).map(|(k, _)| *k).collect())
             .unwrap_or_default();
-        self.device
+        let mut members: Vec<Member> = self
+            .device
             .members()
             .await
             .into_iter()
@@ -470,7 +471,9 @@ impl Inner {
                 reachable: m.reachable,
                 connected: !m.this_device && (direct.contains(&m.device) || live.contains(&m.device)),
             })
-            .collect()
+            .collect();
+        sort_members(&mut members);
+        members
     }
 
     /// While serving, keep a connection to every member whose advert is
@@ -647,7 +650,17 @@ impl Inner {
         let res = async {
             let pk = parse_target(&target)?;
             let c = self.conn(pk).await?;
-            apps::send_text(&c, kind, &text).await?;
+            if let Err(first) = apps::send_text(&c, kind, &text).await {
+                // The connection may be stale (the network changed under
+                // it): drop it and try once more on a fresh one.
+                tracing::debug!(peer = %npub_of(&pk), "text send failed, retrying on a new connection: {first}");
+                c.inner.close(0u32.into(), b"retry");
+                if let Ok(mut m) = self.conns.lock() {
+                    m.remove(&pk);
+                }
+                let c = self.conn(pk).await?;
+                apps::send_text(&c, kind, &text).await?;
+            }
             Ok::<_, ClientError>(npub_of(&pk))
         }
         .await;
@@ -1215,4 +1228,50 @@ async fn bridge_stdio(mut s: SendStream, mut r: RecvStream) -> Result<(), Client
     b?;
     a?;
     Ok(())
+}
+
+/// The order every UI shows members in: this device first, then by name
+/// (case-insensitive), then devices with no name yet, each group by npub
+/// for a stable order. Presence never reorders the list.
+fn sort_members(members: &mut [Member]) {
+    members.sort_by(|a, b| {
+        let key = |m: &Member| {
+            let name = m.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_lowercase);
+            (!m.this_device, name.is_none(), name, m.npub.clone())
+        };
+        key(a).cmp(&key(b))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(npub: &str, name: Option<&str>, this_device: bool, online: bool) -> Member {
+        Member {
+            npub: npub.into(),
+            name: name.map(str::to_string),
+            admin: true,
+            this_device,
+            online,
+            last_seen_secs: None,
+            reachable: false,
+            connected: online,
+        }
+    }
+
+    #[test]
+    fn members_sort_self_first_then_names_then_unnamed() {
+        let mut v = vec![
+            m("npub1d", None, false, true),
+            m("npub1c", Some("vps"), false, false),
+            m("npub1b", Some("Motherbox"), false, true),
+            m("npub1a", None, false, false),
+            m("npub1z", Some("zed"), true, true),
+            m("npub1e", Some("alpha"), false, false),
+        ];
+        sort_members(&mut v);
+        let order: Vec<&str> = v.iter().map(|m| m.npub.as_str()).collect();
+        assert_eq!(order, ["npub1z", "npub1e", "npub1b", "npub1c", "npub1a", "npub1d"]);
+    }
 }
