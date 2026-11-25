@@ -14,6 +14,17 @@ use nostr_relay_builder::prelude::{LocalRelay, RelayBuilder, RelayBuilderNip42, 
 
 const T: Duration = Duration::from_secs(30);
 
+/// With NOSCAT_TEST_LOG set (a RUST_LOG filter), devices log into the
+/// test's captured output, which the harness prints when the test fails.
+fn logs() {
+    if let Ok(filter) = std::env::var("NOSCAT_TEST_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
+    }
+}
+
 fn free_port() -> SocketAddr {
     std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
 }
@@ -223,6 +234,7 @@ async fn state_survives_a_restart() {
 /// relay is shut down first, so anything still using it would fail.
 #[tokio::test(flavor = "multi_thread")]
 async fn private_mesh_on_its_own_relay() {
+    logs();
     let public = LocalRelay::new(RelayBuilder::default());
     public.run().await.unwrap();
     let public_url = public.url().await.to_string();

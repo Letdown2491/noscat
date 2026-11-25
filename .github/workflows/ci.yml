@@ -17,6 +17,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Tests that call logs() (noscat-core tests/device.rs) print device logs
+# when they fail; the others ignore it.
+env:
+  NOSCAT_TEST_LOG: "noscat_core=debug,nostr_relay_pool=debug,warn"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
