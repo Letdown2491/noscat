@@ -1,0 +1,20 @@
+# The packaged user unit: `systemctl --user enable --now noscat` runs
+# `noscat up` at login (and at boot with `loginctl enable-linger`). Options
+# for `up` go in ~/.config/noscat/service.env, for example:
+#   NOSCAT_UP_ARGS=--reachable --to 127.0.0.1:22
+# `noscat service install` writes its own unit in ~/.config/systemd/user,
+# which takes precedence over this one.
+[Unit]
+Description=noscat device (your device mesh)
+Documentation=man:noscat(1)
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/noscat/service.env
+ExecStart=/usr/bin/noscat up $NOSCAT_UP_ARGS
+StandardInput=null
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -33,6 +33,7 @@ package() {
     cd "$pkgname-$pkgver"
     install -Dm755 target/release/noscat -t "$pkgdir/usr/bin/"
     install -Dm644 packaging/noscat.1 "$pkgdir/usr/share/man/man1/noscat.1"
+    install -Dm644 packaging/systemd/noscat.service "$pkgdir/usr/lib/systemd/user/noscat.service"
     install -Dm644 noscat.bash "$pkgdir/usr/share/bash-completion/completions/noscat"
     install -Dm644 _noscat "$pkgdir/usr/share/zsh/site-functions/_noscat"
     install -Dm644 noscat.fish "$pkgdir/usr/share/fish/vendor_completions.d/noscat.fish"

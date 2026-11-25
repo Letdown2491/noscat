@@ -44,15 +44,25 @@ class Noscat < Formula
     fish_completion.install "completions/noscat.fish"
   end
 
+  # `brew services start noscat` runs `noscat up` at login. For options
+  # (--reachable, --to), use `noscat service install` instead.
+  service do
+    run [opt_bin/"noscat", "up"]
+    keep_alive successful_exit: false
+    log_path var/"log/noscat.log"
+    error_log_path var/"log/noscat.log"
+  end
+
   def caveats
     <<~EOS
-      Identities are ephemeral by default; pin them with --identity (or the
-      NOSCAT_IDENTITY variable). Mesh commands use ~/.noscat/device by
-      default; override with --dir.
+      Each device keeps its identity and mesh in
+      ~/Library/Application Support/noscat (~/.local/share/noscat on Linux).
+      To keep this device running in the background with your options:
+        noscat --reachable service install
     EOS
   end
 
   test do
-    assert_match(/^nsc/, shell_output("#{bin}/noscat keygen"))
+    assert_match(/^npub1/, shell_output("#{bin}/noscat keygen"))
   end
 end

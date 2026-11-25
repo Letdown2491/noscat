@@ -119,6 +119,28 @@ run, and a running device tells the members right away.
 .B \-\-name
 overrides it for one run.
 .TP
+.B service install \fR[\fIup options\fR]
+Run
+.B noscat up
+in the background at login, with the given
+.B up
+options and global options (such as
+.BR \-\-reachable ).
+On Linux it writes the systemd user unit
+.IR ~/.config/systemd/user/noscat.service ,
+starts it, and enables lingering so it also runs at boot and after
+logout; logs:
+.BR "journalctl \-\-user \-u noscat" .
+On macOS it installs a launchd agent logging to
+.IR ~/Library/Logs/noscat.log .
+Installing again replaces it.
+.TP
+.B service uninstall
+Stop and remove it.
+.TP
+.B service status
+Whether it runs, with its latest log lines.
+.TP
 .BI completions " shell"
 Print shell completions (bash, elvish, fish, powershell, zsh).
 .PP

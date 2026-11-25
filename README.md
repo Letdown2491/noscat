@@ -113,6 +113,28 @@ Only one process runs a device. While `noscat up` runs, every other
 `noscat` command on the same directory goes through it; when nothing
 runs, a command starts the device just for itself.
 
+### Running in the background
+
+`noscat service install` keeps `noscat up` running at login, and at boot
+on Linux, with whatever options you give it, global ones included:
+
+```
+noscat --reachable service install --to 127.0.0.1:22
+noscat service status      # running? latest log lines
+noscat service uninstall
+```
+
+On Linux it writes a systemd user unit (`~/.config/systemd/user/noscat.service`),
+starts it, and enables lingering so it also runs at boot and after logout;
+logs are in `journalctl --user -u noscat`. On macOS it is a launchd agent
+logging to `~/Library/Logs/noscat.log`. Installing again replaces it.
+While the service runs, every other `noscat` command goes through it.
+
+Distribution packages also ship a plain user unit:
+`systemctl --user enable --now noscat`, with options for `up` in
+`~/.config/noscat/service.env` (`NOSCAT_UP_ARGS=--reachable`).
+Homebrew's `brew services start noscat` runs a plain `noscat up`.
+
 ### A mesh
 
 On the first device:
@@ -218,7 +240,10 @@ hostname and the Android app the phone model, both changeable in
 Settings) and sends it with its advert, inside the group, every two
 minutes. A rename goes out at once, so members see it within seconds,
 with no restart. A member is online while its latest advert is under ten minutes
-old.
+old, and connected while data can reach it (a direct link or a live
+connection; `noscat up` keeps one to every online member). Online but not
+connected means it is on another network and no member is reachable from
+the internet.
 
 ### Relays
 

@@ -6,6 +6,7 @@
 
 mod clipboard;
 mod control;
+mod service;
 mod ui;
 
 use std::net::{IpAddr, SocketAddr};
@@ -85,21 +86,11 @@ enum Command {
         show_secret: bool,
     },
     /// Run this device: receive files, chat, serve members until Ctrl-C.
-    Up {
-        /// Where received files go [default: ~/Downloads].
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Bridge members' default-service streams to this TCP service, e.g. 127.0.0.1:22.
-        #[arg(long)]
-        to: Option<SocketAddr>,
-        /// Let members forward to this local port by number (repeatable).
-        #[arg(long = "serve-port")]
-        serve_ports: Vec<u16>,
-        /// Invite every device that asks to join (scanned this device's QR, or
-        /// otherwise knows its npub) without asking. Off by default.
-        #[arg(long)]
-        accept_joins: bool,
-    },
+    Up(UpArgs),
+    /// Run `noscat up` in the background at login and boot (systemd user
+    /// unit on Linux, launchd agent on macOS).
+    #[command(subcommand)]
+    Service(ServiceCommand),
     /// Run this device and expose one TCP service to members.
     Expose {
         /// The local service, e.g. 127.0.0.1:8000.
@@ -154,6 +145,96 @@ enum Command {
     /// Emit shell completions (hidden; used by packaging).
     #[command(hide = true)]
     Completions { shell: Shell },
+}
+
+/// `up`'s own options, shared with `service install`.
+#[derive(Args, Clone)]
+struct UpArgs {
+    /// Where received files go [default: ~/Downloads].
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Bridge members' default-service streams to this TCP service, e.g. 127.0.0.1:22.
+    #[arg(long)]
+    to: Option<SocketAddr>,
+    /// Let members forward to this local port by number (repeatable).
+    #[arg(long = "serve-port")]
+    serve_ports: Vec<u16>,
+    /// Invite every device that asks to join (scanned this device's QR, or
+    /// otherwise knows its npub) without asking. Off by default.
+    #[arg(long)]
+    accept_joins: bool,
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Install and start the service, running `noscat up` with the options
+    /// given here (global ones like --reachable, --name, --relay too).
+    /// Installing again replaces it.
+    Install {
+        #[command(flatten)]
+        up: UpArgs,
+    },
+    /// Stop and remove the service.
+    Uninstall,
+    /// Show whether it runs, with its latest log lines.
+    Status,
+}
+
+/// The `noscat up` command line a service runs: this executable, `up`, its
+/// options, then the global ones (`--reachable` last: with no address it
+/// would otherwise swallow the next word). Paths are absolute, since a
+/// service starts elsewhere.
+fn service_argv(cli_dir: Option<&Path>, verbose: bool, d: &DeviceArgs, up: &UpArgs) -> Result<Vec<String>> {
+    let exe = std::env::current_exe().context("cannot find this executable")?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let abs = |p: &Path| std::path::absolute(p).map(|p| p.to_string_lossy().into_owned());
+    let mut a = vec![exe.to_string_lossy().into_owned(), "up".to_string()];
+    if let Some(out) = &up.out {
+        a.extend(["--out".into(), abs(out)?]);
+    }
+    if let Some(to) = up.to {
+        a.extend(["--to".into(), to.to_string()]);
+    }
+    for p in &up.serve_ports {
+        a.extend(["--serve-port".into(), p.to_string()]);
+    }
+    if up.accept_joins {
+        a.push("--accept-joins".into());
+    }
+    if verbose {
+        a.push("--verbose".into());
+    }
+    // An explicit dir, or NOSCAT_DIR (the service has no such variable).
+    let dir = cli_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("NOSCAT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from));
+    if let Some(dir) = dir {
+        a.extend(["--dir".into(), abs(&dir)?]);
+    }
+    for r in &d.relays {
+        a.extend(["--relay".into(), r.clone()]);
+    }
+    if let Some(l) = d.listen {
+        a.extend(["--listen".into(), l.to_string()]);
+    }
+    if let Some(n) = &d.name {
+        a.extend(["--name".into(), n.clone()]);
+    }
+    for p in &d.peers {
+        a.extend(["--peer".into(), p.clone()]);
+    }
+    if d.no_lan {
+        a.push("--no-lan".into());
+    }
+    for s in &d.stun {
+        a.extend(["--stun".into(), s.clone()]);
+    }
+    match d.reachable.as_deref() {
+        Some("") => a.push("--reachable".into()),
+        Some(addr) => a.push(format!("--reachable={addr}")),
+        None => {}
+    }
+    Ok(a)
 }
 
 #[derive(Subcommand)]
@@ -428,7 +509,27 @@ fn main() -> Result<()> {
             print_qr(&npub);
             println!("{npub}");
         }
-        Command::Up { out, to, serve_ports, accept_joins } => {
+        Command::Service(cmd) => match cmd {
+            ServiceCommand::Install { up } => {
+                if std::env::var("NOSCAT_IDENTITY").is_ok_and(|s| !s.trim().is_empty()) {
+                    bail!("NOSCAT_IDENTITY is set, but a service uses the identity file in the device directory; unset it");
+                }
+                // A device already running here that is not the service
+                // (a `noscat up` in a terminal) would make the service fail.
+                if !service::active() {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    if rt.block_on(control::connect(&dir)).is_some() {
+                        bail!("this device is already running (a `noscat up`?); stop it, then install the service");
+                    }
+                }
+                let argv = service_argv(cli.dir.as_deref(), cli.verbose, d, &up)?;
+                service::install(&argv)?;
+                println!("runs: {}", argv.join(" "));
+            }
+            ServiceCommand::Uninstall => service::uninstall()?,
+            ServiceCommand::Status => service::status()?,
+        },
+        Command::Up(UpArgs { out, to, serve_ports, accept_joins }) => {
             let out = out.unwrap_or_else(|| {
                 std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
@@ -513,4 +614,31 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `service install` parses into the service's command line, and
+    /// that the command line parses back as `up` with the same options.
+    #[test]
+    fn service_argv_round_trips() {
+        let cli = Cli::try_parse_from([
+            "noscat", "--reachable", "--name", "home box", "--relay", "wss://r.example", "service", "install",
+            "--to", "127.0.0.1:22", "--serve-port", "8080", "--out", "inbox",
+        ])
+        .unwrap();
+        let Command::Service(ServiceCommand::Install { up }) = &cli.command else { panic!("not service install") };
+        let argv = service_argv(None, false, &cli.device, up).unwrap();
+        assert_eq!(argv.last().map(String::as_str), Some("--reachable"));
+        assert!(Path::new(&argv[argv.iter().position(|a| a == "--out").unwrap() + 1]).is_absolute());
+        let back = Cli::try_parse_from(&argv).unwrap();
+        let Command::Up(u) = back.command else { panic!("not up") };
+        assert_eq!(u.to, Some("127.0.0.1:22".parse().unwrap()));
+        assert_eq!(u.serve_ports, vec![8080]);
+        assert_eq!(back.device.reachable.as_deref(), Some(""));
+        assert_eq!(back.device.name.as_deref(), Some("home box"));
+        assert_eq!(back.device.relays, vec!["wss://r.example".to_string()]);
+    }
 }

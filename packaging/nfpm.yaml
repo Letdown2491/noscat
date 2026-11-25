@@ -20,6 +20,10 @@ contents:
     dst: /usr/share/man/man1/noscat.1
     file_info:
       mode: 0644
+  - src: ./packaging/systemd/noscat.service
+    dst: /usr/lib/systemd/user/noscat.service
+    file_info:
+      mode: 0644
   - src: ./staging/completions/noscat.bash
     dst: /usr/share/bash-completion/completions/noscat
     file_info:
