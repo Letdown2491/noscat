@@ -117,6 +117,8 @@ impl AsyncUdpSocket for FipsSocket {
         Box::pin(AlwaysWritable)
     }
 
+    // quinn calls this holding its connection lock: the book lock taken
+    // here must never be held by anyone calling into quinn.
     fn try_send(&self, t: &Transmit) -> io::Result<()> {
         let to = self
             .book
@@ -580,11 +582,11 @@ impl Streams {
         let me = device_name(&self.dp.device());
         loop {
             let incoming = self.endpoint.accept().await?;
-            let from = self
-                .book
-                .lock()
-                .ok()
-                .and_then(|b| b.by_addr.get(&incoming.remote_address()).copied());
+            // Never call into quinn while holding the book: quinn's
+            // connection driver holds its connection lock while it calls
+            // `try_send`, which takes the book (a lock-order deadlock).
+            let addr = incoming.remote_address();
+            let from = self.book.lock().ok().and_then(|b| b.by_addr.get(&addr).copied());
             if from.is_some_and(|p| !self.is_allowed(&p)) {
                 incoming.refuse();
                 continue;
@@ -600,11 +602,8 @@ impl Streams {
                 conn.close(1u32.into(), b"wrong device");
                 continue;
             }
-            let peer = self
-                .book
-                .lock()
-                .ok()
-                .and_then(|b| b.by_addr.get(&conn.remote_address()).copied());
+            let addr = conn.remote_address();
+            let peer = self.book.lock().ok().and_then(|b| b.by_addr.get(&addr).copied());
             let Some(peer) = peer.filter(|p| self.is_allowed(p)) else {
                 conn.close(2u32.into(), b"not a member");
                 self.refused
