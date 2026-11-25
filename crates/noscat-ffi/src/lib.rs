@@ -38,7 +38,9 @@ pub struct Identity {
 /// Client configuration.
 #[derive(uniffi::Record)]
 pub struct ClientConfig {
-    /// The identity secret (hex or nsec). None = an ephemeral one.
+    /// The identity secret (hex or nsec). None = the device dir's
+    /// `identity.nsec` (created if missing, sealed under a storage key), or
+    /// an ephemeral one without a device dir.
     pub identity_secret: Option<String>,
     /// Relay URLs; None uses the defaults.
     pub relays: Option<Vec<String>>,
@@ -345,9 +347,12 @@ impl NoscatClient {
     #[uniffi::constructor]
     pub fn new(config: ClientConfig, listener: Box<dyn EventListener>) -> Result<Self, NoscatError> {
         let mut client = noscat_client::Client::start(noscat_client::ClientConfig {
-            identity: match &config.identity_secret {
-                Some(s) => noscat_client::IdentitySource::Secret(s.trim().to_string()),
-                None => noscat_client::IdentitySource::Ephemeral,
+            // No secret with a device dir: the dir's own identity.nsec
+            // (sealed when a storage key is set), never read by the app.
+            identity: match (&config.identity_secret, &config.mesh_dir) {
+                (Some(s), _) => noscat_client::IdentitySource::Secret(s.trim().to_string()),
+                (None, Some(dir)) => noscat_client::IdentitySource::File(identity_file(Path::new(dir))),
+                (None, None) => noscat_client::IdentitySource::Ephemeral,
             },
             relays: config.relays.clone(),
             listen: config.listen_port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p))),

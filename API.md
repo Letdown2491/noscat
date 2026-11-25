@@ -212,7 +212,9 @@ same `mesh_dir`), and otherwise run the device just for the call.
 
 ### Records
 
-- `ClientConfig { identity_secret?, relays?, mesh_dir?, device_name?, listen_port? }`.
+- `ClientConfig { identity_secret?, relays?, mesh_dir?, device_name?, listen_port? }`. With `mesh_dir` and no `identity_secret`, the client uses the
+  dir's `identity.nsec`; apps should do that rather than read the file,
+  which is sealed under a storage key.
   `listen_port` None = any free port (0.4 defaulted to 41641).
 - `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device, reachable }`.
   0.4's `is_owner` is gone: every device is an admin.
