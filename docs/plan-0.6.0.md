@@ -86,6 +86,29 @@ Admission is unchanged: links of any kind are members only (ADR 0005).
 - [ ] Invites, removals, names and presence arrive on a Bluetooth-only
       device; it catches up when its relay route comes back.
 
+## Splits and healing
+
+Decided 2026-11-25: no relay or event sync on each device. Relays carry
+only the control plane (membership, invites, names, presence), and a
+membership change happens only once a relay has accepted it (`commit`
+publishes first and drops the change otherwise). So a group of devices
+cut off from every relay (an island) keeps its data plane (chat, files,
+forwards among its members, over any link including Bluetooth) but
+cannot change membership; when a route to a relay comes back, its
+devices catch up in order. History stays linear: nothing to reconcile.
+
+- [ ] Relays through the mesh work in either direction: whichever member
+      regains a relay route serves the others (phase 4).
+- [ ] An island device that tries to invite or remove gets a clear error
+      (no relay reachable), in the CLI and both apps.
+- [ ] Test in the netns rig: four devices, split into two islands, the
+      online island adds a device and removes one; on heal the offline
+      island converges on the same members.
+- [ ] Document the two edge cases: a removal made during a split takes
+      effect for the other island only once it catches up; two islands
+      that each reach a different relay could both commit, which the
+      convergence rule (ADR 0007) resolves within 5 commits per side.
+
 ## Phase 5: release
 
 - [ ] Docs in all three repos (README, API, man page, nip-noscat for any
