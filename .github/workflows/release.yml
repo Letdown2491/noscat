@@ -243,6 +243,10 @@ jobs:
           tar -czf dist/noscat-winget-$GITHUB_REF_NAME.tar.gz winget
           cat aur/PKGBUILD winget/*.yaml
 
+      - name: Install libdbus and libclang (cargo publish builds each crate on glibc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libclang-dev
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
