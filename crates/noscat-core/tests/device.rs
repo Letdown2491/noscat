@@ -273,3 +273,56 @@ async fn private_mesh_on_its_own_relay() {
         let _ = std::fs::remove_dir_all(&n.dir);
     }
 }
+
+/// A member that was offline catches up on everything, even from a relay
+/// that returns only the newest few events of a query (public relays cap
+/// results, newest first). Before paging, it got the newest slice, missed
+/// the commit adding a member and moved its sync point past it.
+#[tokio::test(flavor = "multi_thread")]
+async fn catch_up_through_a_capped_relay() {
+    let relay = LocalRelay::new(RelayBuilder::default().max_filter_limit(8).default_filter_limit(8));
+    relay.run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (na, nb, nc) = (node("ca"), node("cb"), node("cc"));
+    let all = [&na, &nb, &nc];
+    let a = start(&na, "alpha", &url, &all).await;
+    let b = start(&nb, "bravo", &url, &all).await;
+    a.create("home").await.unwrap();
+    invite_and_join(&a, &b).await;
+    b.shutdown().await;
+
+    // While b is away: a member joins, then plenty of traffic buries the
+    // commit under far more than the relay returns at once.
+    let c = start(&nc, "charlie", &url, &all).await;
+    invite_and_join(&a, &c).await;
+    // Spread over seconds like real traffic: Nostr pages by whole seconds.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    for i in 0..24 {
+        a.send_app(21196, Vec::new(), format!("filler {i}")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+
+    let b = start(&nb, "bravo", &url, &all).await;
+    until("b sees charlie", || async { b.members().await.iter().any(|m| m.device == c.device()) }).await;
+    // And b follows the current epoch: a new message reaches it.
+    let mut rx = b.subscribe();
+    a.send_app(21196, Vec::new(), "after catch-up".into()).await.unwrap();
+    let got = tokio::time::timeout(T, async {
+        loop {
+            if let Ok(DeviceEvent::App(ev)) = rx.recv().await {
+                if ev.content == "after catch-up" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(got.is_ok(), "b is not on the current epoch");
+
+    for d in [a, b, c] {
+        d.shutdown().await;
+    }
+    for n in all {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}

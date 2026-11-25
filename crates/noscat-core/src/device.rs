@@ -26,7 +26,8 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use nostr::prelude::{Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
 use nostr_sdk::prelude::{
-    Authenticator, Client, ClientNotification, Keys, RelayMessage, RelayStatus, RelayUrl, SignerAuthenticator, SubscriptionId,
+    Authenticator, Client, ClientNotification, EventId, Keys, RelayMessage, RelayStatus, RelayUrl, ReqTarget,
+    SignerAuthenticator, SubscriptionId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
@@ -67,6 +68,17 @@ const SUB_INBOX: &str = "noscat-inbox";
 /// Wait before subscribing again after an own relay refused (see
 /// [`Device::on_closed`]).
 const CLOSED_RETRY: Duration = Duration::from_secs(15);
+/// Events one catch-up query asks a relay for. Relays cap results on their
+/// own (often at a few hundred, newest first); catch-up pages backwards
+/// until a relay has nothing more, whatever its cap.
+const CATCH_UP_PAGE: usize = 500;
+/// Most pages per relay in one catch-up: a guard against a relay that
+/// keeps answering, not a limit a mesh reaches (that is 100,000 events).
+const CATCH_UP_MAX_PAGES: usize = 200;
+/// The live group subscription starts this far before the catch-up did,
+/// so nothing published meanwhile falls between the two (duplicates are
+/// dropped).
+const LIVE_OVERLAP_SECS: u64 = 60;
 
 /// Errors from the device runtime.
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +200,8 @@ struct Inner {
     /// it logs in to the mesh's relays already, since a members-only relay
     /// takes the commit only from a logged-in member.
     going_private: std::sync::atomic::AtomicBool,
+    /// One catch-up at a time.
+    catching_up: Mutex<()>,
 }
 
 /// A running device. Cheap to clone; stops when [`Device::shutdown`] is
@@ -279,6 +293,13 @@ impl Authenticator for OwnRelayAuth {
     }
 }
 
+/// Group events for these routing ids.
+fn group_filter(ids: &[[u8; 32]]) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(GROUP_KIND))
+        .custom_tags(SingleLetterTag::from_char('h').expect("h is a single-letter tag"), ids.iter().map(hex::encode))
+}
+
 fn union(a: &[String], b: &[String]) -> Vec<String> {
     let mut v: Vec<String> = a.iter().chain(b).cloned().collect::<BTreeSet<_>>().into_iter().collect();
     v.retain(|r| marmot::codec::valid_relay_url(r));
@@ -327,6 +348,7 @@ impl Device {
             join_relays: StdMutex::new(Vec::new()),
             retry_pending: std::sync::atomic::AtomicBool::new(false),
             going_private: std::sync::atomic::AtomicBool::new(false),
+            catching_up: Mutex::new(()),
         });
         let dev = Self {
             inner,
@@ -652,13 +674,101 @@ impl Device {
             let s = self.inner.sync.lock().unwrap_or_else(|p| p.into_inner());
             if s.since == 0 { now().saturating_sub(RESUME_OVERLAP_SECS) } else { s.since.saturating_sub(RESUME_OVERLAP_SECS) }
         };
-        let filter = Filter::new()
-            .kind(Kind::Custom(GROUP_KIND))
-            .custom_tags(SingleLetterTag::from_char('h').expect("h is a single-letter tag"), ids.iter().map(hex::encode))
-            .since(Timestamp::from_secs(since));
+        // Catch up first, completely, then follow live from (about) when
+        // the catch-up began. A single subscription from `since` would get
+        // only the newest events a relay is willing to return, and the
+        // sync point would then move past the ones it left out.
+        let started = now();
+        let live_since = if self.catch_up(&ids, since, &relays).await {
+            started.saturating_sub(LIVE_OVERLAP_SECS).max(since)
+        } else {
+            since
+        };
+        let filter = group_filter(&ids).since(Timestamp::from_secs(live_since));
         if let Err(e) = self.inner.client.subscribe(filter).with_id(id).await {
             tracing::warn!("group subscription failed: {e}");
         }
+    }
+
+    /// Fetch every group event since `since` from each relay, paging
+    /// backwards, and process them oldest first. Returns false, doing
+    /// nothing, when a catch-up is already running: processing its events
+    /// can resubscribe (new relays, new routing ids), and waiting for it
+    /// there would deadlock. That subscription then starts from `since`.
+    async fn catch_up(&self, ids: &[[u8; 32]], since: u64, relays: &[String]) -> bool {
+        let Ok(_one) = self.inner.catching_up.try_lock() else {
+            return false;
+        };
+        let pages = relays.iter().map(|r| self.page_relay(r, ids, since));
+        let mut events: HashMap<EventId, Event> = HashMap::new();
+        for evs in futures_util::future::join_all(pages).await {
+            events.extend(evs.into_iter().map(|e| (e.id, e)));
+        }
+        let mut events: Vec<Event> = events.into_values().collect();
+        events.sort_by_key(|e| (e.created_at, e.id));
+        if !events.is_empty() {
+            tracing::debug!(count = events.len(), "catching up on group events");
+        }
+        for ev in events {
+            if let Err(e) = self.on_event(&ev).await {
+                tracing::debug!("catch-up event: {e}");
+            }
+        }
+        true
+    }
+
+    /// Every group event one relay has since `since`. Each page asks for
+    /// events up to the oldest one seen so far (inclusive, so events that
+    /// share that second are not skipped; known ones are dropped) and the
+    /// walk ends when a page brings nothing new or reaches `since`. This
+    /// works whatever cap the relay puts on a result, unless one second
+    /// holds more events than the cap.
+    async fn page_relay(&self, relay: &str, ids: &[[u8; 32]], since: u64) -> Vec<Event> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut until: Option<Timestamp> = None;
+        for _ in 0..CATCH_UP_MAX_PAGES {
+            let mut f = group_filter(ids).since(Timestamp::from_secs(since)).limit(CATCH_UP_PAGE);
+            if let Some(u) = until {
+                f = f.until(u);
+            }
+            let page = match self
+                .inner
+                .client
+                .fetch_events(ReqTarget::single(relay, [f]))
+                .timeout(relay::FETCH_WAIT)
+                .await
+            {
+                Ok(evs) => evs,
+                Err(e) => {
+                    tracing::debug!(relay, "catch-up fetch failed: {e}");
+                    break;
+                }
+            };
+            let mut oldest: Option<Timestamp> = None;
+            let mut fresh = 0;
+            for e in page {
+                oldest = Some(oldest.map_or(e.created_at, |o| o.min(e.created_at)));
+                if seen.insert(e.id) {
+                    fresh += 1;
+                    out.push(e);
+                }
+            }
+            match oldest {
+                Some(o) if o.as_secs() <= since => break,
+                Some(o) if fresh > 0 => until = Some(o),
+                // Nothing new, but the page reached back only to the second
+                // it started from: that second holds more events than the
+                // relay returns at once. Nostr pages by whole seconds, so
+                // step past it; some of its events may be missed.
+                Some(o) if until == Some(o) => {
+                    tracing::warn!(relay, at = o.as_secs(), "more group events in one second than the relay returns; some may be missed");
+                    until = Some(Timestamp::from_secs(o.as_secs().saturating_sub(1)));
+                }
+                _ => break,
+            }
+        }
+        out
     }
 
     fn note_synced(&self, created_at: u64) {
