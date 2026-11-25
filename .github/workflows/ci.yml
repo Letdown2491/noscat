@@ -1,0 +1,120 @@
+# CI: every push to main (and every pull request) builds and tests the
+# workspace on each release platform, so a tag push only ever packages
+# code that is already known to build. Nothing here publishes anything.
+#
+# - Linux: tests on glibc (the FIPS crates link libdbus and libclang
+#   there), release builds on static musl for both architectures, as the
+#   release workflow does.
+# - macOS (aarch64 and x86_64) and Windows (x86_64): tests and a release
+#   build.
+# - Publish check: `cargo publish --workspace --dry-run` packages every
+#   crate and builds it from the package, as crates.io will.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-test:
+    name: linux test (glibc)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libdbus and libclang (the FIPS crates link them on glibc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libclang-dev
+      - name: Test
+        run: cargo test --workspace --locked
+
+  linux-musl:
+    name: linux build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build (static musl, as released)
+        run: cargo build --release --locked --target ${{ matrix.target }} -p noscat
+      - name: Smoke-check and size
+        run: |
+          bin=target/${{ matrix.target }}/release/noscat
+          "$bin" --version
+          "$bin" --help > /dev/null
+          ls -l "$bin"
+          echo "### ${{ matrix.target }}: $(du -h "$bin" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    name: macos ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build (release) and size
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} -p noscat
+          bin=target/${{ matrix.target }}/release/noscat
+          "$bin" --version
+          echo "### ${{ matrix.target }}: $(du -h "$bin" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build (release) and size
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p noscat
+          & target/release/noscat.exe --version
+          $size = [math]::Round((Get-Item target/release/noscat.exe).Length / 1MB, 1)
+          "### windows x86_64: $size MB" >> $env:GITHUB_STEP_SUMMARY
+
+  publish-check:
+    name: crates.io dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libdbus and libclang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libclang-dev
+      - name: Package and build every crate as crates.io would
+        run: cargo publish --workspace --dry-run --locked
