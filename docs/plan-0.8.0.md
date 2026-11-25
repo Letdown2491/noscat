@@ -21,7 +21,8 @@ Decided 2026-11-25:
   to end encrypted. No server, no relay for video.
 - **Off by default** on every device: "Allow members to view this
   device", with view only or view and control, and ask each time (the
-  default) or unattended.
+  default) or unattended. Screen view and control are actions in 0.7.0's
+  per-device permissions, so a device can allow some members only.
 - **Control from every client**: built-in viewers in both apps; the CLI
   opens a small viewer noscat serves on localhost.
 

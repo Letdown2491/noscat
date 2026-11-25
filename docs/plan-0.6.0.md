@@ -162,7 +162,30 @@ devices catch up in order. History stays linear: nothing to reconcile.
       Bluetooth test written down as a manual check.
 - [ ] Lockstep 0.6.0 per `docs/releasing.md`.
 
-# noscat 0.7.0: macOS
+# noscat 0.7.0: macOS and per-device permissions
+
+## Permissions (decided 2026-11-25)
+
+A device decides which members may do what to it: for example, the
+desktop takes files from the VPS but not from the phone. The receiver
+enforces it on each incoming stream, whose opener is authenticated by
+the QUIC handshake, so a sender cannot get around it.
+
+- [ ] Actions: files, chat, clipboard, forwards to the default service,
+      forwards to served ports, and (0.8) screen view and control.
+- [ ] Policy: a per-device default per action (everyone or nobody), plus
+      per-member overrides. Defaults stay "everyone" (screen: nobody), so
+      existing meshes behave as before. New members get the defaults.
+- [ ] Local and private: kept in the device's own settings, not in the
+      group state. A refused stream gets a clear reason ("does not accept
+      files from this device"); the apps remember it and grey the action
+      out for that member.
+- [ ] CLI: `noscat allow|deny <device> <action>`, `noscat permissions`.
+      Desktop and Android: toggles in each device's detail view.
+- [ ] Not covered: membership. Every device stays an admin (ADR 0007).
+
+## macOS
+
 
 - [ ] noscat-desktop on macOS: tray, Keychain for the storage key, an
       app bundle, signing and notarization (needs an Apple developer
