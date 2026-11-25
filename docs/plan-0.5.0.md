@@ -113,9 +113,11 @@ Implementation notes from the rig:
 
 ## Decisions (2026-11-24)
 
-- **Every mesh needs one reachable member** in 0.5.0 (home server, VPS, port forward, or public IPv6). Setup flows say so when no member is reachable. The upstream signaling hook (draft 05) may lift this for cone NATs later.
+- **Every mesh needs one reachable member** in 0.5.0 (home server, VPS, port forward, or public IPv6). `noscat mesh members` says so when no member is reachable; the apps show it through the presence dot (amber: online but unreachable). The upstream signaling hook (draft 05) may lift this for cone NATs later.
 - **MeshGroup builds on OpenMLS 0.10.0-rc.1**; switch to 0.10 stable when released.
 - **Fresh start from 0.4**: no 0.4 state is read, including identities. 0.5 keeps its state in a new location so 0.4 files are left alone.
+- **Not in 0.5.0** (decided 2026-11-24): removing a device and creating a mesh from the apps (both stay CLI only; noscat already exposes them), and less frequent adverts (they stay every two minutes).
+- **Phase 5 waits for the user's test pass** of all three apps.
 - **Git**: work happened on `v0.5.0` branches and moved to each repo's default branch (`main`, `master` for noscat-android) on 2026-11-24; all work continues there. No crates.io publishing and no tags until release. The apps build against noscat `main` until then.
 
 ## Open questions
