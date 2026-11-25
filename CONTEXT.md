@@ -34,6 +34,13 @@ _Avoid_: tunnel (0.4 term)
 **Key package**:
 A device's published, single-use offer to be added to a mesh. A device not in a mesh keeps one on its relays.
 
+**Mesh relays**:
+The Nostr relays a mesh lists in its group state, which every member uses for its control traffic. A device may use its own relays too, unless the mesh is private.
+
+**Private mesh**:
+A mesh whose devices use only the mesh relays, log in to them with their device key, and use no other relay. Meant for a members-only relay the user runs. The opposite is a shared mesh.
+_Avoid_: closed mesh, locked mesh
+
 **Invitation**:
 What a device receives when an admin adds it: the encrypted welcome into the mesh. A device accepts an invitation only from the device it was told to expect.
 _Avoid_: pairing request (0.4 term)

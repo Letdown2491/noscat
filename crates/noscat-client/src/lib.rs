@@ -40,7 +40,7 @@ use nostr::prelude::PublicKey;
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use noscat_core::parse_pairing_target;
+pub use noscat_core::{pairing_uri, parse_pairing_relays, parse_pairing_target};
 pub use noscat_core::relay::{DEFAULT_RELAYS, default_relays};
 
 /// How long a dial waits for a member to become reachable.
@@ -870,11 +870,46 @@ impl Client {
     }
 
     /// Wait up to `timeout` for an invitation from `inviter` (npub or
-    /// `noscat:` URI; the scanned QR is the trust anchor) and join.
+    /// `noscat:` URI; the scanned QR is the trust anchor) and join. A URI
+    /// that names relays (a private mesh's) joins through those alone.
     pub fn join(&self, inviter: &str, timeout: Duration) -> Result<(), ClientError> {
         let pk = parse_target(inviter)?;
-        self.inner.rt().block_on(self.inner.device.join(pk, timeout))?;
+        let relays = parse_pairing_relays(inviter);
+        self.inner.rt().block_on(self.inner.device.join(pk, &relays, timeout))?;
         Ok(())
+    }
+
+    /// The mesh's relays (empty outside a mesh).
+    #[must_use]
+    pub fn mesh_relays(&self) -> Vec<String> {
+        self.inner.rt().block_on(self.inner.device.mesh_relays())
+    }
+
+    /// Whether the mesh is private: its devices use only its relays, log
+    /// in to them (NIP-42) and stay off the public ones.
+    #[must_use]
+    pub fn is_private(&self) -> bool {
+        self.inner.rt().block_on(self.inner.device.is_private())
+    }
+
+    /// Replace the mesh's relays (1 to 16 `wss://` URLs).
+    pub fn set_mesh_relays(&self, relays: &[String]) -> Result<(), ClientError> {
+        self.inner.rt().block_on(self.inner.device.set_mesh_relays(relays))?;
+        Ok(())
+    }
+
+    /// Make the mesh private, or shared again.
+    pub fn set_private(&self, private: bool) -> Result<(), ClientError> {
+        self.inner.rt().block_on(self.inner.device.set_private(private))?;
+        Ok(())
+    }
+
+    /// This device's pairing URI for QR codes: `noscat:<npub>`, with the
+    /// mesh's relays when it is private.
+    #[must_use]
+    pub fn pairing_uri(&self) -> String {
+        let relays = if self.is_private() { self.mesh_relays() } else { Vec::new() };
+        pairing_uri(self.npub(), &relays)
     }
 
     /// Remove a member from the mesh.

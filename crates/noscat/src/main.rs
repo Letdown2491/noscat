@@ -271,8 +271,34 @@ enum MeshCommand {
     },
     /// List the members and their presence.
     Members,
-    /// Print this device's pairing QR.
+    /// Print this device's pairing QR. In a private mesh it names the
+    /// mesh's relays, so a new device joins through them.
     Qr,
+    /// List the mesh's relays, or change them (admins).
+    Relays {
+        #[command(subcommand)]
+        cmd: Option<RelaysCommand>,
+    },
+    /// Make the mesh private: its devices use only the mesh's relays, log
+    /// in to them (NIP-42) and leave the public ones. For a members-only
+    /// relay such as noscat-relay; add it with `mesh relays add` first.
+    Private,
+    /// Make the mesh shared again: its devices use their own relays too.
+    Shared,
+}
+
+#[derive(Subcommand)]
+enum RelaysCommand {
+    /// Add relays to the mesh.
+    Add {
+        #[arg(required = true)]
+        urls: Vec<String>,
+    },
+    /// Remove relays from the mesh.
+    Remove {
+        #[arg(required = true)]
+        urls: Vec<String>,
+    },
 }
 
 fn default_dir() -> PathBuf {
@@ -361,6 +387,10 @@ fn show(reply: Reply) {
     match reply {
         Reply::Line { text } => eprintln!("# {text}"),
         Reply::Members { mesh, members } => ui::print_members(mesh.as_deref(), &members),
+        Reply::Qr { uri } => {
+            print_qr(&uri);
+            println!("{uri}");
+        }
         Reply::Done | Reply::Error { .. } => {}
     }
 }
@@ -439,11 +469,12 @@ fn auto_invite(client: &Client, peer: String, name: Option<String>) {
     });
 }
 
-fn print_qr(npub: &str) {
-    if let Some(qr) = ui::render_pairing_qr(npub) {
+/// Print a pairing QR for `target` (an npub or a `noscat:` URI).
+fn print_qr(target: &str) {
+    if let Some(qr) = ui::render_pairing_qr(target) {
         eprintln!("{qr}");
     }
-    eprintln!("# {npub}");
+    eprintln!("# {target}");
 }
 
 /// Run a device in the foreground until Ctrl-C.
@@ -462,7 +493,7 @@ fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce
     } else {
         eprintln!("# not in a mesh yet: `noscat mesh create <name>` or `noscat mesh join <npub>` (in another terminal)");
     }
-    print_qr(ctx.client.npub());
+    print_qr(&ctx.client.pairing_uri());
     ui::spawn_chat_repl(ctx.client.clone(), name_file(dir));
     loop {
         std::thread::park();
@@ -503,7 +534,7 @@ fn main() -> Result<()> {
                 println!("secret (hex): {}", id.secret_hex());
             }
         }
-        Command::Id | Command::Mesh(MeshCommand::Qr) => {
+        Command::Id => {
             std::fs::create_dir_all(&dir)?;
             let npub = noscat_client::identity_npub(&identity(&dir))?;
             print_qr(&npub);
@@ -608,7 +639,14 @@ fn main() -> Result<()> {
                 MeshCommand::Remove { target } => Op::Remove { target },
                 MeshCommand::Leave { timeout } => Op::Leave { timeout_secs: timeout },
                 MeshCommand::Members => Op::Members,
-                MeshCommand::Qr => unreachable!("handled above"),
+                MeshCommand::Qr => Op::Qr,
+                MeshCommand::Relays { cmd } => match cmd {
+                    None => Op::Relays { add: Vec::new(), remove: Vec::new() },
+                    Some(RelaysCommand::Add { urls }) => Op::Relays { add: urls, remove: Vec::new() },
+                    Some(RelaysCommand::Remove { urls }) => Op::Relays { add: Vec::new(), remove: urls },
+                },
+                MeshCommand::Private => Op::Private { private: true },
+                MeshCommand::Shared => Op::Private { private: false },
             };
             run_op(&dir, d, op)?;
         }

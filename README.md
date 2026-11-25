@@ -264,6 +264,28 @@ accepts. noscat sends each event once per relay (again only if that relay
 was not connected), and republishes the device's relay lists only when they
 change or once a week.
 
+**A mesh's own relays, and private meshes.** Any member can change the
+relays a mesh lists, and make it private:
+
+```
+noscat mesh relays                         # the mesh's relays, and whether it is private
+noscat mesh relays add wss://relay.example
+noscat mesh relays remove wss://nostr.mom
+noscat mesh private                        # devices use only the mesh's relays
+noscat mesh shared                         # devices use their own relays too
+```
+
+In a private mesh every device uses only the mesh's relays, logs in to
+them with its device key (NIP-42), and drops its own and the public ones.
+That is meant for a members-only relay you run yourself,
+[noscat-relay](https://github.com/Letdown2491/noscat-relay), which keeps
+who is in the mesh, who gets invited and when each device is online off
+third-party relays. noscat never logs in to any other relay. Add the relay
+first and check members reach it, then go private. A private mesh's QR
+(`noscat mesh qr`, or the one `up` prints) names its relays
+(`noscat:<npub>?relay=wss%3A%2F%2F...`), so a new device that scans it
+joins through them alone.
+
 ## Development
 
 The project targets atomic/bootc hosts: there is no toolchain on the host, builds run

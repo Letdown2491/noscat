@@ -370,6 +370,7 @@ struct GroupState {
     admins: BTreeSet<[u8; 32]>,
     routing: Routing,
     name: String,
+    private: bool,
 }
 
 fn group_state(group: &MlsGroup) -> Result<GroupState, String> {
@@ -401,6 +402,7 @@ fn group_state(group: &MlsGroup) -> Result<GroupState, String> {
         admins,
         routing,
         name,
+        private: dict.get(&codec::NOSCAT_PRIVATE).is_some(),
     })
 }
 
@@ -452,6 +454,7 @@ fn check_app_data_update(update: &AppDataUpdateProposal, required: &BTreeSet<u16
             Err(e) => Err(e),
         },
         codec::NOSCAT_MESH => codec::decode_mesh(data).map(|_| ()),
+        codec::NOSCAT_PRIVATE => codec::validate_private(data),
         codec::GROUP_PROFILE => codec::validate_group_profile(data),
         codec::IDENTITY_PROOF | codec::SAFE_AAD => Err(codec::CodecError("not a GroupContext component".into())),
         _ => Ok(()),
@@ -563,6 +566,54 @@ impl MeshGroup {
     /// Relays the group publishes to.
     pub fn relays(&self) -> Result<Vec<String>, MeshError> {
         group_state(self.group()?).map(|s| s.routing.relays).map_err(MeshError::Mls)
+    }
+
+    /// Whether the mesh is private (`noscat.private.v1`). False outside a
+    /// mesh.
+    #[must_use]
+    pub fn is_private(&self) -> bool {
+        self.group().ok().and_then(|g| group_state(g).ok()).is_some_and(|s| s.private)
+    }
+
+    /// Replace the mesh's relays (admins only). The routing id stays, so
+    /// members keep their subscriptions; they pick up the new relays when
+    /// they apply the commit. Publish the commit to the old and new relays
+    /// both, then [`Self::confirm`].
+    pub fn set_relays(&mut self, relays: &[String]) -> Result<Outgoing, MeshError> {
+        let st = self.require_admin()?;
+        let routing = Routing::new(st.routing.nostr_group_id, relays)?;
+        if routing.relays == st.routing.relays {
+            return Err(MeshError::NotAllowed("the mesh already uses exactly these relays".into()));
+        }
+        let updates = vec![Proposal::AppDataUpdate(Box::new(AppDataUpdateProposal::update(
+            codec::NOSTR_ROUTING,
+            codec::encode_routing(&routing),
+        )))];
+        let (commit, _) = self.stage_own(Vec::new(), Vec::new(), updates)?;
+        Ok(Outgoing {
+            commit,
+            welcomes: Vec::new(),
+        })
+    }
+
+    /// Make the mesh private or shared (admins only).
+    pub fn set_private(&mut self, private: bool) -> Result<Outgoing, MeshError> {
+        let st = self.require_admin()?;
+        if st.private == private {
+            return Err(MeshError::NotAllowed(
+                if private { "the mesh is already private" } else { "the mesh is already shared" }.into(),
+            ));
+        }
+        let update = if private {
+            AppDataUpdateProposal::update(codec::NOSCAT_PRIVATE, Vec::new())
+        } else {
+            AppDataUpdateProposal::remove(codec::NOSCAT_PRIVATE)
+        };
+        let (commit, _) = self.stage_own(Vec::new(), Vec::new(), vec![Proposal::AppDataUpdate(Box::new(update))])?;
+        Ok(Outgoing {
+            commit,
+            welcomes: Vec::new(),
+        })
     }
 
     /// Routing ids to subscribe to (`#h`), newest last. Older ones stay

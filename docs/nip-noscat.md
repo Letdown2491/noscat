@@ -86,6 +86,7 @@ and carries, without requiring it:
 | Id | Component | State |
 |---|---|---|
 | `0xf3a0` | `noscat.mesh.v1` | `opaque name<V>` (UTF-8, at most 64 bytes) |
+| `0xf3a1` | `noscat.private.v1` | empty; present means the mesh is private |
 
 `noscat.mesh.v1` marks the group as a noscat mesh and names it. Because
 it is not required, non-noscat Marmot clients can join; they simply
@@ -93,9 +94,20 @@ ignore it. A group without it is a plain Marmot group: noscat devices
 can join it and exchange messages, and still use the data plane with
 its other noscat members.
 
+`noscat.private.v1` makes the mesh private. Its devices then use only
+the relays in the routing component (`0x8004`), not their own or public
+defaults; they log in to those relays with NIP-42 as their device key;
+and they log in nowhere else (a login ties a device to its `#h`
+subscriptions, which a third-party relay must not learn). A private mesh
+is meant for a members-only relay such as
+[noscat-relay](https://github.com/Letdown2491/noscat-relay). Any admin
+adds the component (an AppDataUpdate with empty state) or removes it.
+Devices that do not know it keep using their own relays too, as in a
+shared mesh.
+
 A noscat device's leaf and key package advertise support for `0x0001`
-and `0x8001`, `0x8003`, `0x8004`, `0x8009`, `0x800b`, `0x800c` and
-`0xf3a0`. `0x800b` (encrypted media v2) is listed because MDK clients
+and `0x8001`, `0x8003`, `0x8004`, `0x8009`, `0x800b`, `0x800c`,
+`0xf3a0` and `0xf3a1`. `0x800b` (encrypted media v2) is listed because MDK clients
 require it in every new group; noscat never sends media and leaves the
 policy unchanged. Per Marmot, the key package event's `app_components`
 tag lists exactly the advertised ids from `0x8000` up.
@@ -252,11 +264,17 @@ A QR code (or text) carries one device's address:
 
 ```
 noscat:<npub>
+noscat:<npub>?relay=<url>&relay=<url>
 ```
 
 - The npub is NIP-19 bech32. Producers emit the lowercase `noscat:`
   prefix. Parsers MUST also accept a bare npub or hex key, and MUST
-  ignore a query string (`noscat:<npub>?k=v` is reserved).
+  ignore query parameters they do not know.
+- `relay` (percent-encoded, repeatable) names a private mesh's relays. A
+  device in a private mesh puts them in its QR; a device joining with
+  such a code publishes its key package and join request there, logs in
+  there (NIP-42) and waits for its invitation there, using no other
+  relay.
 - The payload is public. Scanning it lets the scanner invite the device
   or name it as the only device whose invitation to accept.
 

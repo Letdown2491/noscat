@@ -26,6 +26,11 @@ pub const LIFECYCLE: u16 = 0x800c;
 /// name. Private-use id, never required, so other Marmot clients keep it
 /// byte for byte as unknown data (see docs/nip-noscat.md).
 pub const NOSCAT_MESH: u16 = 0xf3a0;
+/// `noscat.private.v1`: present (with empty state) when the mesh is
+/// private: devices use only the routing component's relays, log in to
+/// them (NIP-42), and leave the public default relays. Not required, so
+/// other Marmot clients ignore it.
+pub const NOSCAT_PRIVATE: u16 = 0xf3a1;
 /// Marmot encrypted media policy v2. White Noise requires it in every new
 /// group. noscat never sends media; it supports the component in the sense
 /// Marmot means (it can be a member of a group that carries the policy and
@@ -39,7 +44,7 @@ pub const REQUIRED_COMPONENTS: [u16; 4] = [ADMIN_POLICY, NOSTR_ROUTING, IDENTITY
 /// itself plus every app component it supports. The key package's
 /// `app_components` tag carries only the app components (ids from
 /// [`FIRST_APP_COMPONENT`]), as MDK checks.
-pub const SUPPORTED_COMPONENTS: [u16; 8] = [
+pub const SUPPORTED_COMPONENTS: [u16; 9] = [
     APP_COMPONENTS,
     GROUP_PROFILE,
     ADMIN_POLICY,
@@ -47,6 +52,7 @@ pub const SUPPORTED_COMPONENTS: [u16; 8] = [
     IDENTITY_PROOF,
     LIFECYCLE,
     NOSCAT_MESH,
+    NOSCAT_PRIVATE,
     ENCRYPTED_MEDIA_V2,
 ];
 
@@ -317,6 +323,11 @@ pub fn decode_mesh(bytes: &[u8]) -> Result<String, CodecError> {
         return err("mesh name is longer than 64 bytes");
     }
     String::from_utf8(body.to_vec()).map_err(|_| CodecError("mesh name is not UTF-8".into()))
+}
+
+/// Check `noscat.private.v1` state: always empty.
+pub fn validate_private(bytes: &[u8]) -> Result<(), CodecError> {
+    if bytes.is_empty() { Ok(()) } else { err("private state must be empty") }
 }
 
 /// Structural check of `marmot.group.profile.v1` (two var-bytes fields:

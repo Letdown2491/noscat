@@ -47,6 +47,57 @@ pub fn parse_pairing_target(target: &str) -> Result<nostr::prelude::PublicKey, S
     nostr::prelude::PublicKey::parse(t).map_err(|e| format!("bad pairing target {target:?}: {e}"))
 }
 
+/// Relays named in a pairing URI (`noscat:<npub>?relay=<url>&relay=...`,
+/// percent-encoded): a private mesh's own relays, which a joining device
+/// uses instead of its own. Empty for a bare npub or a URI without them.
+pub fn parse_pairing_relays(target: &str) -> Vec<String> {
+    let Some((_, query)) = target.trim().split_once('?') else {
+        return Vec::new();
+    };
+    query
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .filter(|(k, _)| *k == "relay")
+        .filter_map(|(_, v)| percent_decode(v))
+        .filter(|r| r.starts_with("wss://") || r.starts_with("ws://"))
+        .collect()
+}
+
+/// The pairing URI for a device: `noscat:<npub>`, plus `?relay=` hints
+/// when its mesh is private (so a joining device knows where to find it).
+pub fn pairing_uri(npub: &str, relays: &[String]) -> String {
+    let mut uri = format!("noscat:{npub}");
+    for (i, r) in relays.iter().enumerate() {
+        uri.push(if i == 0 { '?' } else { '&' });
+        uri.push_str("relay=");
+        for b in r.bytes() {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                uri.push(b as char);
+            } else {
+                uri.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    uri
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// A sensible default friendly name for this device: the hostname on unix
 /// systems (Android reports "localhost" - apps should pass something better,
 /// e.g. the device model). Falls back to "noscat".
@@ -91,6 +142,14 @@ mod pairing_target_tests {
         assert_eq!(ok(&format!("  {hex_key}  ")), base);
 
         assert!(parse_pairing_target("noscat:").is_err());
+        let relays = vec!["wss://relay.example/mesh".to_string(), "wss://b.example".to_string()];
+        let uri = pairing_uri(hex_key, &relays);
+        assert_eq!(uri, format!("noscat:{hex_key}?relay=wss%3A%2F%2Frelay.example%2Fmesh&relay=wss%3A%2F%2Fb.example"));
+        assert_eq!(ok(&uri), base);
+        assert_eq!(parse_pairing_relays(&uri), relays);
+        assert!(parse_pairing_relays(&format!("noscat:{hex_key}")).is_empty());
+        assert!(parse_pairing_relays(&format!("noscat:{hex_key}?relay=https%3A%2F%2Fx&relay=%zz")).is_empty());
+        assert_eq!(pairing_uri("npub1x", &[]), "noscat:npub1x");
         assert!(parse_pairing_target("not-a-key").is_err());
         assert!(parse_pairing_target("noscat:not-a-key").is_err());
     }

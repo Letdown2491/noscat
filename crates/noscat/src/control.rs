@@ -42,6 +42,10 @@ pub enum Op {
     Forward { target: String, local: SocketAddr, remote_port: u16 },
     Pipe { target: String },
     Rename { name: String },
+    /// List the mesh's relays, or add and remove some.
+    Relays { add: Vec<String>, remove: Vec<String> },
+    Private { private: bool },
+    Qr,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,6 +75,8 @@ pub struct Row {
 pub enum Reply {
     Line { text: String },
     Members { mesh: Option<String>, members: Vec<Row> },
+    /// This device's pairing URI, to show as a QR.
+    Qr { uri: String },
     Done,
     Error { error: String },
 }
@@ -168,6 +174,49 @@ pub async fn exec(
             let t = target.clone();
             ctx.blocking(move |c| c.remove(&t)).await?;
             line(out, format!("removed {target}"));
+        }
+        Op::Relays { add, remove } => {
+            if !add.is_empty() || !remove.is_empty() {
+                let cur = ctx.blocking(|c| Ok(c.mesh_relays())).await?;
+                if cur.is_empty() {
+                    return Err("not in a mesh".into());
+                }
+                let norm = |r: &String| r.trim().trim_end_matches('/').to_string();
+                let gone: Vec<String> = remove.iter().map(norm).collect();
+                let mut next: Vec<String> = cur.iter().map(norm).filter(|r| !gone.contains(r)).collect();
+                next.extend(add.iter().map(norm));
+                if next.is_empty() {
+                    return Err("a mesh needs at least one relay".into());
+                }
+                ctx.blocking(move |c| c.set_mesh_relays(&next)).await?;
+            }
+            let (relays, private) = ctx.blocking(|c| Ok((c.mesh_relays(), c.is_private()))).await?;
+            if relays.is_empty() {
+                return Err("not in a mesh".into());
+            }
+            let mode = if private {
+                "private: devices use only these relays and log in to them"
+            } else {
+                "shared: devices also use their own relays"
+            };
+            line(out, format!("mesh relays ({mode}):"));
+            for r in relays {
+                line(out, format!("  {r}"));
+            }
+        }
+        Op::Private { private } => {
+            ctx.blocking(move |c| c.set_private(private)).await?;
+            if private {
+                let relays = ctx.blocking(|c| Ok(c.mesh_relays())).await?;
+                line(out, format!("the mesh is private: its devices now use only {}", relays.join(", ")));
+                line(out, "new devices join by scanning a member's QR (it now names these relays)");
+            } else {
+                line(out, "the mesh is shared: its devices use their own relays too");
+            }
+        }
+        Op::Qr => {
+            let uri = ctx.blocking(|c| Ok(c.pairing_uri())).await?;
+            let _ = out.send(Reply::Qr { uri });
         }
         Op::Leave { timeout_secs } => {
             ctx.blocking(move |c| c.leave(Duration::from_secs(timeout_secs))).await?;

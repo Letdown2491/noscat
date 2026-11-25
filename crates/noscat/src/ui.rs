@@ -6,10 +6,11 @@ use noscat_client::{Client, Event, Member};
 use crate::clipboard;
 use crate::control::Row;
 
-/// The pairing QR (`noscat:<npub>`) for terminals, colors inverted so it
-/// scans on the usual dark background.
-pub fn render_pairing_qr(npub: &str) -> Option<String> {
-    let code = qrcode::QrCode::new(format!("noscat:{npub}")).ok()?;
+/// The pairing QR (`noscat:<npub>`, or a full pairing URI as given) for
+/// terminals, colors inverted so it scans on the usual dark background.
+pub fn render_pairing_qr(target: &str) -> Option<String> {
+    let uri = if target.starts_with("noscat:") { target.to_string() } else { format!("noscat:{target}") };
+    let code = qrcode::QrCode::new(uri).ok()?;
     Some(
         code.render::<qrcode::render::unicode::Dense1x2>()
             .dark_color(qrcode::render::unicode::Dense1x2::Light)

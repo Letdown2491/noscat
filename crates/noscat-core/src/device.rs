@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use nostr::prelude::{Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
-use nostr_sdk::prelude::{Client, ClientNotification, RelayStatus, SubscriptionId};
+use nostr_sdk::prelude::{
+    Authenticator, Client, ClientNotification, Keys, RelayMessage, RelayStatus, RelayUrl, SignerAuthenticator, SubscriptionId,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
@@ -62,6 +64,9 @@ const RESUME_OVERLAP_SECS: u64 = 15 * 60;
 const SYNC_FILE: &str = "relay-sync.json";
 const SUB_GROUP: &str = "noscat-group";
 const SUB_INBOX: &str = "noscat-inbox";
+/// Wait before subscribing again after an own relay refused (see
+/// [`Device::on_closed`]).
+const CLOSED_RETRY: Duration = Duration::from_secs(15);
 
 /// Errors from the device runtime.
 #[derive(Debug, thiserror::Error)]
@@ -172,6 +177,17 @@ struct Inner {
     /// Newest join request time per device, so relays replaying the inbox
     /// do not repeat a prompt.
     join_requests: StdMutex<HashMap<PublicKey, u64>>,
+    /// Relays this device may log in to (shared with [`OwnRelayAuth`]).
+    login: Arc<StdMutex<BTreeSet<String>>>,
+    /// While joining a private mesh: its relays (from the pairing code),
+    /// used instead of this device's own.
+    join_relays: StdMutex<Vec<String>>,
+    /// A resubscription after a refusal is scheduled.
+    retry_pending: std::sync::atomic::AtomicBool,
+    /// This device is publishing the commit that makes the mesh private:
+    /// it logs in to the mesh's relays already, since a members-only relay
+    /// takes the commit only from a logged-in member.
+    going_private: std::sync::atomic::AtomicBool,
 }
 
 /// A running device. Cheap to clone; stops when [`Device::shutdown`] is
@@ -227,6 +243,42 @@ async fn publish_one(client: &Client, event: &Event, relay_url: &str) -> Result<
     Err(last)
 }
 
+/// Normal form of a relay URL for comparisons (nostr-sdk adds a slash).
+fn relay_key(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
+/// NIP-42 login, only to relays this device treats as its mesh's own: a
+/// private mesh's relays, or the relays named for joining one. Logging in
+/// ties a device to its subscriptions, which public relays must never
+/// learn, so every other challenge is refused.
+#[derive(Debug)]
+struct OwnRelayAuth {
+    keys: Keys,
+    allowed: Arc<StdMutex<BTreeSet<String>>>,
+}
+
+impl Authenticator for OwnRelayAuth {
+    fn make_auth_event<'a>(
+        &'a self,
+        relay_url: &'a RelayUrl,
+        challenge: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event, nostr_sdk::prelude::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let own = self
+                .allowed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&relay_key(relay_url.as_str()));
+            if !own {
+                tracing::debug!(relay = %relay_url, "not logging in: not this mesh's relay");
+                return Err(nostr_sdk::prelude::Error::other("noscat logs in only to its private mesh's relays"));
+            }
+            SignerAuthenticator::new(self.keys.clone()).make_auth_event(relay_url, challenge).await
+        })
+    }
+}
+
 fn union(a: &[String], b: &[String]) -> Vec<String> {
     let mut v: Vec<String> = a.iter().chain(b).cloned().collect::<BTreeSet<_>>().into_iter().collect();
     v.retain(|r| marmot::codec::valid_relay_url(r));
@@ -247,11 +299,18 @@ impl Device {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let (events, _) = broadcast::channel(256);
+        let login = Arc::new(StdMutex::new(BTreeSet::new()));
+        let client = Client::builder()
+            .authenticator(OwnRelayAuth {
+                keys: identity.keys().clone(),
+                allowed: login.clone(),
+            })
+            .build();
         let inner = Arc::new(Inner {
             identity,
             cfg,
             group: Mutex::new(group),
-            client: Client::new(),
+            client,
             dp,
             streams,
             events,
@@ -264,17 +323,18 @@ impl Device {
             sync: StdMutex::new(sync),
             last_reply: StdMutex::new(None),
             join_requests: StdMutex::new(HashMap::new()),
+            login,
+            join_relays: StdMutex::new(Vec::new()),
+            retry_pending: std::sync::atomic::AtomicBool::new(false),
+            going_private: std::sync::atomic::AtomicBool::new(false),
         });
         let dev = Self {
             inner,
             tasks: Arc::new(StdMutex::new(Vec::new())),
         };
-        let relays = dev.all_relays().await;
-        dev.ensure_relays(&relays).await;
         dev.spawn_loop();
-        dev.subscribe_inbox().await;
+        dev.sync_relays(true).await;
         dev.apply_roster().await?;
-        dev.resubscribe_group(true).await;
         // In the background: a slow relay must not hold up the start.
         let d = dev.clone();
         let h = tokio::spawn(async move { d.publish_profile().await });
@@ -350,9 +410,78 @@ impl Device {
 
     // ---- relays --------------------------------------------------------
 
+    /// The relays this device uses: a private mesh's own only; while
+    /// joining one, the relays its pairing code named; otherwise this
+    /// device's relays plus the mesh's.
     async fn all_relays(&self) -> Vec<String> {
-        let group = self.inner.group.lock().await.relays().unwrap_or_default();
+        let (group, private) = {
+            let g = self.inner.group.lock().await;
+            (g.relays().unwrap_or_default(), g.is_private())
+        };
+        if private {
+            return union(&group, &[]);
+        }
+        let joining = self.inner.join_relays.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if group.is_empty() && !joining.is_empty() {
+            return union(&joining, &[]);
+        }
         union(&self.inner.cfg.relays, &group)
+    }
+
+    /// Relays this device logs in to (NIP-42): a private mesh's, or the
+    /// ones it is joining a private mesh through. None otherwise.
+    async fn login_relays(&self) -> Vec<String> {
+        let (group, private) = {
+            let g = self.inner.group.lock().await;
+            (g.relays().unwrap_or_default(), g.is_private())
+        };
+        if private || self.inner.going_private.load(std::sync::atomic::Ordering::SeqCst) {
+            return group;
+        }
+        if group.is_empty() {
+            return self.inner.join_relays.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        }
+        Vec::new()
+    }
+
+    /// Where this device's key package and relay lists go: its own relays,
+    /// or only the private mesh's (or the one being joined).
+    async fn profile_relays(&self) -> Vec<String> {
+        if self.login_relays().await.is_empty() { self.inner.cfg.relays.clone() } else { self.all_relays().await }
+    }
+
+    /// Bring the relay pool in line with [`Self::all_relays`]: add the
+    /// missing relays, drop the others (a private mesh must not keep its
+    /// subscriptions on public relays), and reconnect relays whose login
+    /// permission changed, so they challenge again. Subscriptions are
+    /// (re)sent when anything changed or `force` is set: new relays do not
+    /// inherit them.
+    async fn sync_relays(&self, force: bool) {
+        let want = self.all_relays().await;
+        let login: BTreeSet<String> = self.login_relays().await.iter().map(|r| relay_key(r)).collect();
+        let flipped: BTreeSet<String> = {
+            let mut cur = self.inner.login.lock().unwrap_or_else(|p| p.into_inner());
+            let flipped = cur.symmetric_difference(&login).cloned().collect();
+            *cur = login;
+            flipped
+        };
+        let wanted: BTreeSet<String> = want.iter().map(|r| relay_key(r)).collect();
+        let mut changed = force;
+        let have: Vec<String> = self.inner.client.relays().await.keys().map(|u| relay_key(u.as_str())).collect();
+        for r in &have {
+            if !wanted.contains(r) || flipped.contains(r) {
+                if let Err(e) = self.inner.client.remove_relay(r.as_str()).force().await {
+                    tracing::warn!(relay = %r, "cannot drop relay: {e}");
+                }
+                changed = true;
+            }
+        }
+        changed |= wanted.iter().any(|r| !have.contains(r));
+        self.ensure_relays(&want).await;
+        if changed {
+            self.subscribe_inbox().await;
+            self.resubscribe_group(true).await;
+        }
     }
 
     /// Add the relays this device does not have yet and wait (up to
@@ -444,7 +573,7 @@ impl Device {
     /// key package, so others can invite this device.
     async fn publish_profile(&self) {
         let keys = self.inner.identity.keys();
-        let relays = self.inner.cfg.relays.clone();
+        let relays = self.profile_relays().await;
         let mut sorted = relays.clone();
         sorted.sort();
         for kind in [INBOX_RELAYS_KIND, RELAY_LIST_KIND] {
@@ -480,7 +609,8 @@ impl Device {
     /// mesh; exposed so a joiner can refresh it).
     pub async fn publish_key_package(&self) -> Result<(), DeviceError> {
         let ev = self.inner.group.lock().await.key_package_event()?;
-        self.publish(&ev, &self.inner.cfg.relays).await
+        let relays = self.profile_relays().await;
+        self.publish(&ev, &relays).await
     }
 
     // ---- subscriptions -------------------------------------------------
@@ -545,11 +675,46 @@ impl Device {
         let mut notes = self.inner.client.notifications();
         let h = tokio::spawn(async move {
             while let Some(n) = notes.next().await {
-                let ClientNotification::Event { event, .. } = n else { continue };
-                if let Err(e) = dev.on_event(&event).await {
-                    tracing::warn!("event handling: {e}");
+                match n {
+                    ClientNotification::Event { event, .. } => {
+                        if let Err(e) = dev.on_event(&event).await {
+                            tracing::warn!("event handling: {e}");
+                        }
+                    }
+                    ClientNotification::Message { relay_url, message } => {
+                        if let RelayMessage::Closed { subscription_id, message } = *message {
+                            dev.on_closed(relay_url.as_str(), subscription_id.as_str(), &message);
+                        }
+                    }
+                    _ => {}
                 }
             }
+        });
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
+    }
+
+    /// A relay this device logs in to closed one of its subscriptions.
+    /// A members-only relay refuses a device that joined moments ago until
+    /// it reloads its member list, and nostr-sdk drops a refused
+    /// subscription for good: subscribe again a little later. Public
+    /// relays are left alone.
+    fn on_closed(&self, relay: &str, sub: &str, reason: &str) {
+        if sub != SUB_GROUP && sub != SUB_INBOX {
+            return;
+        }
+        if !self.inner.login.lock().unwrap_or_else(|p| p.into_inner()).contains(&relay_key(relay)) {
+            return;
+        }
+        if self.inner.retry_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tracing::debug!(relay, sub, reason, "subscription refused; trying again shortly");
+        let dev = self.clone();
+        let h = tokio::spawn(async move {
+            tokio::time::sleep(CLOSED_RETRY).await;
+            dev.inner.retry_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+            dev.subscribe_inbox().await;
+            dev.resubscribe_group(true).await;
         });
         self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
     }
@@ -684,6 +849,9 @@ impl Device {
             if let Err(e) = self.apply_roster().await {
                 tracing::warn!("applying roster: {e}");
             }
+            // The commit may have changed the relays or made the mesh
+            // private.
+            self.sync_relays(false).await;
             self.resubscribe_group(false).await;
             if self.in_mesh().await {
                 self.send_advert().await;
@@ -883,7 +1051,7 @@ impl Device {
     pub async fn create(&self, name: &str) -> Result<(), DeviceError> {
         self.inner.group.lock().await.create(name, &self.inner.cfg.relays)?;
         let _ = self.inner.events.send(DeviceEvent::Joined);
-        self.resubscribe_group(true).await;
+        self.sync_relays(true).await;
         self.send_advert().await;
         Ok(())
     }
@@ -927,6 +1095,44 @@ impl Device {
         }))
     }
 
+    /// The mesh's relays (empty outside a mesh).
+    pub async fn mesh_relays(&self) -> Vec<String> {
+        self.inner.group.lock().await.relays().unwrap_or_default()
+    }
+
+    /// Whether the mesh is private: its devices use only its relays and
+    /// log in to them.
+    pub async fn is_private(&self) -> bool {
+        self.inner.group.lock().await.is_private()
+    }
+
+    /// Replace the mesh's relays (admins). The commit goes out on the
+    /// relays in use now, where every member listens; each member then
+    /// moves to the new list.
+    pub async fn set_mesh_relays(&self, relays: &[String]) -> Result<(), DeviceError> {
+        let out = self.inner.group.lock().await.set_relays(relays)?;
+        self.commit(out).await
+    }
+
+    /// Make the mesh private (its devices use only its relays, log in to
+    /// them, and leave the public ones) or shared again (admins).
+    pub async fn set_private(&self, private: bool) -> Result<(), DeviceError> {
+        if !private {
+            let out = self.inner.group.lock().await.set_private(false)?;
+            return self.commit(out).await;
+        }
+        self.inner.going_private.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.sync_relays(false).await;
+        let r = async {
+            let out = self.inner.group.lock().await.set_private(true)?;
+            self.commit(out).await
+        }
+        .await;
+        self.inner.going_private.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.sync_relays(false).await;
+        r
+    }
+
     /// Remove devices from the mesh.
     pub async fn remove(&self, devices: &[PublicKey]) -> Result<(), DeviceError> {
         let out = self.inner.group.lock().await.remove(devices)?;
@@ -935,9 +1141,30 @@ impl Device {
 
     /// Wait for an invitation from `inviter` and join its mesh. The key
     /// package is (re)published first so the inviter can find it.
-    pub async fn join(&self, inviter: PublicKey, timeout: Duration) -> Result<(), DeviceError> {
+    /// `relays`, when not empty, are a private mesh's relays (from its
+    /// pairing code): the join then goes through them alone, logged in.
+    pub async fn join(&self, inviter: PublicKey, relays: &[String], timeout: Duration) -> Result<(), DeviceError> {
         if self.in_mesh().await {
             return Err(MeshError::AlreadyInMesh.into());
+        }
+        let r = self.join_inner(inviter, relays, timeout).await;
+        let hinted = !std::mem::take(&mut *self.inner.join_relays.lock().unwrap_or_else(|p| p.into_inner())).is_empty();
+        // After a join the mesh's relays rule (the roster change already
+        // synced them); after a failure, go back to this device's own.
+        if hinted && r.is_err() {
+            self.sync_relays(false).await;
+        }
+        r
+    }
+
+    async fn join_inner(&self, inviter: PublicKey, relays: &[String], timeout: Duration) -> Result<(), DeviceError> {
+        let hints = union(relays, &[]);
+        if !relays.is_empty() && hints.is_empty() {
+            return Err(DeviceError::Other("no valid relay url (wss://host) to join through".into()));
+        }
+        if !hints.is_empty() {
+            *self.inner.join_relays.lock().unwrap_or_else(|p| p.into_inner()) = hints;
+            self.sync_relays(false).await;
         }
         let mut rx = self.subscribe();
         *self.inner.expected_inviter.lock().unwrap_or_else(|p| p.into_inner()) = Some(inviter);

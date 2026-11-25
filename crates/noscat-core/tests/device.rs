@@ -10,6 +10,7 @@ use noscat_core::dataplane::{DataplaneConfig, Reachability};
 use noscat_core::device::{Device, DeviceConfig, DeviceEvent};
 use nostr::prelude::PublicKey;
 use nostr_relay_builder::MockRelay;
+use nostr_relay_builder::prelude::{LocalRelay, RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 
 const T: Duration = Duration::from_secs(30);
 
@@ -62,10 +63,16 @@ where
 }
 
 async fn invite_and_join(admin: &Device, joiner: &Device) {
+    invite_and_join_via(admin, joiner, &[]).await;
+}
+
+/// As [`invite_and_join`], the joiner using `relays` (a pairing code's).
+async fn invite_and_join_via(admin: &Device, joiner: &Device, relays: &[String]) {
     let mut rx = admin.subscribe();
     let j = joiner.clone();
     let inviter = admin.device();
-    let waiting = tokio::spawn(async move { j.join(inviter, T).await });
+    let relays = relays.to_vec();
+    let waiting = tokio::spawn(async move { j.join(inviter, &relays, T).await });
     // The joiner asks the inviter (the QR it scanned) to invite it.
     let asked = tokio::time::timeout(T, async {
         loop {
@@ -200,6 +207,69 @@ async fn state_survives_a_restart() {
         d.shutdown().await;
     }
     for n in [&na, &nb, &nc] {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}
+
+/// A mesh moves to its own relay and goes private: its devices log in
+/// there (the relay serves nobody else) and leave the public relay, and a
+/// new device joins through the pairing code's relay alone. The public
+/// relay is shut down first, so anything still using it would fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn private_mesh_on_its_own_relay() {
+    let public = LocalRelay::new(RelayBuilder::default());
+    public.run().await.unwrap();
+    let public_url = public.url().await.to_string();
+    // Reads need a login, as on noscat-relay. (This relay cannot take
+    // writes behind a login: it wants the author logged in, and group
+    // events are signed by a fresh key each.)
+    let own = LocalRelay::new(RelayBuilder::default().nip42(RelayBuilderNip42 {
+        mode: RelayBuilderNip42Mode::Read,
+    }));
+    own.run().await.unwrap();
+    let own_url = own.url().await.to_string().trim_end_matches('/').to_string();
+
+    let (na, nb, nc) = (node("pa"), node("pb"), node("pc"));
+    let all = [&na, &nb, &nc];
+    let a = start(&na, "alpha", &public_url, &all).await;
+    let b = start(&nb, "bravo", &public_url, &all).await;
+    a.create("home").await.unwrap();
+    invite_and_join(&a, &b).await;
+
+    a.set_mesh_relays(&[own_url.clone()]).await.unwrap();
+    until("b sees the new relay", || async { b.mesh_relays().await == [own_url.clone()] }).await;
+    a.set_private(true).await.unwrap();
+    until("b sees the mesh private", || async { b.is_private().await }).await;
+    public.shutdown();
+
+    // Group traffic now flows over the own relay, which answers only
+    // logged-in devices.
+    let mut rx = b.subscribe();
+    a.send_app(21196, vec![vec!["t".into(), "x".into()]], "private".into()).await.unwrap();
+    let got = tokio::time::timeout(T, async {
+        loop {
+            if let Ok(DeviceEvent::App(ev)) = rx.recv().await {
+                if ev.content == "private" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(got.is_ok(), "no app event over the private relay");
+
+    // A new device, configured with the dead public relay only, joins
+    // through the relay its pairing code names.
+    let c = start(&nc, "charlie", &public_url, &all).await;
+    invite_and_join_via(&a, &c, &[own_url.clone()]).await;
+    assert!(c.is_private().await);
+    assert_eq!(c.mesh_relays().await, [own_url.clone()]);
+    until("b sees charlie", || async { b.members().await.iter().any(|m| m.device == c.device()) }).await;
+
+    for d in [a, b, c] {
+        d.shutdown().await;
+    }
+    for n in all {
         let _ = std::fs::remove_dir_all(&n.dir);
     }
 }

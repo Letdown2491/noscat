@@ -78,7 +78,8 @@ without starting anything.
 
 Also exported: `parse_pairing_target(&str)` (a QR's `noscat:` URI, a bare
 npub or hex key to a public key; what the join screens use to validate
-input), `DEFAULT_RELAYS` / `default_relays()`, `MAX_INCOMING_BYTES`
+input), `parse_pairing_relays(&str)` and `pairing_uri(npub, relays)` (a
+private mesh's relay hints in a pairing URI), `DEFAULT_RELAYS` / `default_relays()`, `MAX_INCOMING_BYTES`
 (64 GiB) and `DEFAULT_LISTEN_PORT` (41641, used when reachable).
 
 `Client::start(config) -> Result<Client, ClientError>` starts the device
@@ -103,7 +104,11 @@ Mesh:
 | `set_device_name(name)` | `()` | Rename; blocks until the advert carrying it is published, so members see it within seconds. Blank is ignored. The caller saves the name for the next start (config `device_name`). |
 | `create_mesh(name)` | `()` | New mesh with this device as the only member. |
 | `invite(target)` | `()` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. |
-| `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. |
+| `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. Pass the scanned code whole: when it names relays (`?relay=`, a private mesh's), the join goes through them alone, logged in (NIP-42). |
+| `mesh_relays()` / `is_private()` | `Vec<String>` / `bool` | The mesh's relays; whether it is private. |
+| `set_mesh_relays(relays)` | `()` | Replace the mesh's relays (1 to 16 `wss://` URLs). Every member moves to the new list. |
+| `set_private(bool)` | `()` | Make the mesh private (every device uses only the mesh's relays, logs in to them with NIP-42, leaves its own and the public ones) or shared again. noscat logs in to no other relay. |
+| `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
 | `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, connected`. `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. |

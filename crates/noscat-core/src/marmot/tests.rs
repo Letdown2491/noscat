@@ -284,3 +284,30 @@ fn key_packages_get_strictly_increasing_timestamps() {
     let c = d.g.key_package_event().unwrap();
     assert!(c.created_at > b.created_at, "{} !> {}", c.created_at, b.created_at);
 }
+
+#[test]
+fn relays_and_private_mode_reach_members() {
+    let (mut a, mut b) = mesh_of_two();
+    let own = "wss://relay.mesh.example".to_string();
+    let out = a.g.set_relays(&[own.clone()]).unwrap();
+    a.g.confirm().unwrap();
+    b.g.process(&out.commit).unwrap();
+    assert_eq!(b.g.relays().unwrap(), [own.clone()]);
+    assert!(!b.g.is_private());
+    // Same routing id: members keep their subscriptions.
+    assert_eq!(a.g.routing_ids(), b.g.routing_ids());
+
+    let out = a.g.set_private(true).unwrap();
+    a.g.confirm().unwrap();
+    b.g.process(&out.commit).unwrap();
+    assert!(a.g.is_private() && b.g.is_private());
+    assert!(matches!(b.g.set_private(true), Err(MeshError::NotAllowed(_))));
+
+    // Any admin can make it shared again.
+    let out = b.g.set_private(false).unwrap();
+    b.g.confirm().unwrap();
+    a.g.process(&out.commit).unwrap();
+    assert!(!a.g.is_private());
+    assert!(matches!(a.g.set_relays(&[own]), Err(MeshError::NotAllowed(_))));
+    assert!(a.g.set_relays(&["https://not-a-relay".into()]).is_err());
+}

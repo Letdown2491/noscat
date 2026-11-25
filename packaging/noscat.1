@@ -190,8 +190,25 @@ runs) and which are reachable, with a note when none is. A member can be
 online (its advert arrived over the relays) without being connected.
 .TP
 .B mesh qr
-Print this device's pairing QR (same as
-.BR id ).
+Print this device's pairing QR. In a private mesh it also names the
+mesh's relays
+.RB ( noscat:<npub>?relay=... ),
+so a device that scans it joins through them alone.
+.TP
+.B mesh relays \fR[\fBadd\fR|\fBremove\fR \fIurl\fR...]
+List the mesh's relays and whether it is private, or add and remove
+some. Any member can change them; every member moves to the new list.
+.TP
+.B mesh private
+Make the mesh private: every device uses only the mesh's relays, logs in
+to them with NIP-42 as its device key, and stops using its own and the
+public ones. For a members-only relay such as noscat-relay; add it with
+.B mesh relays add
+first. noscat never logs in to any other relay.
+.TP
+.B mesh shared
+Make the mesh shared again: devices use their own relays too, and log in
+nowhere.
 .PP
 Every mesh needs at least one member the others can reach from the
 internet: a home server with a forwarded UDP port, a VPS, or anything with
