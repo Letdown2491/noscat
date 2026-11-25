@@ -68,3 +68,7 @@ pedantic = { level = "warn", priority = -1 }
 [profile.release]
 lto = true
 strip = true
+# One unit: 24.9 MB instead of 28.8 MB for the CLI (2026-11-25), and no
+# slower. Not panic = "abort": a panic in one background task would take
+# the whole device down instead of that task.
+codegen-units = 1

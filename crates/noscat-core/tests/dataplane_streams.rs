@@ -11,6 +11,19 @@ use noscat_core::dataplane::{Dataplane, DataplaneConfig, Member, Reachability};
 use noscat_core::streams::{Streams, StreamsError};
 use sha2::{Digest, Sha256};
 
+
+/// Ends the test process if `name` runs longer than `secs`. A stalled QUIC
+/// transfer otherwise waits forever (keep-alives hold the connection open),
+/// which on CI is a job stuck for hours instead of a failure.
+fn watchdog(name: &'static str, secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "\n{name} still running after {secs} s: giving up");
+        std::process::exit(101);
+    });
+}
+
 struct Device {
     id: Identity,
     dp: Arc<Dataplane>,
@@ -73,6 +86,7 @@ fn serve_sha256(d: &Device) -> tokio::task::JoinHandle<nostr::prelude::PublicKey
 
 #[tokio::test(flavor = "multi_thread")]
 async fn members_stream_and_know_who_they_talk_to() {
+    watchdog("members_stream_and_know_who_they_talk_to", 120);
     let (a, b) = (device().await, device().await);
     a.dp.set_members(&[member(&b)]).await.unwrap();
     b.dp.set_members(&[member(&a)]).await.unwrap();
@@ -108,6 +122,7 @@ async fn members_stream_and_know_who_they_talk_to() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn non_members_cannot_reach_each_other() {
+    watchdog("non_members_cannot_reach_each_other", 120);
     let (a, b, c) = (device().await, device().await, device().await);
     a.dp.set_members(&[member(&b)]).await.unwrap();
     b.dp.set_members(&[member(&a)]).await.unwrap();
@@ -134,6 +149,7 @@ async fn non_members_cannot_reach_each_other() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_a_member_cuts_it_off() {
+    watchdog("removing_a_member_cuts_it_off", 120);
     let (a, b) = (device().await, device().await);
     a.dp.set_members(&[member(&b)]).await.unwrap();
     b.dp.set_members(&[member(&a)]).await.unwrap();
@@ -163,6 +179,7 @@ async fn removing_a_member_cuts_it_off() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn adverts_only_from_members() {
+    watchdog("adverts_only_from_members", 120);
     let a = device_with(Reachability::Public {
         // FIPS withholds adverts whose only address is loopback or private,
         // so advertise a global one (nothing dials it here).

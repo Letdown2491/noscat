@@ -88,6 +88,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   (builds, crates.io, tap, scoop, pacman, AUR and winget files).
 - `containers/noscat-dev.containerfile`: the dev image (Rust plus the
   libdbus and libclang the FIPS crates need on glibc).
+- `docs/releasing.md`: the release checklist across the repos, from the
+  tag on (crates.io first, then the desktop drops its git patch, then the
+  Android release APK).
 - `docs/upstream/`: drafts of issues and patches for FIPS. Never post them
   without the user's approval.
 

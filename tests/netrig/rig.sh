@@ -83,8 +83,14 @@ nat r2 "$NAT_B"
 mkdir -p /shared /logs && chmod 777 /shared /logs && rm -f /shared/* /logs/*
 ns stun turnserver --stun-only -L 37.120.10.3 -p 3478 --no-cli -n \
   --log-file=stdout > /logs/stun.txt 2>&1 &
-sleep 1
-ns h1 python3 /rig/stunc.py > /dev/null || { echo "FAIL rig: STUN unreachable from behind NAT"; exit 1; }
+# The STUN server takes a moment to start; give it up to 10 tries (each
+# probe waits 2 s for an answer) before calling the rig broken.
+stun_ok=
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ns h1 python3 /rig/stunc.py > /dev/null 2>&1; then stun_ok=1; break; fi
+  sleep 0.5
+done
+[ -n "$stun_ok" ] || { echo "FAIL rig: STUN unreachable from behind NAT"; exit 1; }
 
 run() { # ns name peers [public] [quic_to]
   ns "$1" setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=-all \

@@ -106,13 +106,13 @@ Implementation notes from the rig:
 
 ## Phase 5: release
 
-- [ ] Linux (glibc and musl, x86_64 and aarch64), macOS (x86_64 and aarch64) and Windows green in CI, plus the netns NAT and loss suite. FreeBSD is out of 0.5.0 (decided 2026-11-25) and done after release in [#19](https://github.com/Letdown2491/noscat/issues/19): it blocks on upstream draft 01 (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands.
-- [ ] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB).
-- [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android: publish the crates, drop the desktop's `[patch.crates-io]`, point `scripts/build-native.sh` at the published 0.5.0.
-- [ ] Android release build: `scripts/build-native.sh` builds the Rust library unoptimized (stripped debug profile), and the Gradle project has no release signing.
-- [ ] Packaging refresh: `packaging/PKGBUILD` and `.SRCINFO` are still at 0.1.1 (and need `dbus` plus build-time `clang`), the winget manifests are the 0.1.1 submission. The man page, nfpm, Homebrew and flake descriptions are already 0.5.
-- [ ] Desktop release ships two Linux binaries: `noscat-desktop` (Wayland only, the default build) and `noscat-desktop-x11` (`--features x11`, needs libxkbcommon-x11 at run time, which a Wayland-only machine may lack).
-- [ ] Remove the "not released yet" notes from README.md, INSTALL.md and AGENTS.md.
+- [ ] Linux (glibc and musl, x86_64 and aarch64), macOS (x86_64 and aarch64) and Windows green in CI, plus the netns NAT and loss suite. FreeBSD is out of 0.5.0 (decided 2026-11-25) and done after release in [#19](https://github.com/Letdown2491/noscat/issues/19): it blocks on upstream draft 01 (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands. The netns suite passed all six scenarios on 2026-11-25 (after the rig waits for its STUN server instead of sleeping a second).
+- [x] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB): the CLI is 28.8 MB stripped with LTO, 24.9 MB with `codegen-units = 1` (now set), glibc x86_64 (2026-11-25). FIPS, OpenMLS and QUIC are the new weight. CI reports each platform's size in its summary.
+- [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android: publish the crates, drop the desktop's `[patch.crates-io]`, point `scripts/build-native.sh` at the published 0.5.0. Happens from the tag on, in the order written down in [`docs/releasing.md`](releasing.md). Versions are already 0.5.0 in all three repos.
+- [x] Android release build: `PROFILE=release scripts/build-native.sh` builds the Rust library with LTO (symbols kept until the bindings are generated, then stripped), and `scripts/build-release.sh` makes a signed release APK from the git-ignored `keystore.properties` (release key generated 2026-11-25, kept outside the repo).
+- [x] Packaging refresh: `packaging/PKGBUILD`, `.SRCINFO` and the winget manifests are templates the release workflow fills (version, source b2sum, Windows zip sha256) and attaches to the release, ready to submit; the AUR package depends on dbus and builds with clang. Scoop's description is 0.5's.
+- [x] Desktop release ships two Linux binaries: `noscat-desktop` (Wayland only, the default build) and `noscat-desktop-x11` (`--features x11`, needs libxkbcommon-x11 at run time). noscat-desktop's `release.yml` builds both on a tag (Ubuntu 22.04, for an old enough glibc) and attaches them; its `ci.yml` builds both on every push.
+- [ ] Remove the "not released yet" notes from README.md, INSTALL.md and AGENTS.md (and the apps'): the last step before the tag, in `docs/releasing.md`.
 
 ## Decisions (2026-11-24)
 

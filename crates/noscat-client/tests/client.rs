@@ -11,6 +11,19 @@ use noscat_client::{Client, ClientConfig, ClientError, Event, IdentitySource};
 
 const T: Duration = Duration::from_secs(30);
 
+
+/// Ends the test process if `name` runs longer than `secs`. A stalled QUIC
+/// transfer otherwise waits forever (keep-alives hold the connection open),
+/// which on CI is a job stuck for hours instead of a failure.
+fn watchdog(name: &'static str, secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "\n{name} still running after {secs} s: giving up");
+        std::process::exit(101);
+    });
+}
+
 fn free_udp() -> SocketAddr {
     std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
 }
@@ -86,6 +99,7 @@ fn roundtrip(local: SocketAddr, msg: &[u8]) -> Vec<u8> {
 
 #[test]
 fn two_clients_end_to_end() {
+    watchdog("two_clients_end_to_end", 180);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
     let url = rt.block_on(relay.url()).to_string();
@@ -227,6 +241,7 @@ fn two_clients_end_to_end() {
 /// device alive and the second start failed with `Busy`.
 #[test]
 fn dropping_the_client_frees_the_directory() {
+    watchdog("dropping_the_client_frees_the_directory", 180);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
     let url = rt.block_on(relay.url()).to_string();
@@ -290,6 +305,7 @@ fn join_over(rt: &tokio::runtime::Runtime, a_relays: Vec<String>, url: &str) {
 /// publishing: the live relay carries everything.
 #[test]
 fn a_dead_relay_does_not_block() {
+    watchdog("a_dead_relay_does_not_block", 180);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
     let url = rt.block_on(relay.url()).to_string();
@@ -305,6 +321,7 @@ fn a_dead_relay_does_not_block() {
 /// device's publishes and subscriptions.
 #[test]
 fn a_relay_that_comes_up_later_is_used() {
+    watchdog("a_relay_that_comes_up_later_is_used", 180);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let port = free_tcp_port();
     let url = format!("ws://127.0.0.1:{port}");
@@ -351,6 +368,7 @@ fn a_relay_that_comes_up_later_is_used() {
 /// invited.
 #[test]
 fn join_requests_are_listed_until_invited() {
+    watchdog("join_requests_are_listed_until_invited", 180);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
     let url = rt.block_on(relay.url()).to_string();
