@@ -9,9 +9,119 @@
 //!   two concurrent initializations never clobber each other's key.
 //! - [`heal_secret_mode`] - best-effort chmod 0600 for files written
 //!   by older versions with default permissions.
+//!
+//! Secret files (the identity and the mesh state) can also be sealed at
+//! rest: after [`set_storage_key`], [`seal`] encrypts them with
+//! XChaCha20-Poly1305 under that key (the apps keep it in the Android
+//! Keystore or the desktop keyring), and [`unseal`] reads either form, so
+//! plain files from before migrate on their next write.
 
 use std::io;
 use std::path::Path;
+use std::sync::RwLock;
+
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+/// Marks a sealed file: magic, then a 24-byte nonce, then the ciphertext.
+const SEAL_MAGIC: &[u8] = b"noscat-sealed-v1\n";
+
+static STORAGE_KEY: RwLock<Option<[u8; 32]>> = RwLock::new(None);
+
+/// Seal secret files with `key` from now on (`None`: write them plain).
+/// Process-wide: call it once, before starting a client or using a
+/// device directory.
+pub fn set_storage_key(key: Option<[u8; 32]>) {
+    if let Ok(mut k) = STORAGE_KEY.write() {
+        *k = key;
+    }
+}
+
+fn storage_key() -> Option<[u8; 32]> {
+    STORAGE_KEY.read().ok().and_then(|k| *k)
+}
+
+/// Whether secret files are being sealed.
+#[must_use]
+pub fn has_storage_key() -> bool {
+    storage_key().is_some()
+}
+
+/// Whether `data` is a sealed file.
+#[must_use]
+pub fn is_sealed(data: &[u8]) -> bool {
+    data.starts_with(SEAL_MAGIC)
+}
+
+/// `plain` sealed under the storage key, bound to `name` (the file name,
+/// so sealed files cannot be swapped for each other); unchanged when no
+/// key is set.
+pub fn seal(name: &str, plain: &[u8]) -> io::Result<Vec<u8>> {
+    seal_with(storage_key(), name, plain)
+}
+
+fn seal_with(key: Option<[u8; 32]>, name: &str, plain: &[u8]) -> io::Result<Vec<u8>> {
+    let Some(key) = key else {
+        return Ok(plain.to_vec());
+    };
+    let mut nonce = [0u8; 24];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut nonce);
+    let ct = XChaCha20Poly1305::new(&key.into())
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad: name.as_bytes() })
+        .map_err(|_| io::Error::other("sealing failed"))?;
+    let mut out = Vec::with_capacity(SEAL_MAGIC.len() + nonce.len() + ct.len());
+    out.extend_from_slice(SEAL_MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// The plaintext of a file read from disk: sealed files are opened with
+/// the storage key, plain ones pass through. A sealed file without the
+/// right key is an error, never "missing": the caller must not create a
+/// fresh identity over it.
+pub fn unseal(name: &str, data: &[u8]) -> io::Result<Vec<u8>> {
+    unseal_with(storage_key(), name, data)
+}
+
+fn unseal_with(key: Option<[u8; 32]>, name: &str, data: &[u8]) -> io::Result<Vec<u8>> {
+    let Some(rest) = data.strip_prefix(SEAL_MAGIC) else {
+        return Ok(data.to_vec());
+    };
+    let key = key.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{name} is encrypted and this process has no storage key (the app that wrote it keeps the key)"),
+        )
+    })?;
+    if rest.len() < 24 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name}: truncated sealed file")));
+    }
+    let (nonce, ct) = rest.split_at(24);
+    XChaCha20Poly1305::new(&key.into())
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: name.as_bytes() })
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{name} is encrypted with a different storage key"),
+            )
+        })
+}
+
+fn file_name(path: &Path) -> &str {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("noscat")
+}
+
+/// Read a secret file, unsealing it.
+pub fn read_secret(path: &Path) -> io::Result<Vec<u8>> {
+    unseal(file_name(path), &std::fs::read(path)?)
+}
+
+/// Write a secret file atomically and owner-only, sealed when a storage
+/// key is set.
+pub fn write_secret(path: &Path, plain: &[u8]) -> io::Result<()> {
+    write_private_atomic(path, &seal(file_name(path), plain)?)
+}
 
 /// Write `contents` to `path` atomically: the data lands in a temp file
 /// in the same directory (so the rename is a same-filesystem metadata
@@ -86,9 +196,10 @@ fn new_secret_options() -> std::fs::OpenOptions {
 pub fn create_secret_file(path: &Path, contents: &str) -> io::Result<bool> {
     use std::io::Write as _;
 
+    let sealed = seal(file_name(path), contents.as_bytes())?;
     match new_secret_options().write(true).create_new(true).open(path) {
         Ok(mut f) => {
-            f.write_all(contents.as_bytes())?;
+            f.write_all(&sealed)?;
             f.sync_all()?;
             Ok(true)
         }
@@ -146,6 +257,33 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sealing_round_trips_and_refuses_without_the_key() {
+        // The key-taking forms: the process-wide key would race the other
+        // tests that write mesh state in parallel.
+        let k = Some([7; 32]);
+
+        // No key: plain in, plain out; plain files read as is with a key
+        // too (they migrate on the next write).
+        assert_eq!(seal_with(None, "f", b"plain").unwrap(), b"plain");
+        assert_eq!(unseal_with(k, "f", b"plain").unwrap(), b"plain");
+
+        let sealed = seal_with(k, "mesh-state.json", b"secret").unwrap();
+        assert!(is_sealed(&sealed));
+        assert!(!sealed.windows(6).any(|w| w == b"secret"));
+        assert_eq!(unseal_with(k, "mesh-state.json", &sealed).unwrap(), b"secret");
+        // Fresh nonce per write.
+        assert_ne!(seal_with(k, "mesh-state.json", b"secret").unwrap(), sealed);
+
+        // Bound to its name: swapped files fail.
+        assert!(unseal_with(k, "identity.nsec", &sealed).is_err());
+        // A wrong key or no key is an error, never empty or "missing".
+        let denied = io::ErrorKind::PermissionDenied;
+        assert_eq!(unseal_with(Some([8; 32]), "mesh-state.json", &sealed).unwrap_err().kind(), denied);
+        assert_eq!(unseal_with(None, "mesh-state.json", &sealed).unwrap_err().kind(), denied);
+        assert!(unseal_with(k, "mesh-state.json", SEAL_MAGIC).is_err());
     }
 
     #[test]

@@ -479,7 +479,7 @@ impl MeshGroup {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(STATE_FILE);
         let (meta, storage) = if path.exists() {
-            let p: Persisted = serde_json::from_slice(&std::fs::read(&path)?)
+            let p: Persisted = serde_json::from_slice(&crate::fsutil::read_secret(&path)?)
                 .map_err(|e| MeshError::State(e.to_string()))?;
             if p.version != STATE_VERSION {
                 return Err(MeshError::State(format!("unsupported state version {}", p.version)));
@@ -529,7 +529,7 @@ impl MeshGroup {
             storage: dump(&self.provider.storage),
         };
         let bytes = serde_json::to_vec(&p).map_err(|e| MeshError::State(e.to_string()))?;
-        crate::fsutil::write_private_atomic(&self.path, &bytes)?;
+        crate::fsutil::write_secret(&self.path, &bytes)?;
         Ok(())
     }
 

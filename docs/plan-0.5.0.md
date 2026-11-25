@@ -99,6 +99,7 @@ Implementation notes from the rig:
 - [x] Routine FIPS path warnings (a failed direct-path upgrade, a stale direct path, congestion marks) are hidden by default like the startup ones; `--verbose` shows them.
 - [x] Adverts carry `["reachable", "1"]` from a device run reachable, members expose `reachable`, and `mesh members` and both apps warn when no member is, so a mesh that cannot connect across networks says why.
 - [x] Both apps approve join requests (before, only the CLI could invite), notify (chat, files in the background, join requests), keep chat history across restarts, and name devices instead of npubs in pop-ups.
+- [x] Secret files sealed at rest: `set_storage_key` (core, client, FFI) seals `identity.nsec` and `mesh-state.json` with XChaCha20-Poly1305 under a key the apps keep in the Android Keystore or the desktop keyring; plain files migrate; a sealed file without the key refuses to start instead of being replaced. The CLI stays plain. Android backup and device transfer are off.
 
 ## Phase 5: release
 
@@ -120,7 +121,6 @@ Implementation notes from the rig:
 ## Open questions
 
 - `nostr` version skew: the FIPS crates use 0.44, we use 0.45. Two copies get compiled; adverts cross the Dataplane seam as JSON.
-- Key storage at rest: Android Keystore and the desktop keyring are cheap upgrades over today's 0600 hex file. In 0.5 or later?
 - Whether to offer an opt-in public mode (relay adverts, dial any npub): not in 0.5.0.
 
 ## Spike evidence (2026-11-23)

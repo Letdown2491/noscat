@@ -61,6 +61,16 @@ pub struct ClientConfig {
 Every mesh needs at least one reachable member (a port forward, a VPS, a
 public IPv6 address); members behind NAT reach each other through it.
 
+`set_storage_key(Option<[u8; 32]>)` seals the device's secret files
+(`identity.nsec`, `mesh-state.json`) at rest with XChaCha20-Poly1305 from
+then on; plain files migrate on their next write. It is process-wide:
+call it once at start, before any client or device-directory helper. The
+apps keep the key in the platform keystore (Android Keystore, the desktop
+keyring); the CLI writes plain files. A sealed file opened without the
+right key is an error ("... is encrypted ..."), never treated as missing,
+so no fresh identity replaces it; losing the key loses the device, and
+only deleting its directory (Forget mesh) recovers.
+
 ### Client
 
 `identity_npub(&IdentitySource)` resolves an identity (creating the file)
@@ -186,6 +196,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 
 | Function | Contract |
 |---|---|
+| `set_storage_key(key?)` | Seal secret files with this 32-byte key (see `set_storage_key` above). Call first. Throws for a key of the wrong length. |
 | `generate_identity()` | New `Identity { npub, secret_hex }`. |
 | `identity_from_secret(secret)` | Restore from hex or nsec. |
 | `mesh_prepare(dir, owner?, relays?)` | This directory's npub, creating `identity.nsec` if missing. `owner` is unused (kept for call compatibility). |

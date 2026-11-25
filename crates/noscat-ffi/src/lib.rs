@@ -202,6 +202,24 @@ pub struct ForwardInfo {
 
 // ---- device directory functions ---------------------------------------------
 
+/// Seal this device's secret files (identity, mesh state) with a 32-byte
+/// key from now on; existing plain files migrate on their next write. Call
+/// once at app start, before anything else. Keep the key in the Android
+/// Keystore (wrapped); losing it makes the device unreadable, and only
+/// Forget mesh recovers. None: plain files.
+#[uniffi::export]
+pub fn set_storage_key(key: Option<Vec<u8>>) -> Result<(), NoscatError> {
+    let key = match key {
+        None => None,
+        Some(k) => Some(
+            <[u8; 32]>::try_from(k.as_slice())
+                .map_err(|_| NoscatError::Failed(format!("storage key must be 32 bytes, got {}", k.len())))?,
+        ),
+    };
+    noscat_client::set_storage_key(key);
+    Ok(())
+}
+
 fn identity_file(dir: &Path) -> PathBuf {
     dir.join("identity.nsec")
 }

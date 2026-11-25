@@ -388,11 +388,30 @@ fn load_identity(src: &IdentitySource) -> Result<Identity, ClientError> {
                     )));
                 }
             }
-            let secret = std::fs::read_to_string(path)
+            let raw = std::fs::read(path)
                 .map_err(|e| ClientError::Identity(format!("cannot read {}: {e}", path.display())))?;
-            Identity::from_secret(secret.trim()).map_err(|e| id(&e))
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("identity.nsec");
+            let plain = noscat_core::fsutil::unseal(name, &raw).map_err(|e| ClientError::Identity(e.to_string()))?;
+            let secret = String::from_utf8(plain).map_err(|_| ClientError::Identity(format!("{} is not text", path.display())))?;
+            let identity = Identity::from_secret(secret.trim()).map_err(|e| id(&e))?;
+            // A plain file from before the storage key was set: seal it now.
+            if !noscat_core::fsutil::is_sealed(&raw) && noscat_core::fsutil::has_storage_key() {
+                if let Err(e) = noscat_core::fsutil::write_secret(path, &raw) {
+                    tracing::warn!("could not seal {}: {e}", path.display());
+                }
+            }
+            Ok(identity)
         }
     }
+}
+
+/// Seal the device's secret files (identity, mesh state) at rest with
+/// `key` from now on; plain files migrate on their next write. Call once
+/// at start, before any client or device-directory helper. The key lives
+/// in the platform's keystore; this crate never stores it. `None` writes
+/// plain files (the CLI's default).
+pub fn set_storage_key(key: Option<[u8; 32]>) {
+    noscat_core::fsutil::set_storage_key(key);
 }
 
 /// The npub an identity source resolves to, creating the identity file
