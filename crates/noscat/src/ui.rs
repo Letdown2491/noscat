@@ -139,7 +139,10 @@ pub fn print_event(ev: &Event, members: &[Member]) {
         Event::MeshLeft => eprintln!("# 👋 this device is no longer in a mesh"),
         Event::JoinRequest { peer, name } => {
             let who = name.as_deref().unwrap_or("a device");
-            eprintln!("# 🙋 {who} ({peer}) asks to join; type `invite {peer}` to add it");
+            eprintln!(
+                "# 🙋 {who} ({peer}) asks to join; type `invite {peer}` to add it \
+                 (or, from another terminal, `noscat mesh requests`)"
+            );
         }
     }
 }

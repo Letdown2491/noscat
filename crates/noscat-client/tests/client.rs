@@ -332,3 +332,49 @@ fn a_relay_that_comes_up_later_is_used() {
     assert_eq!(a.members().len(), 2);
     relay.shutdown();
 }
+
+/// A join request is listed by `join_requests` (read from the relays, so
+/// a CLI next to a running service sees it), and gone once the device is
+/// invited.
+#[test]
+fn join_requests_are_listed_until_invited() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let (ida, idb) = (noscat_core::Identity::generate(), noscat_core::Identity::generate());
+    let cfg = |id: &noscat_core::Identity, name: &str| ClientConfig {
+        identity: IdentitySource::Secret(id.secret_hex()),
+        relays: Some(vec![url.clone()]),
+        listen: Some(free_udp()),
+        mesh_dir: Some(tmp(name)),
+        device_name: Some(name.into()),
+        lan_discovery: false,
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
+        ..ClientConfig::default()
+    };
+    let a = Client::start(cfg(&ida, "req-a")).unwrap();
+    let b = Client::start(cfg(&idb, "req-b")).unwrap();
+    a.create_mesh("home").unwrap();
+    assert!(a.join_requests().is_empty());
+
+    let joiner = {
+        let b = b.clone();
+        let inviter = a.npub().to_string();
+        std::thread::spawn(move || b.join(&inviter, T))
+    };
+    let deadline = Instant::now() + T;
+    let req = loop {
+        if let Some(r) = a.join_requests().into_iter().find(|r| r.npub == b.npub()) {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "the join request never showed up");
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    assert_eq!(req.name.as_deref(), Some("req-b"));
+    assert!(req.age_secs < 60);
+
+    a.invite(&req.npub).unwrap();
+    joiner.join().unwrap().unwrap();
+    assert!(a.join_requests().is_empty(), "a member is no longer a request");
+    drop(relay);
+}

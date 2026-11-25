@@ -271,6 +271,9 @@ enum MeshCommand {
     },
     /// List the members and their presence.
     Members,
+    /// Devices that asked to join (scanned this device's QR) in the last
+    /// 15 minutes. In a terminal, asks y/n for each and invites on y.
+    Requests,
     /// Print this device's pairing QR. In a private mesh it names the
     /// mesh's relays, so a new device joins through them.
     Qr,
@@ -391,7 +394,117 @@ fn show(reply: Reply) {
             print_qr(&uri);
             println!("{uri}");
         }
+        Reply::Requests { requests } => {
+            if requests.is_empty() {
+                eprintln!("# no pending join requests (they expire after 15 minutes)");
+            }
+            for r in requests {
+                println!("{}", request_line(&r));
+            }
+        }
         Reply::Done | Reply::Error { .. } => {}
+    }
+}
+
+/// One join request: its name (the device's own claim), its npub and age.
+fn request_line(r: &control::RequestRow) -> String {
+    let name = r.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("(no name)");
+    let age = if r.age_secs < 60 { "just now".to_string() } else { format!("{} min ago", r.age_secs / 60) };
+    format!("{name}  {}  asked {age}", r.npub)
+}
+
+/// `mesh requests`: list pending join requests and, in a terminal, ask
+/// y/n for each, inviting on y. Through the running process if there is
+/// one (a service), else on a device started here.
+fn requests(dir: &Path, d: &DeviceArgs) -> Result<()> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    let interactive = std::io::stdin().is_terminal();
+    let rt = tokio::runtime::Runtime::new()?;
+    let dev = Dev::open(dir, d, &rt)?;
+    let mut list = Vec::new();
+    dev.call(&rt, Op::Requests, |r| match r {
+        Reply::Requests { requests } => list = requests,
+        other => show(other),
+    })?;
+    if list.is_empty() || !interactive {
+        show(Reply::Requests { requests: list });
+        return Ok(());
+    }
+    eprintln!("# a name is the device's own claim: check the npub on its screen");
+    let stdin = std::io::stdin();
+    for r in list {
+        eprint!("{}\ninvite? [y/N] ", request_line(&r));
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        if stdin.lock().read_line(&mut answer)? == 0 {
+            break;
+        }
+        if matches!(answer.trim(), "y" | "Y" | "yes") {
+            if let Err(e) = dev.call(&rt, Op::Invite { target: r.npub.clone() }, show) {
+                eprintln!("# could not invite {}: {e}", r.npub);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The device a command runs on: the running process (through its
+/// control channel) or one started here for the command.
+enum Dev<'a> {
+    Remote(&'a Path),
+    Local(&'a Path, Ctx),
+}
+
+impl<'a> Dev<'a> {
+    fn open(dir: &'a Path, d: &DeviceArgs, rt: &tokio::runtime::Runtime) -> Result<Self> {
+        if rt.block_on(control::connect(dir)).is_some() {
+            return Ok(Dev::Remote(dir));
+        }
+        if let Some(ctx) = start(dir, d, rt)? {
+            return Ok(Dev::Local(dir, ctx));
+        }
+        // Another process holds the directory; it may still be starting.
+        for _ in 0..20 {
+            if rt.block_on(control::connect(dir)).is_some() {
+                return Ok(Dev::Remote(dir));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        bail!("another noscat process is using {} and does not answer", dir.display());
+    }
+
+    fn call(&self, rt: &tokio::runtime::Runtime, op: Op, mut show: impl FnMut(Reply)) -> Result<()> {
+        match self {
+            Dev::Remote(dir) => {
+                let (conn, token) = rt
+                    .block_on(control::connect(dir))
+                    .ok_or_else(|| anyhow::anyhow!("the running noscat went away"))?;
+                rt.block_on(control::ask(conn, token, op, show))
+            }
+            Dev::Local(_, ctx) => rt.block_on(async {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let run = async move {
+                    let res = control::exec(ctx, op, &tx, std::future::pending()).await;
+                    drop(tx);
+                    res
+                };
+                let drain = async {
+                    while let Some(r) = rx.recv().await {
+                        show(r);
+                    }
+                };
+                let (res, ()) = tokio::join!(run, drain);
+                res.map_err(|e| anyhow::anyhow!(e))
+            }),
+        }
+    }
+}
+
+impl Drop for Dev<'_> {
+    fn drop(&mut self) {
+        if let Dev::Local(dir, _) = self {
+            control::remove(dir);
+        }
     }
 }
 
@@ -639,6 +752,7 @@ fn main() -> Result<()> {
                 MeshCommand::Remove { target } => Op::Remove { target },
                 MeshCommand::Leave { timeout } => Op::Leave { timeout_secs: timeout },
                 MeshCommand::Members => Op::Members,
+                MeshCommand::Requests => return requests(&dir, d),
                 MeshCommand::Qr => Op::Qr,
                 MeshCommand::Relays { cmd } => match cmd {
                     None => Op::Relays { add: Vec::new(), remove: Vec::new() },

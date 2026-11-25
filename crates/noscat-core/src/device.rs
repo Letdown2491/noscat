@@ -18,7 +18,7 @@
 //! package), [`Device::join`] waits for an invitation from a named device,
 //! [`Device::remove`] and [`Device::leave`] shrink the mesh.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -153,6 +153,16 @@ pub enum DeviceEvent {
     /// device's QR and is waiting in [`Device::join`]). Only a prompt:
     /// nothing happens unless someone calls [`Device::invite`].
     JoinRequest { device: PublicKey, name: Option<String> },
+}
+
+/// A device that asked to join and is not a member yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingJoin {
+    pub device: PublicKey,
+    /// The name it gave (its own claim).
+    pub name: Option<String>,
+    /// When it asked (unix seconds).
+    pub asked_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1177,6 +1187,46 @@ impl Device {
         self.sync_relays(true).await;
         self.send_advert().await;
         Ok(())
+    }
+
+    /// Devices that asked to join (scanned this device's QR) in the last
+    /// 15 minutes and are not members yet, oldest first, one per device.
+    /// Fetched from the relays, so it works in a process started after
+    /// the request arrived (`noscat mesh requests` next to a service).
+    pub async fn pending_joins(&self) -> Vec<PendingJoin> {
+        if !self.in_mesh().await {
+            return Vec::new();
+        }
+        let relays = self.all_relays().await;
+        // Gift wraps carry a randomized past time: look back as the inbox
+        // does, then judge age by the request inside.
+        let events = self
+            .fetch(
+                Filter::new()
+                    .kind(Kind::GiftWrap)
+                    .pubkey(self.device())
+                    .since(Timestamp::from_secs(now().saturating_sub(GIFT_WRAP_LOOKBACK_SECS))),
+                &relays,
+            )
+            .await;
+        let members: BTreeSet<PublicKey> =
+            self.inner.group.lock().await.members().unwrap_or_default().iter().map(|m| m.device).collect();
+        let mut latest: BTreeMap<PublicKey, PendingJoin> = BTreeMap::new();
+        for ev in &events {
+            let Ok(Some(req)) = marmot::transport::unwrap_join_request(self.inner.identity.keys(), ev) else {
+                continue;
+            };
+            if now().saturating_sub(req.created_at) > JOIN_REQUEST_TTL_SECS || members.contains(&req.sender) {
+                continue;
+            }
+            if latest.get(&req.sender).is_some_and(|p| p.asked_at >= req.created_at) {
+                continue;
+            }
+            latest.insert(req.sender, PendingJoin { device: req.sender, name: req.name, asked_at: req.created_at });
+        }
+        let mut out: Vec<PendingJoin> = latest.into_values().collect();
+        out.sort_by_key(|p| p.asked_at);
+        out
     }
 
     /// Add a device to the mesh by its key. Its newest key package is

@@ -46,12 +46,22 @@ pub enum Op {
     Relays { add: Vec<String>, remove: Vec<String> },
     Private { private: bool },
     Qr,
+    /// Devices that asked to join and are not members yet.
+    Requests,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Request {
     token: String,
     op: Op,
+}
+
+/// A join request as `mesh requests` shows it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RequestRow {
+    pub npub: String,
+    pub name: Option<String>,
+    pub age_secs: u64,
 }
 
 /// A member row as `mesh members` prints it.
@@ -77,6 +87,8 @@ pub enum Reply {
     Members { mesh: Option<String>, members: Vec<Row> },
     /// This device's pairing URI, to show as a QR.
     Qr { uri: String },
+    /// Pending join requests, oldest first.
+    Requests { requests: Vec<RequestRow> },
     Done,
     Error { error: String },
 }
@@ -213,6 +225,15 @@ pub async fn exec(
             } else {
                 line(out, "the mesh is shared: its devices use their own relays too");
             }
+        }
+        Op::Requests => {
+            let (in_mesh, list) = ctx.blocking(|c| Ok((c.mesh_name().is_some(), c.join_requests()))).await?;
+            if !in_mesh {
+                return Err("not in a mesh".into());
+            }
+            let requests =
+                list.into_iter().map(|r| RequestRow { npub: r.npub, name: r.name, age_secs: r.age_secs }).collect();
+            let _ = out.send(Reply::Requests { requests });
         }
         Op::Qr => {
             let uri = ctx.blocking(|c| Ok(c.pairing_uri())).await?;

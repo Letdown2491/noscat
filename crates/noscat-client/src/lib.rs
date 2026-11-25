@@ -122,6 +122,17 @@ impl Default for ClientConfig {
     }
 }
 
+/// A device that asked to join (scanned this device's QR) and is not a
+/// member yet. Its name is its own claim: compare the npub with the
+/// joining device's screen before inviting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinRequest {
+    pub npub: String,
+    pub name: Option<String>,
+    /// Seconds since it asked.
+    pub age_secs: u64,
+}
+
 /// A member of this device's mesh, as UIs show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -880,6 +891,22 @@ impl Client {
         let pk = parse_target(target)?;
         self.inner.rt().block_on(self.inner.device.invite(pk))?;
         Ok(())
+    }
+
+    /// Devices that asked to join in the last 15 minutes and are not
+    /// members yet, oldest first. Read from the relays, so a process
+    /// started after the request (a CLI next to a service) sees it too.
+    /// Invite one with [`Client::invite`].
+    pub fn join_requests(&self) -> Vec<JoinRequest> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.inner
+            .rt()
+            .block_on(self.inner.device.pending_joins())
+            .into_iter()
+            .map(|p| JoinRequest { npub: npub_of(&p.device), name: p.name, age_secs: now.saturating_sub(p.asked_at) })
+            .collect()
     }
 
     /// Wait up to `timeout` for an invitation from `inviter` (npub or

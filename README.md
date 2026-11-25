@@ -157,9 +157,14 @@ names a join request and waits. On that device, `up` prints
 # 🙋 laptop (npub1...) asks to join; type `invite npub1...` to add it
 ```
 
-Type that (or run `noscat mesh invite <npub>` from another terminal) and
-the new device is in. On a phone you scan the QR instead of typing the
-npub. The apps cannot approve join requests yet; a CLI member does.
+Type that and the new device is in. On a phone you scan the QR instead
+of typing the npub. In the apps a request shows on the Devices tab with
+Approve and Decline.
+
+When `up` runs as a service there is no terminal to type into. Run
+`noscat mesh requests` instead: it lists the devices that asked in the
+last 15 minutes and asks y/n for each (a name is the device's own claim,
+so check the npub on its screen). Not in a terminal, it only lists them.
 
 To skip approving while you set up devices, run `noscat up --accept-joins`:
 every device that asks is invited. A join request only needs this

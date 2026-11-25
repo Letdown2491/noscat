@@ -182,6 +182,12 @@ Leave the mesh. Another member completes it;
 .B \-\-timeout <secs>
 waits for that (default 120). The last member just forgets the mesh.
 .TP
+.B mesh requests
+List the devices that asked to join (scanned this device's QR) in the
+last 15 minutes and are not members yet. In a terminal, ask y/n for each
+and invite it on y. Works next to a running service: requests are read
+from the relays.
+.TP
 .B mesh members
 List the members, their names, presence, which are connected (data can
 flow to them now; only known while
