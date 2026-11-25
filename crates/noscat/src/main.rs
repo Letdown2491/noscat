@@ -376,7 +376,20 @@ fn config(dir: &Path, d: &DeviceArgs) -> Result<ClientConfig> {
 /// Start the device for `dir`, serving the control channel for others.
 /// `None` when another process runs it.
 fn start(dir: &Path, d: &DeviceArgs, rt: &tokio::runtime::Runtime) -> Result<Option<Ctx>> {
-    let client = match Client::start(config(dir, d)?) {
+    start_joining(dir, d, rt, Vec::new())
+}
+
+/// As [`start`], using only `join_relays` (a pairing code's) until the
+/// join ends, so nothing reaches this device's own or the default relays.
+fn start_joining(
+    dir: &Path,
+    d: &DeviceArgs,
+    rt: &tokio::runtime::Runtime,
+    join_relays: Vec<String>,
+) -> Result<Option<Ctx>> {
+    let mut cfg = config(dir, d)?;
+    cfg.join_relays = join_relays;
+    let client = match Client::start(cfg) {
         Ok(c) => c,
         Err(ClientError::Busy(_)) => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -515,7 +528,13 @@ fn run_op(dir: &Path, d: &DeviceArgs, op: Op) -> Result<()> {
     if let Some((conn, token)) = rt.block_on(control::connect(dir)) {
         return rt.block_on(control::ask(conn, token, op, show));
     }
-    let Some(ctx) = start(dir, d, &rt)? else {
+    // `mesh join` with a code naming a private mesh's relays: the device
+    // started for it uses only those.
+    let join_relays = match &op {
+        Op::Join { inviter, .. } => noscat_client::parse_pairing_relays(inviter),
+        _ => Vec::new(),
+    };
+    let Some(ctx) = start_joining(dir, d, &rt, join_relays)? else {
         // Another process holds the directory; it may still be starting.
         for _ in 0..20 {
             if let Some((conn, token)) = rt.block_on(control::connect(dir)) {

@@ -19,8 +19,9 @@ Think Tailscale, but:
   account can even be invited into a mesh),
 - there is no coordinator and no single owner: lose any device and the
   mesh carries on,
-- everything runs in userspace on Linux, macOS, Windows, the BSDs and
-  Android; no root, no kernel module,
+- everything runs in userspace on Linux, macOS, Windows and Android (the
+  BSDs return after 0.5.0, [#19](https://github.com/Letdown2491/noscat/issues/19));
+  no root, no kernel module,
 - it is written in Rust.
 
 The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-noscat.md).
@@ -36,7 +37,8 @@ noscat is a single binary, packaged for every major platform (the Linux
 packages are static, with no dependencies): Linux (x86_64 and aarch64: deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
 bottles), and Windows (Scoop and winget, winget in community review). Nix
-and cargo cover everything else, including the BSDs from source.
+and cargo cover everything else (the BSDs from source with 0.4.3; 0.5
+waits on an upstream fix, [#19](https://github.com/Letdown2491/noscat/issues/19)).
 
 **All installation options: [`INSTALL.md`](INSTALL.md)**
 
@@ -295,7 +297,10 @@ noscat-relay. noscat never logs in to any other relay. Add the relay
 first and check members reach it, then go private. A private mesh's QR
 (`noscat mesh qr`, or the one `up` prints) names its relays
 (`noscat:<npub>?relay=wss%3A%2F%2F...`), so a new device that scans it
-joins through them alone.
+joins through them alone: from its first moment it uses only those relays,
+so not even its key package reaches the public ones. (A `noscat up`
+already running when `mesh join` is called has used its relays since it
+started.)
 
 ## Development
 

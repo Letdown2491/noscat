@@ -236,6 +236,17 @@ fn with_device<T>(
     relays: Option<Vec<String>>,
     f: impl FnOnce(&noscat_client::Client) -> Result<T, NoscatError>,
 ) -> Result<T, NoscatError> {
+    with_device_joining(dir, relays, Vec::new(), f)
+}
+
+/// As [`with_device`], a device started here using only `join_relays`
+/// (a pairing code's) until its join ends.
+fn with_device_joining<T>(
+    dir: &str,
+    relays: Option<Vec<String>>,
+    join_relays: Vec<String>,
+    f: impl FnOnce(&noscat_client::Client) -> Result<T, NoscatError>,
+) -> Result<T, NoscatError> {
     let dir = PathBuf::from(dir);
     if let Some(c) = noscat_client::Client::running(&dir) {
         return f(&c);
@@ -243,6 +254,7 @@ fn with_device<T>(
     let c = noscat_client::Client::start(noscat_client::ClientConfig {
         identity: noscat_client::IdentitySource::File(identity_file(&dir)),
         relays,
+        join_relays,
         mesh_dir: Some(dir),
         ..noscat_client::ClientConfig::default()
     })
@@ -286,7 +298,11 @@ pub fn mesh_join(
     owner_npub: String,
     relays: Option<Vec<String>>,
 ) -> Result<Vec<MeshMember>, NoscatError> {
-    with_device(&dir, relays, |c| {
+    // A code naming a private mesh's relays: the device started for the
+    // join uses only those, so its key package never reaches the public
+    // relays.
+    let join_relays = noscat_client::parse_pairing_relays(&owner_npub);
+    with_device_joining(&dir, relays, join_relays, |c| {
         c.join(&owner_npub, Duration::from_secs(timeout_secs)).map_err(|e| match e {
             noscat_client::ClientError::Mesh(m) if m.contains("timed out") => {
                 NoscatError::Failed("no invitation arrived in time".into())

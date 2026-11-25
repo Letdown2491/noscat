@@ -33,12 +33,18 @@ fn node(tag: &str) -> Node {
 }
 
 async fn start(n: &Node, name: &str, relay: &str, all: &[&Node]) -> Device {
+    start_joining(n, name, relay, &[], all).await
+}
+
+/// As [`start`], started to join through `join` (a pairing code's relays).
+async fn start_joining(n: &Node, name: &str, relay: &str, join: &[String], all: &[&Node]) -> Device {
     let peer_addresses: HashMap<PublicKey, Vec<SocketAddr>> =
         all.iter().map(|o| (o.id.public_key(), vec![o.addr])).collect();
     let cfg = DeviceConfig {
         dir: n.dir.clone(),
         name: name.into(),
         relays: vec![relay.into()],
+        join_relays: join.to_vec(),
         dataplane: DataplaneConfig {
             bind: n.addr,
             reachability: Reachability::BehindNat,
@@ -258,13 +264,27 @@ async fn private_mesh_on_its_own_relay() {
     .await;
     assert!(got.is_ok(), "no app event over the private relay");
 
-    // A new device, configured with the dead public relay only, joins
-    // through the relay its pairing code names.
-    let c = start(&nc, "charlie", &public_url, &all).await;
+    // A new device, configured with another public relay (alive), joins
+    // through the relay its pairing code names, started for that join:
+    // nothing of it, not even its key package, reaches the public relay.
+    let decoy = LocalRelay::new(RelayBuilder::default());
+    decoy.run().await.unwrap();
+    let decoy_url = decoy.url().await.to_string();
+    let c = start_joining(&nc, "charlie", &decoy_url, &[own_url.clone()], &all).await;
     invite_and_join_via(&a, &c, &[own_url.clone()]).await;
     assert!(c.is_private().await);
     assert_eq!(c.mesh_relays().await, [own_url.clone()]);
     until("b sees charlie", || async { b.members().await.iter().any(|m| m.device == c.device()) }).await;
+    let probe = nostr_sdk::prelude::Client::default();
+    probe.add_relay(decoy_url.as_str()).await.unwrap();
+    probe.connect().await;
+    let leaked = probe
+        .fetch_events(nostr::prelude::Filter::new().author(c.device()))
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(leaked.is_empty(), "the joining device published to a public relay: {:?}", leaked.iter().map(|e| e.kind).collect::<Vec<_>>());
+    decoy.shutdown();
 
     for d in [a, b, c] {
         d.shutdown().await;

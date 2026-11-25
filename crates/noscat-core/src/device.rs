@@ -111,6 +111,11 @@ pub struct DeviceConfig {
     /// This device's relays: where its key package and inbox live, and the
     /// mesh's relays when it creates one.
     pub relays: Vec<String>,
+    /// The relays a pairing code named, when the device starts in order
+    /// to join through them (a private mesh's). Until the join ends it
+    /// uses only these, from the first moment: its key package and relay
+    /// lists never reach `relays`. Ignored once in a mesh.
+    pub join_relays: Vec<String>,
     pub dataplane: DataplaneConfig,
     /// Known UDP addresses for some members (a home server with a fixed
     /// address). Tried directly in addition to what adverts say.
@@ -320,6 +325,7 @@ impl Device {
     /// Start the device: open its mesh state, bring up the data plane and
     /// streams, connect to relays and catch up.
     pub async fn start(identity: Identity, cfg: DeviceConfig) -> Result<Self, DeviceError> {
+        let join_relays = union(&cfg.join_relays, &[]);
         std::fs::create_dir_all(&cfg.dir).map_err(|e| DeviceError::Other(e.to_string()))?;
         let group = MeshGroup::open(&cfg.dir, &identity)?;
         let dp = Arc::new(Dataplane::start(&identity, cfg.dataplane.clone()).await?);
@@ -355,7 +361,7 @@ impl Device {
             last_reply: StdMutex::new(None),
             join_requests: StdMutex::new(HashMap::new()),
             login,
-            join_relays: StdMutex::new(Vec::new()),
+            join_relays: StdMutex::new(join_relays),
             retry_pending: std::sync::atomic::AtomicBool::new(false),
             going_private: std::sync::atomic::AtomicBool::new(false),
             catching_up: Mutex::new(()),

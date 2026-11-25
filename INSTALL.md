@@ -99,6 +99,8 @@ There are no prebuilt BSD packages yet; `cargo install` above is the
 install method. 0.4.3 builds on all three. 0.5 does not build on FreeBSD
 yet: one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket
 option, and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
+BSD support comes back after the 0.5.0 release
+([#19](https://github.com/Letdown2491/noscat/issues/19)).
 OpenBSD and NetBSD have not been tried with 0.5. A FreeBSD port (and then
 pkgsrc-wip) is on the table if there is demand.
 

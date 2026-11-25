@@ -33,7 +33,7 @@
   - An External signaling hook so traversal offers and answers can travel inside the Marmot group, like adverts (Phase 1).
 - [ ] Ask MDK about publishing `cgka-engine` to crates.io, and OpenMLS about the 0.10.0 stable timeline.
 - [x] Build the network test rig (`tests/netrig/`; NAT scenarios plus QUIC under 3% loss, relayed and punched): two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
-- [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes.
+- [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes. After 0.5.0: [#19](https://github.com/Letdown2491/noscat/issues/19).
 
 ## Phase 1: first-contact experiment (blocks the Dataplane design)
 
@@ -106,7 +106,7 @@ Implementation notes from the rig:
 
 ## Phase 5: release
 
-- [ ] All five platforms green in CI, plus the netns NAT and loss suite. **FreeBSD blocks on upstream draft 01** (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands.
+- [ ] Linux (glibc and musl, x86_64 and aarch64), macOS (x86_64 and aarch64) and Windows green in CI, plus the netns NAT and loss suite. FreeBSD is out of 0.5.0 (decided 2026-11-25) and done after release in [#19](https://github.com/Letdown2491/noscat/issues/19): it blocks on upstream draft 01 (`nvpn-mdns-sd` still uses `socket-pktinfo` 0.3): a workspace `[patch]` would fix CI but not `cargo install noscat`, so the release needs the upstream fix published. glibc CI runners also need libdbus and libclang until draft 02 lands.
 - [ ] Binary size checked after strip and LTO (spike binaries were 20 to 29 MB unstripped, 0.4 is about 10 MB).
 - [ ] Lockstep 0.5.0 across noscat, noscat-desktop, noscat-android: publish the crates, drop the desktop's `[patch.crates-io]`, point `scripts/build-native.sh` at the published 0.5.0.
 - [ ] Android release build: `scripts/build-native.sh` builds the Rust library unoptimized (stripped debug profile), and the Gradle project has no release signing.
@@ -120,14 +120,15 @@ Implementation notes from the rig:
 - **MeshGroup builds on OpenMLS 0.10.0-rc.1**; switch to 0.10 stable when released.
 - **Fresh start from 0.4**: no 0.4 state is read, including identities. 0.5 keeps its state in a new location so 0.4 files are left alone.
 - **Not in 0.5.0** (decided 2026-11-24): removing a device and creating a mesh from the apps (both stay CLI only; noscat already exposes them), and less frequent adverts (they stay every two minutes).
-- **Phase 5 waits for the user's test pass** of all three apps.
+- **Phase 5 waits for the user's test pass** of all three apps. The test pass came back good on 2026-11-25.
 - **Private meshes are in 0.5.0** (2026-11-25), so the user can test with noscat-relay on a new VPS.
 - **Git**: work happened on `v0.5.0` branches and moved to each repo's default branch (`main`, `master` for noscat-android) on 2026-11-24; all work continues there. No crates.io publishing and no tags until release. The apps build against noscat `main` until then.
 
-## Deferred until after the test pass (2026-11-25)
+## After the test pass (2026-11-25)
 
-- A device outside a mesh publishes its key package to the public default relays at start, even when it will join a private mesh through its own relay. Decide after testing whether to hold it back until a pairing code names relays.
-- The desktop app does not call `network_changed` on a network switch (the Android app does since 2026-11-25); paths recover by timeout.
+- [x] (Decided 2026-11-25: when the pairing code names relays, use only those.) A device started to join with a code naming relays (`mesh join`, the apps' join) uses only them from its first moment: `DeviceConfig.join_relays` / `ClientConfig.join_relays`. Before, it published its key package and relay lists to the public defaults at start. The private-mesh test checks a live public relay gets nothing from the joiner.
+- [x] The desktop app watches this machine's addresses (every 3 s, `if-addrs`) and calls `network_changed` when they change, as the Android app does on a new default network.
+- [x] FreeBSD build moved out of the 0.5.0 release (2026-11-25): [#19](https://github.com/Letdown2491/noscat/issues/19), done after release.
 
 ## Open questions
 

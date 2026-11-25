@@ -82,6 +82,11 @@ pub struct ClientConfig {
     /// Relay URLs for this device's key package, inbox and new meshes.
     /// `None` uses [`DEFAULT_RELAYS`].
     pub relays: Option<Vec<String>>,
+    /// The relays a pairing code names ([`parse_pairing_relays`]), when
+    /// this client starts in order to join through them: until the join
+    /// ends it uses only these, so nothing (not even its key package)
+    /// reaches `relays` or the defaults. Ignored once in a mesh.
+    pub join_relays: Vec<String>,
     /// UDP bind address of the data plane. `None` picks a free port, or
     /// [`DEFAULT_LISTEN_PORT`] when `reachable` is set.
     pub listen: Option<SocketAddr>,
@@ -110,6 +115,7 @@ impl Default for ClientConfig {
         Self {
             identity: IdentitySource::Ephemeral,
             relays: None,
+            join_relays: Vec::new(),
             listen: None,
             mesh_dir: None,
             device_name: None,
@@ -803,6 +809,7 @@ impl Client {
             dir: dir.clone(),
             name: config.device_name.clone().unwrap_or_else(noscat_core::default_device_name),
             relays: config.relays.clone().unwrap_or_else(default_relays),
+            join_relays: config.join_relays.clone(),
             dataplane,
             peer_addresses,
         };

@@ -20,7 +20,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 ## Non-negotiable rules
 
 1. **Cross-platform, always.** The CLI ships for Linux (glibc and musl), macOS
-   (x86_64 and aarch64), Windows, and the BSDs (via `cargo install`). Every change
+   (x86_64 and aarch64), Windows, and the BSDs (via `cargo install`; 0.5 waits
+   on an upstream FIPS fix, issue #19, so keep BSD cfg hygiene anyway). Every change
    must compile and behave correctly on all of them:
    - No platform-specific code outside `#[cfg(...)]` branches with a fallback for
      the other platforms (see `IdentitySource::File` in `crates/noscat-client` for
