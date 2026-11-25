@@ -16,6 +16,7 @@
 //! datagram to a new peer (it would otherwise cost QUIC a 1 s retransmit),
 //! and turns "member offline" into a prompt error.
 
+use nostr::nips::nip19::ToBech32 as _;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IoSliceMut};
@@ -476,7 +477,7 @@ impl Streams {
         };
         tokio::time::timeout(timeout, attempt)
             .await
-            .map_err(|_| StreamsError::Unreachable(peer.to_hex()))
+            .map_err(|_| StreamsError::Unreachable(peer.to_bech32().unwrap_or_else(|_| peer.to_hex())))
     }
 
     /// Open a QUIC connection to a member. Waits up to `timeout` for the
@@ -487,7 +488,7 @@ impl Streams {
         timeout: Duration,
     ) -> Result<Connection, StreamsError> {
         if !self.is_allowed(&peer) {
-            return Err(StreamsError::Unreachable(peer.to_hex()));
+            return Err(StreamsError::Unreachable(peer.to_bech32().unwrap_or_else(|_| peer.to_hex())));
         }
         self.probe(peer, timeout).await?;
         let addr = self
