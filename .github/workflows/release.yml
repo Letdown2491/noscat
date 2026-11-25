@@ -162,12 +162,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Install libdbus and libclang (the FIPS crates link them on glibc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libclang-dev
       - name: Flag breaking changes against the published crates
         # Mechanical backstop for API.md: a signature break must ride a
-        # minor bump (0.x rules), never a patch.
+        # minor bump (0.x rules), never a patch. Checks every workspace
+        # crate by default.
         uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          workspace-checks: true
 
   release:
     name: publish release
