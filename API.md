@@ -125,6 +125,31 @@ Mesh:
 | `network_changed()` | `()` | Re-check paths after a network switch. Apps call it when the platform reports a new default network (Wi-Fi to cellular and back): without it, paths through the old address take minutes to time out. |
 | `events()` | `Option<Receiver<Event>>` | Take the receiver once; pump it forever. |
 
+Access (who may do what to this device; new in 0.6):
+
+Incoming streams fall in three groups: `AccessGroup::Send` (files, chat,
+clipboard), `Services` (forwards) and `Control` (terminal, from 0.6). Each
+member gets an `AccessRule` per group: `Allow`, `Deny` or `Ask` (Control
+only). Defaults: send and services allow, control asks. Rules are saved in
+the state directory (`access.json`, sealed under a storage key) and never
+leave the device. A refused opener gets `ClientError::Stream` with "not
+permitted" (chat: `ChatFailed`, files: `TransferFailed`).
+
+| Method | Returns | Contract |
+|---|---|---|
+| `access_defaults()` | `AccessRules` | `send, services, control`: the rules for members without their own. |
+| `access_of(device)` | `AccessRules` | The rules that apply to `device` (its own, else the defaults). |
+| `access_devices()` | `Vec<(String, Vec<(AccessGroup, AccessRule)>)>` | Members with rules of their own (npub) and those rules. |
+| `set_access(device?, group, rule?)` | `()` | Set a member's rule (`None` device: the default; `None` rule: back to the default). `Ask` outside Control is an error. Saved at once. |
+| `reset_access(device)` | `()` | Drop a member's own rules. |
+| `set_access_prompts(on)` | `()` | An app is here to answer prompts. Off (the default: a headless host), a group set to ask refuses at once and logs `NoOneToAsk`. |
+| `answer_access(id, answer)` | `()` | Answer an `AccessRequest`: `AccessAnswer::Once`, `Always` (also saves an allow rule) or `Deny`. Errors once it no longer waits. |
+| `answer_waiting(device, group, allow)` | `bool` | Answer a member's waiting request without its id (the CLI's `allow`/`deny`); whether one waited. |
+| `allow_once(device, group)` | `()` | Allow the waiting request, or else the member's next one (until the client stops). |
+| `access_requests()` | `Vec<AccessRequest>` | `id, peer, group, age_secs, outcome`: waiting requests, then the last 50 refused or asked ones, newest first. `AccessOutcome`: `Waiting, Allowed, Denied, TimedOut, NoOneToAsk`. A refusal repeating within a minute is one entry. |
+
+None of these are in the FFI yet (0.6.0 phase 4).
+
 Receiving:
 
 | Method | Returns | Contract |
@@ -179,8 +204,10 @@ Peers are bech32 npubs.
 | `MeshChangeUndone` | | A membership change of ours lost a race with another member's; retry it. |
 | `MeshLeft` | | Removed, or left. |
 | `JoinRequest` | `peer, name` | A device that scanned this device's QR (or otherwise knows its npub) asks to be invited: prompt, then `invite(peer)`. Only while in a mesh; at most once per request. |
+| `AccessRequest` | `id, peer, group` | A member asks for a group set to ask: prompt (allow once, always allow, deny), then `answer_access(id, ..)` within `ACCESS_ASK_TIMEOUT` (60 s). Only after `set_access_prompts(true)`. |
+| `AccessResolved` | `id, peer, group, outcome` | An asked request ended (answered here, by the CLI, or timed out): close its prompt. |
 
-Inbound streams are always handled by the client.
+Inbound streams are always handled by the client, after its access check.
 
 Delivery contracts:
 
@@ -268,7 +295,9 @@ without `path`, and `Roster { members: List<MeshMember> }`. New in 0.5:
 `TransferStarted` (with `path: String?`) and an `id` on every transfer
 event, `MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
 `JoinRequest { peer, name? }` (a device that scanned this one's QR asks
-to be invited: show a prompt, then `invite(peer)`).
+to be invited: show a prompt, then `invite(peer)`). The client's
+`AccessRequest` and `AccessResolved` are not delivered over the FFI yet;
+they arrive with the access methods in 0.6.0 phase 4.
 
 ---
 

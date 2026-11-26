@@ -233,11 +233,31 @@ answers, which waits out FIPS session setup.
 Each app exchange is one bidirectional QUIC stream. The opener writes a
 one-byte service tag and a header; the accepter answers with a status.
 
+### Access
+
+Membership lets a device open streams; it does not oblige the accepter to
+serve them. Each accepter decides per member and per access group, and
+answers "not permitted" when its rules say no:
+
+| Group | Protocols |
+|---|---|
+| send | file (tag 1), text (tag 2) |
+| services | forward (tag 3) |
+| control | protocols that act on the device as its user (terminal, from 0.6) |
+
+The accepter takes the opener's identity from the stream's connection,
+which the QUIC handshake authenticates; the header carries no claim of
+it. The rules are local to the accepter: they are never put in the group
+state or in adverts. The reference implementation allows send and
+services and asks its user on first use for control; a protocol that
+asks tells the opener it waits, and treats no answer within 60 seconds
+as not permitted. Older openers read "not permitted" as a refusal.
+
 ### File (tag 1)
 
 ```
 opener:   [1][u16 name_len][name][u64 size][32-byte sha256]
-accepter: [u64 offset]          u64::MAX = refused
+accepter: [u64 offset]          u64::MAX = refused, 0xFFFFFFFFFFFFFFFE = not permitted
 opener:   bytes offset..size, then finishes the stream
 accepter: [u8 result]           0 = verified, 1 = sha256 mismatch
 ```
@@ -255,7 +275,7 @@ accepter: [u8 result]           0 = verified, 1 = sha256 mismatch
 
 ```
 opener:   [2][u8 kind][u32 len][utf8 text]    kind 0 = chat, 1 = clipboard
-accepter: [0] once it has the text
+accepter: [0] once it has the text, [2] not permitted
 ```
 
 Text is at most 65536 bytes. A receiver that gets clipboard text MAY put
@@ -265,7 +285,7 @@ it on the system clipboard; it SHOULD tell the user.
 
 ```
 opener:   [3][u16 port]
-accepter: [u8 status]    0 = bridged, 1 = refused
+accepter: [u8 status]    0 = bridged, 1 = refused, 2 = not permitted
 then raw bytes both ways until either side finishes
 ```
 
@@ -318,6 +338,8 @@ noscat:<npub>?relay=<url>&relay=<url>
 - Endpoints (IP addresses) are visible to other members only.
 - Each device keeps its group state in one file written atomically with
   owner-only permissions. Anyone who reads it can act as that device.
+- A member can do to a device only what that device's access rules
+  allow it (see Access). Control is never on by default.
 - File receivers bound what they accept (size limit, name rules) and
   never write outside their receive directory.
 

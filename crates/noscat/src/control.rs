@@ -44,6 +44,13 @@ pub enum Op {
     Rename { name: String },
     /// List the mesh's relays, or add and remove some.
     Relays { add: Vec<String>, remove: Vec<String> },
+    /// Access rules and recent requests.
+    Access,
+    /// Set a member's (or with `everyone`, the default) rule for a group,
+    /// or with `once`, answer one request only.
+    SetAccess { who: String, group: String, rule: String, once: bool },
+    /// Drop a member's own access rules.
+    ResetAccess { who: String },
     /// List the mesh's STUN servers, or add and remove some.
     Stun { add: Vec<String>, remove: Vec<String> },
     Private { private: bool },
@@ -217,6 +224,91 @@ pub async fn exec(
             for r in relays {
                 line(out, format!("  {r}"));
             }
+        }
+        Op::Access => {
+            let (defaults, devices, requests, members) = ctx
+                .blocking(|c| Ok((c.access_defaults(), c.access_devices(), c.access_requests(), c.members())))
+                .await?;
+            let rules = |r: noscat_client::AccessRules| {
+                format!("send {}, services {}, control {}", r.send.name(), r.services.name(), r.control.name())
+            };
+            line(out, format!("everyone: {}", rules(defaults)));
+            for (npub, own) in devices {
+                let own: Vec<String> = own.iter().map(|(g, r)| format!("{} {}", g.name(), r.name())).collect();
+                line(out, format!("{}: {}", crate::ui::label(&members, &npub), own.join(", ")));
+            }
+            if !requests.is_empty() {
+                line(out, "recent requests:");
+            }
+            for r in requests {
+                use noscat_client::AccessOutcome as O;
+                let what = match r.outcome {
+                    O::Waiting => "waiting: `noscat allow` or `noscat deny` answers",
+                    O::Allowed => "allowed",
+                    O::Denied => "refused",
+                    O::TimedOut => "not answered in time, refused",
+                    O::NoOneToAsk => "refused: no app here to ask; allow it ahead of time",
+                };
+                let when = if r.age_secs < 5 { "now".to_string() } else { format!("{} ago", crate::ui::age(r.age_secs)) };
+                line(out, format!("  {when}  {}  {}: {what}", crate::ui::label(&members, &r.peer), r.group.name()));
+            }
+        }
+        Op::SetAccess { who, group, rule, once } => {
+            use noscat_client::{AccessGroup, AccessRule};
+            let g = AccessGroup::parse(&group).ok_or_else(|| format!("unknown access group {group:?}"))?;
+            let r = match rule.as_str() {
+                "allow" => AccessRule::Allow,
+                "deny" => AccessRule::Deny,
+                "ask" => AccessRule::Ask,
+                _ => return Err(format!("unknown rule {rule:?}")),
+            };
+            if r == AccessRule::Ask && g != AccessGroup::Control {
+                return Err("only control can ask; allow or deny the others".into());
+            }
+            if who.trim().eq_ignore_ascii_case("everyone") {
+                if once {
+                    return Err("--once needs a member, not everyone".into());
+                }
+                ctx.blocking(move |c| c.set_access(None, g, Some(r))).await?;
+                line(out, format!("everyone: {} {}", g.name(), r.name()));
+                return Ok(());
+            }
+            let members = ctx.blocking(|c| Ok(c.members())).await?;
+            let npub = crate::ui::resolve(&members, &who)?;
+            let name = crate::ui::label(&members, &npub);
+            if once {
+                let n = npub.clone();
+                match r {
+                    AccessRule::Allow => {
+                        ctx.blocking(move |c| c.allow_once(&n, g)).await?;
+                        line(out, format!("allowed {name} one {} request (the waiting one, or its next)", g.name()));
+                    }
+                    AccessRule::Deny => {
+                        let was = ctx.blocking(move |c| c.answer_waiting(&n, g, false)).await?;
+                        line(out, if was { format!("refused {name}'s waiting {} request", g.name()) } else { format!("nothing from {name} was waiting") });
+                    }
+                    AccessRule::Ask => return Err("--once is for allow and deny".into()),
+                }
+                return Ok(());
+            }
+            let n = npub.clone();
+            ctx.blocking(move |c| {
+                c.set_access(Some(&n), g, Some(r))?;
+                // The new rule also answers a request waiting right now.
+                if r != AccessRule::Ask {
+                    c.answer_waiting(&n, g, r == AccessRule::Allow)?;
+                }
+                Ok(())
+            })
+            .await?;
+            line(out, format!("{name}: {} {}", g.name(), r.name()));
+        }
+        Op::ResetAccess { who } => {
+            let members = ctx.blocking(|c| Ok(c.members())).await?;
+            let npub = crate::ui::resolve(&members, &who)?;
+            let n = npub.clone();
+            ctx.blocking(move |c| c.reset_access(&n)).await?;
+            line(out, format!("{}: the defaults apply again", crate::ui::label(&members, &npub)));
         }
         Op::Stun { add, remove } => {
             let in_mesh = ctx.blocking(|c| Ok(c.in_mesh())).await?;

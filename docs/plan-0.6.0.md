@@ -72,28 +72,41 @@ authenticated by the QUIC handshake, so a sender cannot get around it.
 | Use my services | forwards to the default service and to served ports | allowed |
 | Control this device | terminal (0.6), screen view and control (0.9) | ask |
 
-- [ ] Per member, each group is allowed, denied, or (Control only) ask.
+- [x] Per member, each group is allowed, denied, or (Control only) ask.
       Control's choices on a prompt: allow once (this session), always
       allow, deny. Defaults keep today's behavior for the first two
       groups, so existing meshes behave as before.
-- [ ] Local and private: kept in the device's own settings, never in the
+- [x] Local and private: kept in the device's own settings, never in the
       group state or adverts.
-- [ ] Ask on first use: an incoming Control request waits while the host
+- [x] Ask on first use: an incoming Control request waits while the host
       decides. The opener is told it is waiting; the request times out
       after 60 s as denied. `noscat-client` raises an access request event
       with the requester and group, and takes the answer (API.md).
-- [ ] Headless hosts (no app attached to answer): Control requests are
+- [x] Headless hosts (no app attached to answer): Control requests are
       denied unless allowed ahead of time. Pending and recent requests are
       listed by `noscat access`; `noscat allow|deny <device> <group>
       [--once]` answers or sets them.
-- [ ] Wire (`docs/nip-noscat.md`): every app protocol's refusal answer
+- [x] Wire (`docs/nip-noscat.md`): every app protocol's refusal answer
       gains "not permitted"; Control protocols gain "waiting for approval"
       before started or not permitted. A device advertises "control
       offered" unless its Control default is never; the advert never
       carries who is allowed.
-- [ ] Fine-grained per-action switches stay out of the apps; a CLI flag
+- [x] Fine-grained per-action switches stay out of the apps; a CLI flag
       may expose them later if someone needs them.
-- [ ] Not covered: membership. Every device stays an admin (ADR 0007).
+- [x] Not covered: membership. Every device stays an admin (ADR 0007).
+
+Done 2026-11-25, with these choices:
+
+- The CLI adds `noscat ask <member|everyone> control` and `noscat access
+  reset <member>`; `everyone` in place of a member sets the default.
+  Members are picked by name or npub.
+- `--once` with nothing waiting allows the member's next request, until
+  the device stops.
+- "Waiting for approval" and "control offered" in adverts arrive with
+  the first Control protocol (phase 3); the ask path is built and gets its
+  end-to-end tests there.
+- The FFI carries none of it yet: the access methods and events reach the
+  apps in phase 4.
 
 ## Phase 3: terminal (protocol, host, CLI)
 

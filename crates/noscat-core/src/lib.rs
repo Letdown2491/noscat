@@ -13,7 +13,9 @@
 //!   in step for one device.
 //! - `apps`: the app protocols over streams: file transfer, chat and
 //!   clipboard text, TCP forwarding.
+//! - `access`: who may do what to this device (access groups).
 
+pub mod access;
 pub mod apps;
 pub mod dataplane;
 pub mod device;

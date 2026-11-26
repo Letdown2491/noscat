@@ -138,9 +138,11 @@ pub enum Event {
     JoinRequest { peer: String, name: Option<String> },
 }
 
-fn event(ev: noscat_client::Event) -> Event {
+/// The FFI form of a client event; `None` for events the apps do not
+/// take yet.
+fn event(ev: noscat_client::Event) -> Option<Event> {
     use noscat_client::Event as E;
-    match ev {
+    Some(match ev {
         E::Listening { npub, addr } => Event::Listening { npub, port: addr.port() },
         E::TunnelUp { peer } => Event::TunnelUp { peer },
         E::TunnelClosed { peer, error } => Event::TunnelClosed { peer, error },
@@ -171,7 +173,10 @@ fn event(ev: noscat_client::Event) -> Event {
         E::MeshChangeUndone => Event::MeshChangeUndone,
         E::MeshLeft => Event::MeshLeft,
         E::JoinRequest { peer, name } => Event::JoinRequest { peer, name },
-    }
+        // Access prompts reach the apps in 0.6.0 phase 4; until they call
+        // set_access_prompts(true) none are raised.
+        E::AccessRequest { .. } | E::AccessResolved { .. } => return None,
+    })
 }
 
 /// The event sink the app registers; called from a background thread.
@@ -383,7 +388,7 @@ impl NoscatClient {
         let rx = client.events().ok_or_else(|| NoscatError::Failed("event receiver already taken".into()))?;
         std::thread::spawn(move || {
             for ev in rx {
-                let ev = event(ev);
+                let Some(ev) = event(ev) else { continue };
                 // A throwing callback must not end event delivery.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(ev)));
             }

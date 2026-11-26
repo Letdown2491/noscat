@@ -30,7 +30,12 @@ const TAG_TEXT: u8 = 2;
 const TAG_FORWARD: u8 = 3;
 const OK: u8 = 0;
 const FAIL: u8 = 1;
+/// The receiver's access rules do not let this sender do this (text and
+/// forward answers; older senders read it as a plain refusal).
+const NOT_PERMITTED: u8 = 2;
 const REFUSED_OFFSET: u64 = u64::MAX;
+/// The file answer for "not permitted".
+const NOT_PERMITTED_OFFSET: u64 = u64::MAX ^ 1;
 /// Longest text message.
 pub const MAX_TEXT: usize = 64 * 1024;
 const MAX_NAME: usize = 255;
@@ -49,6 +54,9 @@ pub enum AppError {
     Protocol(&'static str),
     #[error("the receiver refused the transfer")]
     Refused,
+    /// The receiver's access settings do not allow this from this device.
+    #[error("not permitted: the member does not allow this from this device")]
+    NotPermitted,
     #[error("the received file did not match its sha256")]
     Mismatch,
 }
@@ -123,6 +131,7 @@ pub async fn send_text(conn: &Connection, kind: TextKind, text: &str) -> Result<
     s.finish().map_err(stream_err)?;
     match read_u8(&mut r).await? {
         OK => Ok(()),
+        NOT_PERMITTED => Err(AppError::NotPermitted),
         _ => Err(AppError::Refused),
     }
 }
@@ -170,6 +179,9 @@ pub async fn send_file(
     if offset == REFUSED_OFFSET {
         return Err(AppError::Refused);
     }
+    if offset == NOT_PERMITTED_OFFSET {
+        return Err(AppError::NotPermitted);
+    }
     if offset > size {
         return Err(AppError::Protocol("resume offset past the end"));
     }
@@ -204,6 +216,7 @@ pub async fn open_forward(conn: &Connection, port: u16) -> Result<(SendStream, R
     write(&mut s, &head).await?;
     match read_u8(&mut r).await? {
         OK => Ok((s, r)),
+        NOT_PERMITTED => Err(AppError::NotPermitted),
         _ => Err(AppError::Refused),
     }
 }
@@ -234,8 +247,48 @@ pub async fn bridge(tcp: tokio::net::TcpStream, mut s: SendStream, mut r: RecvSt
 #[derive(Debug)]
 pub enum Incoming {
     File(IncomingFile),
-    Text { kind: TextKind, text: String },
+    Text(IncomingText),
     Forward(IncomingForward),
+}
+
+impl Incoming {
+    /// The access group this stream falls in.
+    #[must_use]
+    pub fn group(&self) -> crate::access::Group {
+        match self {
+            Incoming::File(_) | Incoming::Text(_) => crate::access::Group::Send,
+            Incoming::Forward(_) => crate::access::Group::Services,
+        }
+    }
+
+    /// Answer "not permitted" and drop the stream.
+    pub async fn not_permitted(self) {
+        let (mut s, answer) = match self {
+            Incoming::File(f) => (f.s, NOT_PERMITTED_OFFSET.to_be_bytes().to_vec()),
+            Incoming::Text(t) => (t.s, vec![NOT_PERMITTED]),
+            Incoming::Forward(f) => (f.s, vec![NOT_PERMITTED]),
+        };
+        let _ = write(&mut s, &answer).await;
+        let _ = s.finish();
+    }
+}
+
+/// A text message, read whole. The sender waits until
+/// [`IncomingText::ack`] (or a refusal) answers it.
+#[derive(Debug)]
+pub struct IncomingText {
+    pub kind: TextKind,
+    pub text: String,
+    s: SendStream,
+}
+
+impl IncomingText {
+    /// Confirm receipt and take the text.
+    pub async fn ack(mut self) -> (TextKind, String) {
+        let _ = write(&mut self.s, &[OK]).await;
+        let _ = self.s.finish();
+        (self.kind, self.text)
+    }
 }
 
 /// A file offer. Call [`IncomingFile::receive`] or [`IncomingFile::refuse`].
@@ -266,10 +319,11 @@ pub enum Received {
     Partial(PathBuf),
 }
 
-/// Read the header of the next stream on `conn`. Text is read and
-/// acknowledged here. `Ok(None)` when the connection closed.
+/// Read the header of the next stream on `conn` (and a text message
+/// whole). Nothing is answered yet: the caller checks access first.
+/// `Ok(None)` when the connection closed.
 pub async fn accept(conn: &Connection) -> Result<Option<Incoming>, AppError> {
-    let (mut s, mut r) = match conn.inner.accept_bi().await {
+    let (s, mut r) = match conn.inner.accept_bi().await {
         Ok(p) => p,
         Err(_) => return Ok(None),
     };
@@ -283,9 +337,7 @@ pub async fn accept(conn: &Connection) -> Result<Option<Incoming>, AppError> {
             let mut b = vec![0u8; len];
             r.read_exact(&mut b).await.map_err(stream_err)?;
             let text = String::from_utf8(b).map_err(|_| AppError::Protocol("text is not UTF-8"))?;
-            write(&mut s, &[OK]).await?;
-            let _ = s.finish();
-            Ok(Some(Incoming::Text { kind, text }))
+            Ok(Some(Incoming::Text(IncomingText { kind, text, s })))
         }
         TAG_FILE => {
             let len = read_u16(&mut r).await? as usize;

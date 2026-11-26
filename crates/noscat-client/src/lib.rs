@@ -25,12 +25,14 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use noscat_core::Identity;
+use noscat_core::access::Access;
 use noscat_core::apps::{self, Incoming, Received, TextKind};
 use noscat_core::dataplane::{DataplaneConfig, Reachability};
 use noscat_core::device::{Device, DeviceConfig, DeviceEvent};
@@ -41,6 +43,7 @@ use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use noscat_core::{pairing_uri, parse_pairing_relays, parse_pairing_target};
+pub use noscat_core::access::{Group as AccessGroup, Rule as AccessRule};
 pub use noscat_core::relay::{DEFAULT_RELAYS, default_relays};
 
 /// How long a dial waits for a member to become reachable.
@@ -52,6 +55,11 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 pub const MAX_INCOMING_BYTES: u64 = 64 << 30;
 /// Default UDP port for a reachable device.
 pub const DEFAULT_LISTEN_PORT: u16 = 41641;
+/// How long an asked access request waits for an answer before it counts
+/// as denied.
+pub const ACCESS_ASK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Access requests kept for [`Client::access_requests`].
+const ACCESS_RECENT: usize = 50;
 
 /// Where the client's identity comes from.
 #[derive(Clone)]
@@ -212,6 +220,120 @@ pub enum Event {
     /// waiting in [`Client::join`]. Show a prompt; [`Client::invite`]
     /// with `peer` adds it.
     JoinRequest { peer: String, name: Option<String> },
+    /// A member asks for a group set to ask (Control). Show a prompt and
+    /// answer with [`Client::answer_access`] within
+    /// [`ACCESS_ASK_TIMEOUT`]; raised only after
+    /// [`Client::set_access_prompts`]`(true)`.
+    AccessRequest { id: u64, peer: String, group: AccessGroup },
+    /// An asked request ended (answered, or timed out as denied). Close
+    /// its prompt.
+    AccessResolved { id: u64, peer: String, group: AccessGroup, outcome: AccessOutcome },
+}
+
+/// How an access request ended, or that it still waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessOutcome {
+    /// Asked; no answer yet.
+    Waiting,
+    Allowed,
+    Denied,
+    /// Asked, and nobody answered in time.
+    TimedOut,
+    /// The group asks, but no app was there to ask (a headless host).
+    NoOneToAsk,
+}
+
+/// An incoming request the access rules acted on, for a host's review.
+/// Allowed requests by an allow rule are not listed; refused ones and
+/// every asked one are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRequest {
+    pub id: u64,
+    pub peer: String,
+    pub group: AccessGroup,
+    pub age_secs: u64,
+    pub outcome: AccessOutcome,
+}
+
+/// The answer to an asked request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessAnswer {
+    /// Allow this request only.
+    Once,
+    /// Allow it and every later one from this member (saves an allow rule).
+    Always,
+    /// Refuse this request.
+    Deny,
+}
+
+/// The rule for each access group, as it applies to one member (or the
+/// defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessRules {
+    pub send: AccessRule,
+    pub services: AccessRule,
+    pub control: AccessRule,
+}
+
+impl AccessRules {
+    fn from_fn(f: impl Fn(AccessGroup) -> AccessRule) -> Self {
+        Self { send: f(AccessGroup::Send), services: f(AccessGroup::Services), control: f(AccessGroup::Control) }
+    }
+}
+
+struct PendingAsk {
+    peer: PublicKey,
+    group: AccessGroup,
+    at: Instant,
+    answer: tokio::sync::oneshot::Sender<bool>,
+}
+
+struct RecentAsk {
+    id: u64,
+    peer: PublicKey,
+    group: AccessGroup,
+    at: Instant,
+    outcome: AccessOutcome,
+}
+
+/// Access state that lives only while the client runs.
+#[derive(Default)]
+struct Asks {
+    next_id: u64,
+    pending: HashMap<u64, PendingAsk>,
+    recent: VecDeque<RecentAsk>,
+    /// One-time passes (`noscat allow --once` with nothing pending).
+    once: HashSet<(PublicKey, AccessGroup)>,
+}
+
+impl Asks {
+    fn next_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// Log an outcome. A refusal repeating the previous entry within a
+    /// minute refreshes it, so a member retrying in a loop takes one line.
+    fn record(&mut self, id: Option<u64>, peer: PublicKey, group: AccessGroup, outcome: AccessOutcome) -> u64 {
+        if id.is_none() {
+            if let Some(last) = self.recent.back_mut() {
+                if last.peer == peer
+                    && last.group == group
+                    && last.outcome == outcome
+                    && last.at.elapsed() < Duration::from_secs(60)
+                {
+                    last.at = Instant::now();
+                    return last.id;
+                }
+            }
+        }
+        let id = id.unwrap_or_else(|| self.next_id());
+        self.recent.push_back(RecentAsk { id, peer, group, at: Instant::now(), outcome });
+        while self.recent.len() > ACCESS_RECENT {
+            self.recent.pop_front();
+        }
+        id
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -231,6 +353,12 @@ pub enum ClientError {
 
 impl From<noscat_core::device::DeviceError> for ClientError {
     fn from(e: noscat_core::device::DeviceError) -> Self {
+        Self::Mesh(e.to_string())
+    }
+}
+
+impl From<noscat_core::access::AccessError> for ClientError {
+    fn from(e: noscat_core::access::AccessError) -> Self {
         Self::Mesh(e.to_string())
     }
 }
@@ -322,6 +450,11 @@ struct Inner {
     probing: std::sync::atomic::AtomicBool,
     /// Members a probe is connecting to right now.
     probes: Mutex<std::collections::HashSet<PublicKey>>,
+    /// Who may do what to this device (saved in the state directory).
+    access: Mutex<Access>,
+    asks: Mutex<Asks>,
+    /// An app answers access prompts; without one, asking means denying.
+    prompts: AtomicBool,
 }
 
 /// What only [`Client`] handles hold: the runtime, the directory lock and
@@ -568,7 +701,8 @@ impl Inner {
                     Ok(Some(incoming)) => {
                         let me = me.clone();
                         let peer = peer.clone();
-                        tokio::spawn(async move { me.handle(peer, incoming).await });
+                        let pk = c.peer;
+                        tokio::spawn(async move { me.handle(pk, peer, incoming).await });
                     }
                     Ok(None) => break,
                     Err(e) => tracing::debug!(%peer, "bad stream: {e}"),
@@ -590,10 +724,18 @@ impl Inner {
         });
     }
 
-    async fn handle(self: Arc<Self>, peer: String, incoming: Incoming) {
+    async fn handle(self: Arc<Self>, pk: PublicKey, peer: String, incoming: Incoming) {
+        // The opener is the QUIC peer, authenticated by the handshake: it
+        // cannot claim to be another member.
+        if !self.authorize(pk, incoming.group(), std::future::ready(())).await {
+            incoming.not_permitted().await;
+            return;
+        }
         match incoming {
-            Incoming::Text { kind: TextKind::Chat, text } => self.emit(Event::ChatMessage { peer, text }),
-            Incoming::Text { kind: TextKind::Clipboard, text } => self.emit(Event::Clipboard { peer, text }),
+            Incoming::Text(t) => match t.ack().await {
+                (TextKind::Chat, text) => self.emit(Event::ChatMessage { peer, text }),
+                (TextKind::Clipboard, text) => self.emit(Event::Clipboard { peer, text }),
+            },
             Incoming::File(f) => {
                 let inbox = self.serving.lock().ok().and_then(|s| s.inbox.clone());
                 let Some(dir) = inbox else {
@@ -663,11 +805,72 @@ impl Inner {
         }
     }
 
+    /// Whether `peer` may do what `group` covers. Allow and deny rules
+    /// answer at once; ask raises [`Event::AccessRequest`], awaits
+    /// `waiting` (the protocol tells the opener it waits), and holds the
+    /// request until an answer or [`ACCESS_ASK_TIMEOUT`].
+    async fn authorize(
+        self: &Arc<Self>,
+        peer: PublicKey,
+        group: AccessGroup,
+        waiting: impl std::future::Future<Output = ()>,
+    ) -> bool {
+        // A poisoned lock refuses: never allow what the rules might deny.
+        let rule = self.access.lock().map_or(AccessRule::Deny, |a| a.rule(&peer, group));
+        let record = |outcome| {
+            if let Ok(mut a) = self.asks.lock() {
+                a.record(None, peer, group, outcome);
+            }
+        };
+        match rule {
+            AccessRule::Allow => true,
+            AccessRule::Deny => {
+                record(AccessOutcome::Denied);
+                false
+            }
+            AccessRule::Ask => {
+                if self.asks.lock().is_ok_and(|mut a| a.once.remove(&(peer, group))) {
+                    record(AccessOutcome::Allowed);
+                    return true;
+                }
+                if !self.prompts.load(Ordering::Relaxed) {
+                    record(AccessOutcome::NoOneToAsk);
+                    return false;
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let Ok(id) = self.asks.lock().map(|mut a| {
+                    let id = a.next_id();
+                    a.pending.insert(id, PendingAsk { peer, group, at: Instant::now(), answer: tx });
+                    id
+                }) else {
+                    return false;
+                };
+                self.emit(Event::AccessRequest { id, peer: npub_of(&peer), group });
+                waiting.await;
+                let outcome = match tokio::time::timeout(ACCESS_ASK_TIMEOUT, rx).await {
+                    Ok(Ok(true)) => AccessOutcome::Allowed,
+                    Ok(Ok(false)) => AccessOutcome::Denied,
+                    Ok(Err(_)) | Err(_) => AccessOutcome::TimedOut,
+                };
+                if let Ok(mut a) = self.asks.lock() {
+                    a.pending.remove(&id);
+                    a.record(Some(id), peer, group, outcome);
+                }
+                self.emit(Event::AccessResolved { id, peer: npub_of(&peer), group, outcome });
+                outcome == AccessOutcome::Allowed
+            }
+        }
+    }
+
     async fn send_text(self: Arc<Self>, target: String, kind: TextKind, text: String) {
         let res = async {
             let pk = parse_target(&target)?;
             let c = self.conn(pk).await?;
-            if let Err(first) = apps::send_text(&c, kind, &text).await {
+            match apps::send_text(&c, kind, &text).await {
+                Ok(()) => {}
+                // The member answered: retrying cannot change its mind.
+                Err(e @ (apps::AppError::NotPermitted | apps::AppError::Refused)) => return Err(e.into()),
+                Err(first) => {
                 // The connection may be stale (the network changed under
                 // it): drop it and try once more on a fresh one.
                 tracing::debug!(peer = %npub_of(&pk), "text send failed, retrying on a new connection: {first}");
@@ -677,6 +880,7 @@ impl Inner {
                 }
                 let c = self.conn(pk).await?;
                 apps::send_text(&c, kind, &text).await?;
+                }
             }
             Ok::<_, ClientError>(npub_of(&pk))
         }
@@ -811,6 +1015,7 @@ impl Client {
             dataplane,
             peer_addresses,
         };
+        let access = Access::load(&dir)?;
         let npub = identity.npub();
         let device = rt.block_on(Device::start(identity, cfg))?;
         let (tx, rx) = std_mpsc::channel();
@@ -828,6 +1033,9 @@ impl Client {
             next_forward_id: AtomicU64::new(1),
             probing: std::sync::atomic::AtomicBool::new(false),
             probes: Mutex::new(std::collections::HashSet::new()),
+            access: Mutex::new(access),
+            asks: Mutex::new(Asks::default()),
+            prompts: AtomicBool::new(false),
         });
         inner.pump();
         let owner = Arc::new(Owner { rt: Some(rt), inner: inner.clone(), dir, temp_dir, _lock: lock });
@@ -1011,6 +1219,133 @@ impl Client {
         self.inner.rt().spawn(async move {
             let _ = dp.network_changed().await;
         });
+    }
+
+    // ---- access ----------------------------------------------------------
+
+    /// The rules for members without rules of their own.
+    #[must_use]
+    pub fn access_defaults(&self) -> AccessRules {
+        let a = self.inner.access.lock();
+        AccessRules::from_fn(|g| a.as_ref().map_or(g.default_rule(), |a| a.default_rule(g)))
+    }
+
+    /// The rules that apply to `device` (its own, else the defaults).
+    pub fn access_of(&self, device: &str) -> Result<AccessRules, ClientError> {
+        let pk = parse_target(device)?;
+        let a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
+        Ok(AccessRules::from_fn(|g| a.rule(&pk, g)))
+    }
+
+    /// Members with rules of their own, and those rules.
+    #[must_use]
+    pub fn access_devices(&self) -> Vec<(String, Vec<(AccessGroup, AccessRule)>)> {
+        let Ok(a) = self.inner.access.lock() else { return Vec::new() };
+        a.devices()
+            .into_iter()
+            .map(|pk| {
+                let own = AccessGroup::ALL.into_iter().filter_map(|g| a.own_rule(&pk, g).map(|r| (g, r))).collect();
+                (npub_of(&pk), own)
+            })
+            .collect()
+    }
+
+    /// Set `device`'s rule for `group` (`None` device: the default for
+    /// every member; `None` rule: back to the default). `Ask` is for
+    /// Control only. Saved at once.
+    pub fn set_access(&self, device: Option<&str>, group: AccessGroup, rule: Option<AccessRule>) -> Result<(), ClientError> {
+        let pk = device.map(parse_target).transpose()?;
+        let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
+        a.set(pk.as_ref(), group, rule)?;
+        Ok(())
+    }
+
+    /// Drop all of `device`'s own rules: the defaults apply to it again.
+    pub fn reset_access(&self, device: &str) -> Result<(), ClientError> {
+        let pk = parse_target(device)?;
+        let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
+        a.reset(&pk)?;
+        Ok(())
+    }
+
+    /// Whether an app is here to answer [`Event::AccessRequest`]. Off (the
+    /// default, a headless host), a group set to ask refuses at once.
+    pub fn set_access_prompts(&self, on: bool) {
+        self.inner.prompts.store(on, Ordering::Relaxed);
+    }
+
+    /// Answer an asked request. Errors if it is no longer waiting.
+    pub fn answer_access(&self, id: u64, answer: AccessAnswer) -> Result<(), ClientError> {
+        let pending = self
+            .inner
+            .asks
+            .lock()
+            .ok()
+            .and_then(|mut a| a.pending.remove(&id))
+            .ok_or_else(|| ClientError::Mesh("that request is no longer waiting".into()))?;
+        if answer == AccessAnswer::Always {
+            let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
+            a.set(Some(&pending.peer), pending.group, Some(AccessRule::Allow))?;
+        }
+        let _ = pending.answer.send(answer != AccessAnswer::Deny);
+        Ok(())
+    }
+
+    /// Answer `device`'s waiting `group` requests, if any. Returns whether
+    /// one was waiting.
+    pub fn answer_waiting(&self, device: &str, group: AccessGroup, allow: bool) -> Result<bool, ClientError> {
+        let pk = parse_target(device)?;
+        let mut a = self.inner.asks.lock().map_err(|_| ClientError::Mesh("access state unavailable".into()))?;
+        let waiting: Vec<u64> = a.pending.iter().filter(|(_, p)| p.peer == pk && p.group == group).map(|(id, _)| *id).collect();
+        for id in &waiting {
+            if let Some(p) = a.pending.remove(id) {
+                let _ = p.answer.send(allow);
+            }
+        }
+        if !allow {
+            a.once.remove(&(pk, group));
+        }
+        Ok(!waiting.is_empty())
+    }
+
+    /// Allow `device` one `group` request: the waiting one if there is
+    /// one, else its next (until this client stops). For hosts without an
+    /// app, e.g. `noscat allow <device> control --once`.
+    pub fn allow_once(&self, device: &str, group: AccessGroup) -> Result<(), ClientError> {
+        if !self.answer_waiting(device, group, true)? {
+            let pk = parse_target(device)?;
+            if let Ok(mut a) = self.inner.asks.lock() {
+                a.once.insert((pk, group));
+            }
+        }
+        Ok(())
+    }
+
+    /// Waiting requests, then recent refusals and asked requests, newest
+    /// first.
+    #[must_use]
+    pub fn access_requests(&self) -> Vec<AccessRequest> {
+        let Ok(a) = self.inner.asks.lock() else { return Vec::new() };
+        let mut out: Vec<AccessRequest> = a
+            .pending
+            .iter()
+            .map(|(id, p)| AccessRequest {
+                id: *id,
+                peer: npub_of(&p.peer),
+                group: p.group,
+                age_secs: p.at.elapsed().as_secs(),
+                outcome: AccessOutcome::Waiting,
+            })
+            .collect();
+        out.sort_by_key(|r| r.age_secs);
+        out.extend(a.recent.iter().rev().map(|r| AccessRequest {
+            id: r.id,
+            peer: npub_of(&r.peer),
+            group: r.group,
+            age_secs: r.at.elapsed().as_secs(),
+            outcome: r.outcome,
+        }));
+        out
     }
 
     // ---- receiving -------------------------------------------------------

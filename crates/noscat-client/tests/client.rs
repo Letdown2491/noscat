@@ -230,6 +230,38 @@ fn two_clients_end_to_end() {
     a.forward_port(b.npub(), local2, port_svc.port());
     assert_eq!(roundtrip(local2, b"served"), b"served");
 
+    // Access: bravo stops taking things from alpha. Alpha is told "not
+    // permitted" (not a generic failure), bravo logs the refusal, and the
+    // rule is saved in bravo's directory only.
+    use noscat_client::{AccessGroup, AccessOutcome, AccessRule};
+    assert_eq!(b.access_of(a.npub()).unwrap().control, AccessRule::Ask, "control asks by default");
+    b.set_access(Some(a.npub()), AccessGroup::Send, Some(AccessRule::Deny)).unwrap();
+    a.send_chat(b.npub(), "let me in");
+    let err = wait(&ea, "chat refused", |e| match e {
+        Event::ChatFailed { error, .. } => Some(error.clone()),
+        Event::ChatDelivered { .. } => panic!("a denied chat was delivered"),
+        _ => None,
+    });
+    assert!(err.contains("not permitted"), "{err}");
+    let fid = a.send_file(src.clone(), b.npub());
+    let err = wait(&ea, "file refused", |e| match e {
+        Event::TransferFailed { id, error, .. } if *id == fid => Some(error.clone()),
+        Event::TransferDone { id, .. } if *id == fid => panic!("a denied file arrived"),
+        _ => None,
+    });
+    assert!(err.contains("not permitted"), "{err}");
+    let log = b.access_requests();
+    assert_eq!(log.len(), 1, "a repeated refusal is one entry: {log:?}");
+    assert_eq!((log[0].peer.as_str(), log[0].group, log[0].outcome), (a_npub.as_str(), AccessGroup::Send, AccessOutcome::Denied));
+    assert!(dir_b.join("access.json").exists());
+    // A forward is "services", untouched by the send rule.
+    assert_eq!(roundtrip(local2, b"still served"), b"still served");
+    b.reset_access(a.npub()).unwrap();
+    a.send_chat(b.npub(), "thanks");
+    wait(&ea, "chat delivered again", |e| matches!(e, Event::ChatDelivered { .. }).then_some(()));
+    // Ask is for control only.
+    assert!(b.set_access(None, AccessGroup::Services, Some(AccessRule::Ask)).is_err());
+
     drop(a);
     drop(b);
     drop(relay);

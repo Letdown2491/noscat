@@ -142,6 +142,41 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         remote_port: u16,
     },
+    /// Show who may do what to this device: the defaults, members' own
+    /// rules, and recent refused or asked requests. Kept on this device
+    /// only; no other member learns them.
+    Access {
+        #[command(subcommand)]
+        cmd: Option<AccessCommand>,
+    },
+    /// Allow a member an access group: `send` (files, chat, clipboard),
+    /// `services` (forwards) or `control` (terminal). `everyone` as the
+    /// member sets the default. Also answers a request that is waiting.
+    Allow {
+        /// A member's name or npub, or `everyone`.
+        who: String,
+        group: GroupArg,
+        /// Allow one request only: the waiting one, or the member's next.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Deny a member an access group (`everyone`: the default). Also
+    /// refuses a request that is waiting.
+    Deny {
+        /// A member's name or npub, or `everyone`.
+        who: String,
+        group: GroupArg,
+        /// Refuse the waiting request only; change no rule.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Have `control` ask on first use for a member (`everyone`: the
+    /// default). Without an app on this device to answer, asking refuses.
+    Ask {
+        /// A member's name or npub, or `everyone`.
+        who: String,
+        group: GroupArg,
+    },
     /// Manage the mesh.
     #[command(subcommand)]
     Mesh(MeshCommand),
@@ -313,6 +348,34 @@ enum RelaysCommand {
         #[arg(required = true)]
         urls: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AccessCommand {
+    /// Drop a member's own rules: the defaults apply to it again.
+    Reset {
+        /// A member's name or npub.
+        who: String,
+    },
+}
+
+/// An access group as the CLI names it.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GroupArg {
+    Send,
+    Services,
+    Control,
+}
+
+impl GroupArg {
+    fn name(self) -> String {
+        match self {
+            GroupArg::Send => "send",
+            GroupArg::Services => "services",
+            GroupArg::Control => "control",
+        }
+        .to_string()
+    }
 }
 
 #[derive(Subcommand)]
@@ -782,6 +845,19 @@ fn main() -> Result<()> {
                 std::fs::write(name_file(&dir), format!("{name}\n"))?;
                 run_op(&dir, d, Op::Rename { name: name.to_string() })?;
             }
+        }
+        Command::Access { cmd } => match cmd {
+            None => run_op(&dir, d, Op::Access)?,
+            Some(AccessCommand::Reset { who }) => run_op(&dir, d, Op::ResetAccess { who })?,
+        },
+        Command::Allow { who, group, once } => {
+            run_op(&dir, d, Op::SetAccess { who, group: group.name(), rule: "allow".into(), once })?;
+        }
+        Command::Deny { who, group, once } => {
+            run_op(&dir, d, Op::SetAccess { who, group: group.name(), rule: "deny".into(), once })?;
+        }
+        Command::Ask { who, group } => {
+            run_op(&dir, d, Op::SetAccess { who, group: group.name(), rule: "ask".into(), once: false })?;
         }
         Command::Mesh(cmd) => {
             let op = match cmd {

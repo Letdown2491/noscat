@@ -59,16 +59,30 @@ async fn text_file_resume_and_forward() {
     // Text is acknowledged once the receiver has it.
     let rx = tokio::spawn({
         let cb = cb.clone();
-        async move { apps::accept(&cb).await.unwrap().unwrap() }
+        async move {
+            match apps::accept(&cb).await.unwrap().unwrap() {
+                Incoming::Text(t) => t.ack().await,
+                other => panic!("{other:?}"),
+            }
+        }
     });
     apps::send_text(&ca, TextKind::Clipboard, "copied").await.unwrap();
-    match rx.await.unwrap() {
-        Incoming::Text { kind, text } => {
-            assert_eq!(kind, TextKind::Clipboard);
-            assert_eq!(text, "copied");
+    assert_eq!(rx.await.unwrap(), (TextKind::Clipboard, "copied".to_string()));
+
+    // A receiver whose access rules say no answers "not permitted", and
+    // the sender can tell that from a plain refusal.
+    let rx = tokio::spawn({
+        let cb = cb.clone();
+        async move {
+            for _ in 0..2 {
+                let inc = apps::accept(&cb).await.unwrap().unwrap();
+                inc.not_permitted().await;
+            }
         }
-        other => panic!("{other:?}"),
-    }
+    });
+    assert!(matches!(apps::send_text(&ca, TextKind::Chat, "hi").await, Err(apps::AppError::NotPermitted)));
+    assert!(matches!(apps::open_forward(&ca, 22).await, Err(apps::AppError::NotPermitted)));
+    rx.await.unwrap();
 
     // A file arrives verified.
     let src = tmp("src");

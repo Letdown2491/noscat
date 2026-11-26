@@ -33,7 +33,7 @@ pub fn label(members: &[Member], npub: &str) -> String {
         .unwrap_or_else(|| short(npub))
 }
 
-fn age(secs: u64) -> String {
+pub fn age(secs: u64) -> String {
     match secs {
         s if s < 60 => format!("{s}s"),
         s if s < 3600 => format!("{} min", s / 60),
@@ -137,6 +137,14 @@ pub fn print_event(ev: &Event, members: &[Member]) {
             eprintln!("# ⚠️  another member changed the mesh at the same moment and won; retry your change");
         }
         Event::MeshLeft => eprintln!("# 👋 this device is no longer in a mesh"),
+        // The CLI answers no prompts (a headless host), so these arrive
+        // only from an embedding app; narrate them anyway.
+        Event::AccessRequest { peer, group, .. } => {
+            eprintln!("# 🔐 {} asks for {}; `noscat allow` or `noscat deny` answers", label(members, peer), group.name());
+        }
+        Event::AccessResolved { peer, group, outcome, .. } => {
+            eprintln!("# 🔐 {} {}: {outcome:?}", label(members, peer), group.name());
+        }
         Event::JoinRequest { peer, name } => {
             let who = name.as_deref().unwrap_or("a device");
             eprintln!(
@@ -148,7 +156,7 @@ pub fn print_event(ev: &Event, members: &[Member]) {
 }
 
 /// Pick a member by name or npub prefix.
-fn resolve(members: &[Member], q: &str) -> Result<String, String> {
+pub fn resolve(members: &[Member], q: &str) -> Result<String, String> {
     let q = q.trim();
     if let Ok(pk) = noscat_client::parse_pairing_target(q) {
         use nostr::nips::nip19::ToBech32 as _;

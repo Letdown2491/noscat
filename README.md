@@ -172,6 +172,22 @@ noscat mesh remove <npub>
 noscat mesh leave              # this device leaves
 ```
 
+**Who may do what.** Each device decides what every member may do to it,
+in three groups: `send` (files, chat, clipboard), `services` (forwards)
+and `control` (the terminal, coming in 0.6). Send and services are
+allowed, as before; control asks on first use, and a device with no app
+to answer (a server running `noscat up`) refuses it unless you allow it
+ahead of time. The rules stay on the device; other members never see
+them.
+
+```
+noscat access                      # the rules, and recent refused or asked requests
+noscat allow laptop control        # a member by name or npub
+noscat allow laptop control --once # just its next request (or the waiting one)
+noscat deny everyone send          # the default for every member
+noscat access reset laptop         # the defaults apply to it again
+```
+
 **Reachability.** Every mesh needs at least one member the others can
 reach from the internet: a home server with a forwarded UDP port, a VPS,
 anything with a public IPv6 address. Start it with `--reachable` (learn

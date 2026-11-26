@@ -118,6 +118,37 @@ run, and a running device tells the members right away.
 .B \-\-name
 overrides it for one run.
 .TP
+.B access \fR[\fBreset\fR \fImember\fR]
+Show who may do what to this device: the rules for everyone, members'
+own rules, and recent refused or asked requests. Incoming requests fall
+in three groups:
+.B send
+(files, chat, clipboard),
+.B services
+(forwards) and
+.B control
+(terminal). Send and services are allowed by default; control asks on
+first use, which on a device without an app to answer means refused.
+The rules stay on this device; no other member learns them.
+.B reset
+drops a member's own rules.
+.TP
+.B allow \fImember\fR|\fBeveryone\fR \fIgroup\fR [\fB\-\-once\fR]
+Allow a member a group, or with
+.B everyone
+set the default. Also answers a waiting request.
+.B \-\-once
+allows one request only: the waiting one, or the member's next.
+.TP
+.B deny \fImember\fR|\fBeveryone\fR \fIgroup\fR [\fB\-\-once\fR]
+Deny a member a group (the member is told "not permitted"), or set the
+default. Also refuses a waiting request;
+.B \-\-once
+refuses only that and changes no rule.
+.TP
+.B ask \fImember\fR|\fBeveryone\fR \fBcontrol\fR
+Have control ask on first use again.
+.TP
 .B service install \fR[\fIup options\fR]
 Run
 .B noscat up
