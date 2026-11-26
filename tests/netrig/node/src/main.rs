@@ -8,10 +8,20 @@
 //! node sends QUIC_MIB MiB to it over a QUIC stream and prints a RESULT
 //! quic line; every node serves (reads everything, replies with sha256).
 //!
+//! With TERM_HOST=yes the node instead answers terminal requests (noscat's
+//! terminal protocol, tag 4) with an echo host: input comes back as
+//! output, and the line "BURST" gets 4 MiB of output (a `cat` of a big
+//! file). With TERM_TO=<peer name>, once that peer answers, the node opens
+//! a terminal there, types 200 keystrokes one at a time timing each echo,
+//! checks the burst's sha256 and the exit status, and prints a RESULT term
+//! line. The PTY itself is tested in noscat-client; this checks the
+//! protocol over lossy, relayed paths.
+//!
 //! env: NAME, PEERS (comma list of names), SHARED, STUN (optional),
 //!      BIND (default 0.0.0.0:2121), DURATION_SECS (default 60),
 //!      PUBLIC (yes: reachable), QUIC_TO, QUIC_MIB (default 16),
-//!      QUIC_WAIT_DIRECT (yes: wait for a direct link before sending)
+//!      QUIC_WAIT_DIRECT (yes: wait for a direct link before sending),
+//!      TERM_HOST (yes), TERM_TO
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use noscat_core::Identity;
+use noscat_core::apps::{self, Incoming, TermFrame};
 use noscat_core::dataplane::{Dataplane, DataplaneConfig, Member, Reachability};
 use noscat_core::streams::Streams;
 use nostr::prelude::PublicKey;
@@ -50,6 +61,100 @@ async fn serve(streams: Arc<Streams>) {
             }
         });
     }
+}
+
+/// The burst a terminal host sends for "BURST": 4 MiB, deterministic.
+const BURST: usize = 4 << 20;
+
+fn burst_data() -> Vec<u8> {
+    (0..BURST as u32).map(|i| b' ' + (i % 90) as u8).collect()
+}
+
+/// Answer terminal requests with an echo host.
+async fn serve_terminals(streams: Arc<Streams>) {
+    while let Some(conn) = streams.accept().await {
+        tokio::spawn(async move {
+            while let Ok(Some(inc)) = apps::accept(&conn).await {
+                let Incoming::Terminal(t) = inc else { continue };
+                tokio::spawn(async move {
+                    let Ok((mut s, mut r)) = t.accept().await else { return };
+                    let mut line = Vec::new();
+                    while let Ok(Some(f)) = TermFrame::read(&mut r).await {
+                        let TermFrame::Input(b) = f else { continue };
+                        if s.write_all(&TermFrame::Output(b.clone()).encode()).await.is_err() {
+                            return;
+                        }
+                        line.extend_from_slice(&b);
+                        if line.ends_with(b"BURST\r") {
+                            for c in burst_data().chunks(16 * 1024) {
+                                if s.write_all(&TermFrame::Output(c.to_vec()).encode()).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        if line.ends_with(b"\r") {
+                            line.clear();
+                        }
+                    }
+                    // The viewer finished its side: the "shell" exits 0.
+                    let _ = s.write_all(&TermFrame::Exit(0).encode()).await;
+                    let _ = s.finish();
+                    let _ = s.stopped().await;
+                });
+            }
+        });
+    }
+}
+
+/// Open a terminal on `peer`, time 200 keystroke echoes, check a 4 MiB
+/// burst and the exit status.
+async fn terminal_session(streams: Arc<Streams>, peer: PublicKey) -> Result<String> {
+    let conn = streams.connect(peer, Duration::from_secs(20)).await?;
+    let (mut s, mut r) = apps::open_terminal(&conn, 80, 24, "xterm-256color", || {}).await?;
+    s.write_all(&TermFrame::Resize { cols: 100, rows: 30 }.encode()).await?;
+    let mut rtts = Vec::new();
+    for i in 0..200u32 {
+        let key = vec![b'a' + (i % 26) as u8];
+        let t = Instant::now();
+        s.write_all(&TermFrame::Input(key.clone()).encode()).await?;
+        match tokio::time::timeout(Duration::from_secs(10), TermFrame::read(&mut r)).await {
+            Ok(Ok(Some(TermFrame::Output(b)))) => anyhow::ensure!(b == key, "keystroke {i}: echoed {b:?}"),
+            other => anyhow::bail!("keystroke {i}: {other:?}"),
+        }
+        rtts.push(t.elapsed().as_millis() as u64);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rtts.sort_unstable();
+    let pct = |p: usize| rtts[(rtts.len() * p / 100).min(rtts.len() - 1)];
+    // The burst: the echo of the command line, then 4 MiB of output.
+    let cmd = b"BURST\r".to_vec();
+    let t = Instant::now();
+    s.write_all(&TermFrame::Input(cmd.clone()).encode()).await?;
+    let mut got = Vec::new();
+    while got.len() < cmd.len() + BURST {
+        match tokio::time::timeout(Duration::from_secs(20), TermFrame::read(&mut r)).await {
+            Ok(Ok(Some(TermFrame::Output(b)))) => got.extend_from_slice(&b),
+            other => anyhow::bail!("burst after {} bytes: {other:?}", got.len()),
+        }
+    }
+    let secs = t.elapsed().as_secs_f64();
+    anyhow::ensure!(got[..cmd.len()] == cmd[..], "burst: the command was not echoed first");
+    anyhow::ensure!(
+        Sha256::digest(&got[cmd.len()..]) == Sha256::digest(burst_data()),
+        "burst: sha256 mismatch"
+    );
+    // Leave: finishing our side ends the session; the host reports exit 0.
+    s.finish()?;
+    match tokio::time::timeout(Duration::from_secs(10), TermFrame::read(&mut r)).await {
+        Ok(Ok(Some(TermFrame::Exit(0)))) => {}
+        other => anyhow::bail!("exit: {other:?}"),
+    }
+    Ok(format!(
+        "ok keys=200 p50_ms={} p95_ms={} max_ms={} burst_mib=4 burst_secs={secs:.2}",
+        pct(50),
+        pct(95),
+        rtts[rtts.len() - 1]
+    ))
 }
 
 async fn transfer(streams: Arc<Streams>, peer: PublicKey, mib: usize) -> Result<String> {
@@ -131,7 +236,14 @@ async fn main() -> Result<()> {
     let keys: Vec<PublicKey> = devices.values().copied().collect();
     streams.retain_members(&keys).await;
     dp.set_members(&members).await?;
-    tokio::spawn(serve(streams.clone()));
+    if env("TERM_HOST", "no") == "yes" {
+        tokio::spawn(serve_terminals(streams.clone()));
+    } else {
+        tokio::spawn(serve(streams.clone()));
+    }
+    let term_to = std::env::var("TERM_TO").ok().filter(|p| !p.is_empty());
+    let term_result: Arc<Mutex<Option<String>>> = Arc::default();
+    let mut term_started = false;
 
     let quic_to = std::env::var("QUIC_TO")
         .ok()
@@ -196,6 +308,19 @@ async fn main() -> Result<()> {
                         *res.lock().unwrap() = Some(line);
                     });
                 }
+                if !term_started && term_to.as_deref() == Some(pname.as_str()) {
+                    term_started = true;
+                    let (streams, res, peer) = (streams.clone(), term_result.clone(), *k);
+                    let label = format!("{name}->{pname}");
+                    tokio::spawn(async move {
+                        let line = match terminal_session(streams, peer).await {
+                            Ok(s) => format!("RESULT term {label} {s}"),
+                            Err(e) => format!("RESULT term {label} failed: {e:#}"),
+                        };
+                        println!("{line}");
+                        *res.lock().unwrap() = Some(line);
+                    });
+                }
             }
             println!(
                 "t={t:5.1} {name}->{pname} ping={} link={} via={}",
@@ -210,6 +335,11 @@ async fn main() -> Result<()> {
     if let Some((p, _)) = &quic_to {
         if quic_result.lock().unwrap().is_none() {
             println!("RESULT quic {name}->{p} mib={quic_mib} unfinished");
+        }
+    }
+    if let Some(p) = &term_to {
+        if term_result.lock().unwrap().is_none() {
+            println!("RESULT term {name}->{p} unfinished");
         }
     }
     for p in &peers {

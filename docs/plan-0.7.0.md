@@ -18,8 +18,8 @@ access and privacy: `docs/plan-0.6.0.md`):
 - **Relays through the mesh in the same release**: without it, a
   Bluetooth-only device would miss membership changes, invites and names
   until it was back online.
-- STUN for private meshes and the BSD binaries, once planned here, ship
-  earlier in 0.6.0.
+- STUN for private meshes, once planned here, ships earlier in 0.6.0; the
+  BSD binaries in 0.6.1.
 
 ## How it fits
 

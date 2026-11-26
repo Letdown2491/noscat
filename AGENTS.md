@@ -99,7 +99,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 - `docs/plan-0.6.0.md`: next release, access and privacy: access
   groups (three trust groups, control asked on first use), a terminal
   into members that allow it, pairing codes and
-  STUN for private meshes, BSD binaries.
+  STUN for private meshes.
+- `docs/plan-0.6.1.md`: BSD binaries (#19), the CLI only.
 - `docs/plan-0.7.0.md`: Bluetooth on Linux and Android, relays through the
   mesh, splits and healing.
 - `docs/plan-0.8.0.md`: macOS (desktop app and Bluetooth).

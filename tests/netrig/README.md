@@ -10,6 +10,7 @@ tests/netrig/run.sh          # every scenario, non-zero exit on any miss
 tests/netrig/run.sh cone symmetric yes connect
 DUMP=A RUST_LOG=info tests/netrig/run.sh cone cone yes connect
 QUIC_WAIT_DIRECT=yes tests/netrig/run.sh cone cone yes connect 75 3 16
+TERM_TEST=yes tests/netrig/run.sh symmetric symmetric yes connect 60 3
 ```
 
 Topology, NAT modes and the scenario arguments are documented at the top of
@@ -32,6 +33,11 @@ Current scenarios and what they must show (results recorded in
 | symmetric | symmetric | yes | connects (relayed via member) |
 | symmetric | symmetric | yes, 3% loss | 16 MiB over QUIC, relayed |
 | cone | cone | yes, 3% loss | 16 MiB over QUIC, after the punch |
+| symmetric | symmetric | yes, 3% loss | a terminal, relayed: 200 keystroke echoes (95th percentile under 1 s), a 4 MiB burst intact, exit status 0 |
+
+The terminal scenario's B is an echo host speaking noscat's terminal
+protocol (`TERM_HOST`), since rig devices run as `nobody` with no shell;
+the real PTY host, and who may open one, are tested in noscat-client.
 
 The client and CLI now run on these same modules; the rig still drives
 `node/`, which gives it direct control over adverts and probes. Swapping in

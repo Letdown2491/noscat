@@ -497,6 +497,43 @@ fn type_in(rt: &tokio::runtime::Runtime, s: &mut noscat_client::MeshStream, text
 
 #[test]
 #[cfg(unix)]
+fn an_unanswered_ask_is_refused_after_the_timeout() {
+    use noscat_client::{AccessAnswer, AccessGroup, AccessOutcome, ACCESS_ASK_TIMEOUT};
+    watchdog("an_unanswered_ask_is_refused_after_the_timeout", 240);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let (a, b, ea, eb) = mesh_pair(&url);
+    let (an, bn) = (a.npub().to_string(), b.npub().to_string());
+    b.set_access_prompts(true);
+
+    // Asked, and nobody answers: the viewer keeps hearing it waits, then
+    // gets "not permitted" once the ask times out, not a hang.
+    let started = std::time::Instant::now();
+    let opener = {
+        let (a, bn) = (a.clone(), bn.clone());
+        std::thread::spawn(move || a.open_terminal(&bn, 80, 24, "xterm"))
+    };
+    let id = wait(&eb, "access request", |e| match e {
+        Event::AccessRequest { id, peer, group: AccessGroup::Control } if *peer == an => Some(*id),
+        _ => None,
+    });
+    wait(&ea, "waiting", |e| matches!(e, Event::TerminalWaiting { peer } if *peer == bn).then_some(()));
+    let err = opener.join().unwrap().err().expect("an unanswered terminal opened");
+    assert!(err.to_string().contains("not permitted"), "{err}");
+    assert!(started.elapsed() >= ACCESS_ASK_TIMEOUT, "refused before the timeout: {:?}", started.elapsed());
+    wait(&eb, "resolved", |e| match e {
+        Event::AccessResolved { id: rid, outcome, .. } if *rid == id => Some(assert_eq!(*outcome, AccessOutcome::TimedOut)),
+        _ => None,
+    });
+    assert_eq!(b.access_requests()[0].outcome, AccessOutcome::TimedOut);
+    // A late answer finds nothing waiting, and lets nothing in.
+    assert!(b.answer_access(id, AccessAnswer::Once).is_err());
+    assert!(b.terminal_sessions().is_empty());
+}
+
+#[test]
+#[cfg(unix)]
 fn a_terminal_asks_first_then_runs_a_real_shell() {
     use noscat_client::{AccessAnswer, AccessGroup, AccessOutcome};
     watchdog("a_terminal_asks_first_then_runs_a_real_shell", 240);

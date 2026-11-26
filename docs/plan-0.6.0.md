@@ -21,7 +21,9 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
 - **Private meshes, all the way**: the apps' invite codes carry a private
   mesh's relays ([#20](https://github.com/Letdown2491/noscat/issues/20)),
   and STUN comes from the mesh's own relay ([#1](https://github.com/Letdown2491/noscat/issues/1)).
-- **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19)).
+- **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19))
+  moved to 0.6.1 on 2026-11-26 (`docs/plan-0.6.1.md`): CLI only and
+  independent of the rest, so it no longer holds up this release.
 
 ## Phase 0: pairing codes in the apps (#20)
 
@@ -137,11 +139,18 @@ Done 2026-11-25, with these choices:
 - [x] CLI client: `noscat shell <device>` (raw mode, resizes followed,
       exit status passed through; prints "waiting for <device> to
       approve" while asked).
-- [ ] Rig test: a session through the reachable member at 3% loss stays
+- [x] Rig test: a session through the reachable member at 3% loss stays
       usable; a denied member gets "not permitted"; an unanswered request
-      times out.
+      times out. Done 2026-11-26. The rig's `TERM_TEST` scenario (relayed,
+      symmetric NATs, 3% loss) against an echo host: 200 keystrokes p50
+      23 to 27 ms, p95 100 to 127 ms, max 333 ms; a 4 MiB burst intact in
+      under a second; exit status 0. Denial and the timeout are access
+      layer, so they are noscat-client tests: "not permitted" for a denial
+      and a headless host (`a_terminal_asks_first_then_runs_a_real_shell`)
+      and for an ask left unanswered for `ACCESS_ASK_TIMEOUT`
+      (`an_unanswered_ask_is_refused_after_the_timeout`).
 
-Done 2026-11-25, except the rig test (still open below). Choices:
+Done 2026-11-25; the rig test 2026-11-26. Choices:
 
 - The shell scrubs `NOSCAT_IDENTITY`, `NOSCAT_DIR` and `RUST_LOG` from
   its environment; it runs in the home directory.
@@ -152,7 +161,7 @@ Done 2026-11-25, except the rig test (still open below). Choices:
   shell host` runs and returns.
 - Covered end to end in `noscat-client/tests/client.rs` (real shell:
   refused headless, asked, once, deny, always, host ends a session).
-- [ ] Rig test (3% loss through the reachable member) not written yet.
+- [x] Rig test (3% loss through the reachable member): done 2026-11-26.
 
 ## Phase 4: access and terminal in the apps
 
@@ -199,28 +208,7 @@ Done 2026-11-25, except the rig test (still open below). Choices:
 - [ ] Try it, then revisit: after the first real use, review the groups,
       the prompt and the card with the user before the release.
 
-## Phase 5: BSD binaries ([#19](https://github.com/Letdown2491/noscat/issues/19))
-
-Decided 2026-11-25 (option A): ship BSD binaries built with our patches
-instead of waiting for upstream. Independent of everything else.
-
-- [ ] The two patches from `docs/upstream/01-freebsd-build.md` live in the
-      repo (`packaging/bsd/patches/`): `nvpn-mdns-sd` on `socket-pktinfo`
-      0.4, and the `bind_socket_to_interface` fallback in
-      `nvpn-fips-core`. Only the BSD CI job adds the `[patch]` section, so
-      every other platform keeps building pure crates.io code.
-- [ ] CI: FreeBSD build and tests (a FreeBSD VM action, or cross with a
-      sysroot as in the spike); the release attaches
-      `noscat-<tag>-x86_64-unknown-freebsd.tar.gz`.
-- [ ] OpenBSD and NetBSD: try the same; ship binaries for those that
-      build and pass, and record what fails for the others.
-- [ ] Docs: INSTALL's BSD section points at the binaries (`cargo install
-      noscat` keeps failing on the BSDs until upstream fixes it). A
-      FreeBSD port (with the patches) and pkgsrc-wip later, on demand.
-- [ ] When upstream ships the fixes, drop the patches; the upstream
-      draft stays unposted unless approved.
-
-## Phase 6: release
+## Phase 5: release
 
 - [ ] Docs in all three repos (README, API, man page, nip-noscat for the
       wire changes, CONTEXT terms), CI green, netns suite.

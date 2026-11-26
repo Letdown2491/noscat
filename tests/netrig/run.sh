@@ -7,6 +7,7 @@
 #   tests/netrig/run.sh cone symmetric yes connect
 #   DUMP=A RUST_LOG=info tests/netrig/run.sh cone cone yes connect
 #   QUIC_WAIT_DIRECT=yes tests/netrig/run.sh cone cone yes connect 60 3 16
+#   TERM_TEST=yes tests/netrig/run.sh symmetric symmetric yes connect 60 3
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -20,6 +21,7 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z \
 scenario() {
   podman run --rm --privileged \
     -e DUMP="${DUMP:-}" -e RUST_LOG="${RUST_LOG:-warn}" -e QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-}" \
+    -e TERM_TEST="${TERM_TEST:-}" -e TERM_P95_MS="${TERM_P95_MS:-}" \
     -v noscat-netrig-target:/target:ro \
     -v "$HERE:/rig:ro,Z" localhost/noscat-netrig sh /rig/rig.sh "$@"
 }
@@ -37,5 +39,8 @@ scenario symmetric symmetric yes connect || failed=1
 # QUIC streams under loss (16 MiB, BBR, sha256 checked), relayed and punched
 scenario symmetric symmetric yes connect 45 3 16 || failed=1
 QUIC_WAIT_DIRECT=yes scenario cone cone yes connect 75 3 16 || failed=1
+# A terminal relayed through the reachable member at 3% loss: keystroke
+# echoes stay quick, a 4 MiB burst arrives intact, the exit status comes back
+TERM_TEST=yes scenario symmetric symmetric yes connect 60 3 || failed=1
 [ "$failed" = 0 ] && echo "netrig: all scenarios passed" || echo "netrig: FAILURES"
 exit "$failed"

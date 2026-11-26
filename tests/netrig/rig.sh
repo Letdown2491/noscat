@@ -12,7 +12,10 @@
 #                 work, and the scenario also requires a verified transfer
 #
 # env: QUIC_WAIT_DIRECT=yes (hold the transfer until A has a direct link
-#      to B), RUST_LOG, DUMP=<A|B|C> (print that node's log)
+#      to B), TERM_TEST=yes (A opens a terminal on B, an echo host: 200
+#      timed keystrokes, a 4 MiB burst, the exit status; the scenario then
+#      requires it, with the 95th percentile echo under TERM_P95_MS,
+#      default 1000), RUST_LOG, DUMP=<A|B|C> (print that node's log)
 #
 # The nodes run noscat-core's Dataplane and Streams (node/), so FIPS MTU
 # and congestion control are whatever noscat ships (1320, BBR). The relayed
@@ -92,20 +95,23 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ -n "$stun_ok" ] || { echo "FAIL rig: STUN unreachable from behind NAT"; exit 1; }
 
-run() { # ns name peers [public] [quic_to]
+run() { # ns name peers [public] [quic_to] [term_to] [term_host]
   ns "$1" setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=-all \
     env QUIC_WAIT_DIRECT="${QUIC_WAIT_DIRECT:-no}" PUBLIC="${4:-no}" QUIC_TO="${5:-}" QUIC_MIB="${QUIC_MIB:-16}" NAME="$2" PEERS="$3" SHARED=/shared \
+        TERM_TO="${6:-}" TERM_HOST="${7:-no}" \
         STUN=stun:37.120.10.3:3478 DURATION_SECS="$DUR" HOME=/tmp \
         RUST_LOG="${RUST_LOG:-warn}" "$NODE" > "/logs/$2.log" 2>&1 &
 }
+TT=; TH=no
+[ "${TERM_TEST:-}" = yes ] && { TT=B; TH=yes; }
 if [ "$WITH_C" = yes ]; then
-  run h1 A B,C no "${QUIC_MIB:+B}"; run h2 B A,C; run pub C A,B yes
+  run h1 A B,C no "${QUIC_MIB:+B}" "$TT"; run h2 B A,C no "" "" "$TH"; run pub C A,B yes
 else
-  run h1 A B no "${QUIC_MIB:+B}"; run h2 B A
+  run h1 A B no "${QUIC_MIB:+B}" "$TT"; run h2 B A no "" "" "$TH"
 fi
 sleep $((DUR + 8))
 
-echo "=== A behind $NAT_A NAT, B behind $NAT_B NAT, reachable member: $WITH_C, loss ${LOSS}%${QUIC_MIB:+, QUIC $QUIC_MIB MiB${QUIC_WAIT_DIRECT:+, after direct link}} (expect A<->B: $EXPECT)"
+echo "=== A behind $NAT_A NAT, B behind $NAT_B NAT, reachable member: $WITH_C, loss ${LOSS}%${QUIC_MIB:+, QUIC $QUIC_MIB MiB${QUIC_WAIT_DIRECT:+, after direct link}}${TERM_TEST:+, terminal} (expect A<->B: $EXPECT)"
 grep -h RESULT /logs/*.log | sort
 for f in /logs/A.log /logs/B.log; do
   grep -h '^t=' "$f" | awk '{k=$3; last[k]=$0} END {for (k in last) print "LAST " last[k]}'
@@ -115,6 +121,14 @@ done | sort -k3
 if [ -n "$QUIC_MIB" ] && ! grep -q "RESULT quic A->B .* ok " /logs/A.log; then
   echo "FAIL ($(grep -h 'RESULT quic' /logs/A.log || echo 'no QUIC result'))"
   exit 1
+fi
+if [ "${TERM_TEST:-}" = yes ]; then
+  line=$(grep -h 'RESULT term A->B' /logs/A.log || echo 'no terminal result')
+  p95=$(echo "$line" | sed -n 's/.* p95_ms=\([0-9]*\).*/\1/p')
+  if ! echo "$line" | grep -q ' ok ' || [ -z "$p95" ] || [ "$p95" -ge "${TERM_P95_MS:-1000}" ]; then
+    echo "FAIL ($line)"
+    exit 1
+  fi
 fi
 ab=$(grep -h 'RESULT A->B' /logs/A.log | sed 's/.*=//')
 ba=$(grep -h 'RESULT B->A' /logs/B.log | sed 's/.*=//')
