@@ -80,6 +80,13 @@ pub async fn host(t: IncomingTerminal, end: oneshot::Receiver<()>) -> Result<i32
     });
     // Input and resizes: a blocking writer thread.
     let (in_tx, in_rx) = std::sync::mpsc::channel::<TermFrame>();
+    // Windows: ConPTY starts by asking where the cursor is (portable-pty
+    // creates it with PSEUDOCONSOLE_INHERIT_CURSOR) and holds all output
+    // until it hears back. A viewer whose terminal does not answer would
+    // see nothing, ever, so the host answers that first query itself (top
+    // left: a new console) and the viewer never sees it.
+    #[cfg(windows)]
+    let mut cursor_query = Some(in_tx.clone());
     std::thread::spawn(move || {
         for f in in_rx {
             match f {
@@ -127,6 +134,8 @@ pub async fn host(t: IncomingTerminal, end: oneshot::Receiver<()>) -> Result<i32
         tokio::select! {
             out = out_rx.recv() => match out {
                 Some(b) => {
+                    #[cfg(windows)]
+                    let b = answer_cursor_query(b, &mut cursor_query);
                     if s.write_all(&TermFrame::Output(b).encode()).await.is_err() {
                         viewer_gone = true;
                         break;
@@ -162,6 +171,43 @@ pub async fn host(t: IncomingTerminal, end: oneshot::Receiver<()>) -> Result<i32
         let _ = tokio::time::timeout(Duration::from_secs(2), s.stopped()).await;
     }
     Ok(code)
+}
+
+/// The cursor position query (DSR 6).
+#[cfg(windows)]
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+/// Answer ConPTY's cursor query (see `host`) and cut it from the output.
+/// Only the first output chunk is looked at, where ConPTY puts it; later
+/// queries come from programs and go to the viewer.
+#[cfg(windows)]
+fn answer_cursor_query(b: Vec<u8>, pending: &mut Option<std::sync::mpsc::Sender<TermFrame>>) -> Vec<u8> {
+    let Some(tx) = pending.take() else { return b };
+    let Some(at) = b.windows(CURSOR_QUERY.len()).position(|w| w == CURSOR_QUERY) else {
+        return b;
+    };
+    let _ = tx.send(TermFrame::Input(b"\x1b[1;1R".to_vec()));
+    let mut out = b[..at].to_vec();
+    out.extend_from_slice(&b[at + CURSOR_QUERY.len()..]);
+    out
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_cursor_query_is_answered_and_hidden() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut pending = Some(tx);
+        let out = answer_cursor_query(b"\x1b[?25l\x1b[6nhi".to_vec(), &mut pending);
+        assert_eq!(out, b"\x1b[?25lhi");
+        assert!(matches!(rx.try_recv(), Ok(TermFrame::Input(a)) if a == b"\x1b[1;1R"));
+        // A program's later query goes to the viewer.
+        let later = answer_cursor_query(b"\x1b[6n".to_vec(), &mut pending);
+        assert_eq!(later, b"\x1b[6n");
+        assert!(rx.try_recv().is_err());
+    }
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

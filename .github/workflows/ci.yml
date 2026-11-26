@@ -9,6 +9,11 @@
 #   build.
 # - Publish check: `cargo publish --workspace --dry-run` packages every
 #   crate and builds it from the package, as crates.io will.
+#
+# Started by hand (workflow_dispatch), `only` runs just one job: to check a
+# fix pushed with [skip ci] without waiting for every platform, e.g.
+#   gh workflow run ci -f only=windows
+# Pushes and pull requests always run everything.
 name: ci
 
 on:
@@ -16,6 +21,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Run just this job: linux-test, linux-musl, macos, windows or publish-check (empty: all)"
+        required: false
+        default: ""
 
 # Tests that call logs() (noscat-core tests/device.rs) print device logs
 # when they fail; the others ignore it.
@@ -29,6 +39,7 @@ concurrency:
 jobs:
   linux-test:
     name: linux test (glibc)
+    if: ${{ !inputs.only || inputs.only == 'linux-test' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -43,6 +54,7 @@ jobs:
 
   linux-musl:
     name: linux build ${{ matrix.target }}
+    if: ${{ !inputs.only || inputs.only == 'linux-musl' }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +86,7 @@ jobs:
 
   macos:
     name: macos ${{ matrix.target }}
+    if: ${{ !inputs.only || inputs.only == 'macos' }}
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +113,7 @@ jobs:
 
   windows:
     name: windows x86_64
+    if: ${{ !inputs.only || inputs.only == 'windows' }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -117,6 +131,7 @@ jobs:
 
   publish-check:
     name: crates.io dry run
+    if: ${{ !inputs.only || inputs.only == 'publish-check' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
