@@ -44,9 +44,9 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
       through the reachable member. A device in no mesh uses none either.
 - [x] CLI: `--stun` shown in `--help` and the man page; `noscat mesh stun
       add|remove`.
-- [ ] Apps show the mesh's STUN servers (needs `mesh_stun()` in the FFI).
-      Desktop: done, Settings > Network, editable. Android: not yet (its
-      Settings lists no relays either).
+- [x] Apps show the mesh's STUN servers (`mesh_stun()`, and
+      `set_mesh_stun()` to edit them, in the FFI): Settings > Network on
+      both, editable.
 - [x] Deployment: Caddy proxies TCP only, so STUN needs UDP 3478 open on
       the relay's host (on vm-2252, ask before changing it). The VPS's
       noscat is reachable without an address today, so before it runs a
