@@ -303,7 +303,7 @@ New in 0.6: `meshStun()` (blocking), the access calls above,
 `terminalSessions()`, `endTerminal(id)`, and `openTerminal(target, cols,
 rows)` (blocking until the member's shell started; `TerminalWaiting`
 fires while it asks) returning a `Terminal` object: `id()`,
-`write(ByteArray)`, `resize(cols, rows)`, `close()`. `MeshMember` gains
+`write(ByteArray)`, `resize(cols, rows)`, `end()` (`close()` releases the object, which ends it too). `MeshMember` gains
 `control` (it offers a terminal), and the access types are UniFFI enums
 and records: `AccessGroup`, `AccessRule`, `AccessRules`, `AccessAnswer`,
 `AccessOutcome`, `AccessRequest`, `TerminalSessionInfo`.

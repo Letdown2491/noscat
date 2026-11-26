@@ -765,8 +765,9 @@ impl Terminal {
         self.handle.resize(cols, rows);
     }
 
-    /// End the session.
-    pub fn close(&self) {
+    /// End the session. (Not `close`: that releases the Kotlin object,
+    /// which ends the session too.)
+    pub fn end(&self) {
         self.handle.close();
     }
 }
