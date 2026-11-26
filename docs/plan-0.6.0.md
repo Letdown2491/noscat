@@ -152,34 +152,46 @@ Done 2026-11-25, except the rig test (still open below). Choices:
 
 ## Phase 4: access and terminal in the apps
 
-- [ ] `noscat-ffi`: access request events and their answer; the access
+- [x] `noscat-ffi`: access request events and their answer; the access
       settings (read, change, revoke); open a terminal
       (`openTerminal(target, cols, rows)`) returning a handle with
       `write`, `resize` and `close`; output, waiting and exit arrive as
       events (on a background thread: apps hop to their UI thread).
-- [ ] Prompt (desktop and Android): "<device> wants to open a terminal on
+- [x] Prompt (desktop and Android): "<device> wants to open a terminal on
       this <computer|phone>", with Allow once, Always allow, Deny. On the
       desktop it raises the window and shows through the tray if hidden.
-- [ ] Settings, a new **Access** card after Network: one row per member
+      Desktop: a strip across the top of the main window with a countdown;
+      the window is raised, or reopened when closed to the tray. Android
+      needs none for now: only control asks, and phones host no terminal.
+- [x] Settings, a new **Access** card after Network: one row per member
       with a one-line summary ("can send things, use services, control:
       always"); tapping a row edits its three groups or revokes. Below it,
-      recent terminal sessions (who, when, how long).
-- [ ] The Terminal action is an icon on device rows, shown only for
+      recent terminal sessions (who, when, how long). Desktop: Everyone
+      plus a row per member, Edit opens Allow / Ask / Block per group;
+      recent sessions are this run's only (the full history is
+      `terminal.log`). Android: the Send group only, as phones offer
+      neither services by default nor control.
+- [x] The Terminal action is an icon on device rows, shown only for
       devices that advertise control offered (in practice computers, so
       phone rows keep four icons). Refused: the icon greys out for that
       device, with the reason as its tooltip. Waiting: the opener shows
       "Waiting for <device> to approve".
-- [ ] noscat-desktop: a terminal opens in its own window (embedded
+- [x] noscat-desktop: a terminal opens in its own window (embedded
       `alacritty_terminal` drawn in GPUI, as Zed does), titled with the
       device's name; closing it ends the session. Launching a system
       terminal running the CLI is not an option: the CLI on the same
       computer is a different device.
-- [ ] While a member has a terminal open on this computer: a persistent
+- [x] While a member has a terminal open on this computer: a persistent
       banner naming it, with End, and the tray icon changes. Not a toast.
-- [ ] noscat-android (client only; a shell into the app's sandbox is
+- [x] noscat-android (client only; a shell into the app's sandbox is
       useless): a full-screen terminal with a row of extra keys (Esc,
       Ctrl, Alt, Tab, arrows). Check the license of any terminal library
-      before using it.
+      before using it. Termux `terminal-view` (Apache 2.0). Built and unit
+      tested; not yet run on a device (the Pixel keeps release 0.5.1).
+- [x] Checked end to end on a throwaway local mesh (mock relay, CLI host,
+      desktop): the desktop's terminal window ran the host's shell with
+      colours and the cursor; the CLI's `noscat shell` raised the desktop's
+      prompt and got a shell after Allow once.
 - [ ] Try it, then revisit: after the first real use, review the groups,
       the prompt and the card with the user before the release.
 
