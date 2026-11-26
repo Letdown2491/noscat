@@ -61,10 +61,12 @@ native GUI clients:
 
 - **[noscat-android](https://github.com/Letdown2491/noscat-android)**: native
   Kotlin (Compose) app over a Rust UniFFI bridge: chat, file send/receive,
-  port forwards, and joining a mesh by scanning a member's QR.
+  port forwards, clipboard sharing, terminals on the mesh's computers, and
+  joining a mesh by scanning a member's QR.
 - **[noscat-desktop](https://github.com/Letdown2491/noscat-desktop)**: pure
   Rust desktop app (GPUI), embedding `noscat-client` directly with no FFI
-  layer: feature parity with the Android client plus expose/serve.
+  layer: feature parity with the Android client plus expose/serve and
+  hosting terminals for other members.
 
 Neither app can create a mesh yet: a CLI device creates it. Once in, the
 apps approve join requests like any member (Devices tab).
@@ -131,6 +133,11 @@ Homebrew's `brew services start noscat` runs a plain `noscat up`.
 
 ### A mesh
 
+For a mesh that touches no third-party server at all (your own relay and
+STUN on a small server), follow the step-by-step guide:
+**[`docs/private-mesh.md`](docs/private-mesh.md)**. The quick version, on
+public relays:
+
 On the first device:
 
 ```
@@ -175,7 +182,7 @@ noscat mesh leave              # this device leaves
 ```
 
 **A shell on another device.** `noscat shell laptop` opens laptop's login
-shell in your terminal, as laptop's user. Laptop asks first (in its app)
+shell (cmd on Windows) in your terminal, as laptop's user. Laptop asks first (in its app)
 unless it already allows you; a server with no app refuses until you run
 `noscat allow <you> control` on it. On the host, `noscat sessions` lists
 open sessions and `noscat sessions end <id>` ends one; each is logged in
@@ -275,8 +282,9 @@ the internet.
 is a members-only relay for one mesh. It carries only Noscat's events and
 serves only your devices, so who is in the mesh, who gets invited and when
 each device is online stay off third-party relays. Put it on the server that
-runs your reachable member, then make the mesh private (below). Without one,
-Noscat uses public relays.
+runs your reachable member, then make the mesh private (below); the guide in
+[`docs/private-mesh.md`](docs/private-mesh.md) walks through all of it.
+Without one, Noscat uses public relays.
 
 Relays carry only the mesh's encrypted control traffic (membership changes,
 invitations, key packages, relay lists and presence adverts); data goes

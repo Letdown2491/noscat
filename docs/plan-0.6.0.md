@@ -208,6 +208,31 @@ Done 2026-11-25; the rig test 2026-11-26. Choices:
 - [ ] Try it, then revisit: after the first real use, review the groups,
       the prompt and the card with the user before the release.
 
+## Found in testing (2026-11-26)
+
+- [x] Windows: the CLI builds again (crossterm's `windows` feature),
+      `noscat shell` sets a VT, UTF-8 console and restores it, and a
+      client test runs a terminal on cmd. BSD moved to 0.6.1.
+- [x] `noscat up` waits (up to 30 s) for a one-off command holding the
+      device instead of failing; the relay retries a failed first member
+      load within seconds and serves its last list (`members.cache`) from
+      the start. A joint restart of the two on the VPS settles in about a
+      second (was 26 to 33 s).
+- [x] Slow first connect after a restart: a device's first advert carries
+      `hello` and every member answers at once (was up to two minutes); a
+      subscription refused for want of a login retries within a second
+      (was 15 s); the mesh state is saved only when an event changed it
+      (a phone spent 6 of its 8.5 s start re-saving it for replayed
+      events; now 2.5 s).
+- [x] The product is "Noscat" in both apps (launcher, notifications,
+      window app id `noscat-desktop`); the in-app mark is round.
+- [x] Desktop terminal: select with the mouse, copy with Ctrl+Shift+C,
+      primary selection and middle-click paste.
+- [x] Logs for diagnosing: `RUST_LOG` on the desktop, `noscat-debug.log`
+      in Android debug builds (`start_debug_log` in the FFI).
+- [x] `docs/private-mesh.md`: a step-by-step guide to a private mesh on
+      your own server.
+
 ## Phase 5: release
 
 - [ ] Docs in all three repos (README, API, man page, nip-noscat for the
