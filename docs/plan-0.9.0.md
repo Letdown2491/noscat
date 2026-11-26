@@ -3,7 +3,7 @@
 0.9.0 adds a **Screen** action to every member that allows it: click it
 in the desktop app or the Android app (or run `noscat screen <device>`)
 to see that device's screen and control it. It ships in lockstep in
-noscat, noscat-desktop and noscat-android, after 0.6.0 (permissions and
+noscat, noscat-desktop and noscat-android, after 0.6.0 (access groups and
 the terminal), 0.7.0 (Bluetooth) and 0.8.0 (macOS). It was 0.8.0 until
 the roadmap was re-cut on 2026-11-25.
 
@@ -22,8 +22,10 @@ Decided 2026-11-25:
   to end encrypted. No server, no relay for video.
 - **Off by default** on every device: "Allow members to view this
   device", with view only or view and control, and ask each time (the
-  default) or unattended. Screen view and control are actions in 0.6.0's
-  per-device permissions, so a device can allow some members only.
+  default) or unattended. Screen view and control join the terminal in
+  0.6.0's Control group (asked on first use; allow once, always, or
+  deny), so a device can allow some members only. Whether view only
+  needs its own level inside Control is decided when 0.9.0 starts.
 - **Control from every client**: built-in viewers in both apps; the CLI
   opens a small viewer noscat serves on localhost.
 

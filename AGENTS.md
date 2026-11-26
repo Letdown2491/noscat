@@ -88,8 +88,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   (builds, crates.io, tap, scoop, pacman, AUR and winget files).
 - `containers/noscat-dev.containerfile`: the dev image (Rust plus the
   libdbus and libclang the FIPS crates need on glibc).
-- `docs/plan-0.6.0.md`: next release, access and privacy: per-device
-  permissions, a terminal into members that allow it, pairing codes and
+- `docs/plan-0.6.0.md`: next release, access and privacy: access
+  groups (three trust groups, control asked on first use), a terminal
+  into members that allow it, pairing codes and
   STUN for private meshes, BSD binaries.
 - `docs/plan-0.7.0.md`: Bluetooth on Linux and Android, relays through the
   mesh, splits and healing.

@@ -11,9 +11,13 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
 - **Terminal**: a Terminal action on a member opens a shell on it, like
   SSH but with the mesh identity as the login: no keys, no sshd. Our own
   app protocol, not SSH carried over a forward.
-- **Each device decides** which members get terminal access, through
-  per-device permissions (moved here from 0.7.0, since the terminal needs
-  them and the screen in 0.9.0 builds on them).
+- **Each device decides** what other members may do to it, through
+  access groups (moved here from 0.7.0, since the terminal needs them and
+  the screen in 0.9.0 builds on them). Decided 2026-11-25 after a UX
+  review: three trust groups instead of per-action toggles, and the host
+  is asked on first use for control instead of configuring it ahead of
+  time. Settings is for review and revoking, not setup. To be tried and
+  revisited after use.
 - **Private meshes, all the way**: the apps' invite codes carry a private
   mesh's relays ([#20](https://github.com/Letdown2491/noscat/issues/20)),
   and STUN comes from the mesh's own relay ([#1](https://github.com/Letdown2491/noscat/issues/1)).
@@ -43,28 +47,39 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
 - [ ] Deployment note: Caddy proxies TCP only, so STUN needs UDP 3478
       open on the relay's host (on vm-2252, ask before changing it).
 
-## Phase 2: per-device permissions
+## Phase 2: access groups
 
-A device decides which members may do what to it: for example, the
-desktop takes files from the VPS but not from the phone. The receiver
-enforces it on each incoming stream, whose opener is authenticated by
-the QUIC handshake, so a sender cannot get around it.
+A device decides what each member may do to it, in three groups ordered
+by risk. The receiver enforces it on each incoming stream, whose opener is
+authenticated by the QUIC handshake, so a sender cannot get around it.
 
-- [ ] Actions: files, chat, clipboard, forwards to the default service,
-      forwards to served ports, terminal, and (0.9) screen view and
-      control.
-- [ ] Policy: a per-device default per action (everyone or nobody), plus
-      per-member overrides. Defaults stay "everyone" (terminal and screen:
-      nobody), so existing meshes behave as before. New members get the
-      defaults.
-- [ ] Local and private: kept in the device's own settings, not in the
-      group state. A refused stream gets a clear reason ("does not accept
-      files from this device"): every app protocol's refusal answer gains
-      a "not permitted" code (wire change in `docs/nip-noscat.md`). The
-      apps remember it and grey the action out for that member.
-- [ ] CLI: `noscat allow|deny <device> <action>`, `noscat permissions`.
-      Desktop and Android: the UI is designed with the user before it is
-      built (device rows have no overflow menu, decided for 0.5.1).
+| Group | Covers | Default |
+|---|---|---|
+| Send me things | files, chat, clipboard | allowed |
+| Use my services | forwards to the default service and to served ports | allowed |
+| Control this device | terminal (0.6), screen view and control (0.9) | ask |
+
+- [ ] Per member, each group is allowed, denied, or (Control only) ask.
+      Control's choices on a prompt: allow once (this session), always
+      allow, deny. Defaults keep today's behavior for the first two
+      groups, so existing meshes behave as before.
+- [ ] Local and private: kept in the device's own settings, never in the
+      group state or adverts.
+- [ ] Ask on first use: an incoming Control request waits while the host
+      decides. The opener is told it is waiting; the request times out
+      after 60 s as denied. `noscat-client` raises an access request event
+      with the requester and group, and takes the answer (API.md).
+- [ ] Headless hosts (no app attached to answer): Control requests are
+      denied unless allowed ahead of time. Pending and recent requests are
+      listed by `noscat access`; `noscat allow|deny <device> <group>
+      [--once]` answers or sets them.
+- [ ] Wire (`docs/nip-noscat.md`): every app protocol's refusal answer
+      gains "not permitted"; Control protocols gain "waiting for approval"
+      before started or not permitted. A device advertises "control
+      offered" unless its Control default is never; the advert never
+      carries who is allowed.
+- [ ] Fine-grained per-action switches stay out of the apps; a CLI flag
+      may expose them later if someone needs them.
 - [ ] Not covered: membership. Every device stays an admin (ADR 0007).
 
 ## Phase 3: terminal (protocol, host, CLI)
@@ -78,39 +93,56 @@ the QUIC handshake, so a sender cannot get around it.
 
 - [ ] Protocol (`docs/nip-noscat.md`): a Terminal app protocol (tag 4).
       The opener sends the terminal size and `TERM`; the accepter answers
-      started, not permitted, or unavailable; then framed messages: input
-      and resizes one way, output and the exit status the other.
+      waiting for approval (optional), then started, not permitted, or
+      unavailable; then framed messages: input and resizes one way, output
+      and the exit status the other.
 - [ ] Host: a PTY through `portable-pty` (Linux, macOS, BSD; ConPTY on
       Windows) running the user's login shell in their home directory, as
       the user running noscat (never elevated). A noscat run as a system
       service runs shells as its service user; the docs say so.
-- [ ] Off unless allowed: terminal is a permission action whose default
-      is nobody. A device that allows anyone says so in its advert, so
-      apps show Terminal only on members that offer it.
+- [ ] Gated by the Control group (phase 2): asked on first use, never on
+      by default.
 - [ ] On the host: each session logged (who, when, how long), open
-      sessions listed and endable (`noscat sessions`, and in the desktop
-      app), and a notice when one starts.
+      sessions listed and endable (`noscat sessions`).
 - [ ] CLI client: `noscat shell <device>` (raw mode, resizes followed,
-      exit status passed through).
+      exit status passed through; prints "waiting for <device> to
+      approve" while asked).
 - [ ] Rig test: a session through the reachable member at 3% loss stays
-      usable; a member without permission gets "not permitted".
+      usable; a denied member gets "not permitted"; an unanswered request
+      times out.
 
-## Phase 4: terminal in the apps
+## Phase 4: access and terminal in the apps
 
-- [ ] `noscat-ffi`: open a session (`openTerminal(target, cols, rows)`)
-      returning a handle with `write`, `resize` and `close`; output and
-      the exit arrive as events (on a background thread: apps hop to
-      their UI thread).
-- [ ] noscat-desktop: an embedded terminal (`alacritty_terminal` for the
-      emulation, drawn in GPUI, as Zed does). Launching a system terminal
-      running the CLI is not an option: the CLI on the same computer is a
-      different device. As host, Settings shows open sessions.
+- [ ] `noscat-ffi`: access request events and their answer; the access
+      settings (read, change, revoke); open a terminal
+      (`openTerminal(target, cols, rows)`) returning a handle with
+      `write`, `resize` and `close`; output, waiting and exit arrive as
+      events (on a background thread: apps hop to their UI thread).
+- [ ] Prompt (desktop and Android): "<device> wants to open a terminal on
+      this <computer|phone>", with Allow once, Always allow, Deny. On the
+      desktop it raises the window and shows through the tray if hidden.
+- [ ] Settings, a new **Access** card after Network: one row per member
+      with a one-line summary ("can send things, use services, control:
+      always"); tapping a row edits its three groups or revokes. Below it,
+      recent terminal sessions (who, when, how long).
+- [ ] The Terminal action is an icon on device rows, shown only for
+      devices that advertise control offered (in practice computers, so
+      phone rows keep four icons). Refused: the icon greys out for that
+      device, with the reason as its tooltip. Waiting: the opener shows
+      "Waiting for <device> to approve".
+- [ ] noscat-desktop: a terminal opens in its own window (embedded
+      `alacritty_terminal` drawn in GPUI, as Zed does), titled with the
+      device's name; closing it ends the session. Launching a system
+      terminal running the CLI is not an option: the CLI on the same
+      computer is a different device.
+- [ ] While a member has a terminal open on this computer: a persistent
+      banner naming it, with End, and the tray icon changes. Not a toast.
 - [ ] noscat-android (client only; a shell into the app's sandbox is
-      useless): a terminal view with a row of extra keys (Esc, Ctrl, Alt,
-      Tab, arrows). Check the license of any terminal library before
-      using it.
-- [ ] Where the action sits in each app is designed with the user before
-      it is built.
+      useless): a full-screen terminal with a row of extra keys (Esc,
+      Ctrl, Alt, Tab, arrows). Check the license of any terminal library
+      before using it.
+- [ ] Try it, then revisit: after the first real use, review the groups,
+      the prompt and the card with the user before the release.
 
 ## Phase 5: BSD binaries ([#19](https://github.com/Letdown2491/noscat/issues/19))
 
