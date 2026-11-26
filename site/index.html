@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Noscat: like netcat, over your own device mesh</title>
+<meta name="description" content="Noscat joins your devices into a private mesh: npub-addressed, end-to-end encrypted, no root, no accounts.">
+<link rel="stylesheet" href="site.css">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Noscat home"><img src="logo.svg" alt="" width="34" height="34">Noscat</a>
+    <div class="navlinks">
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="#apps">Apps</a>
+      <a href="private-mesh.html">Private mesh</a>
+      <a href="https://github.com/Letdown2491/noscat">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div class="hero-copy">
+      <span class="eyebrow">v{{version}} · MIT · written in Rust</span>
+      <h1>Like <span class="nc">netcat</span>, but over your own device mesh.</h1>
+      <p class="lede">Noscat joins any computer you own into one private mesh: a laptop, a Raspberry Pi in a closet, a VPS, a desktop at work, an Android phone. Each device is addressed by its own Nostr key, every byte is end-to-end encrypted, and nothing needs root, an account or a company in the middle.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Install Noscat</a>
+        <a class="btn ghost" href="private-mesh.html">Set up a private mesh</a>
+      </div>
+      <div class="facts">
+        <span>Linux</span><span>macOS</span><span>Windows</span><span>Android</span><span>x86_64 and ARM64</span>
+      </div>
+    </div>
+
+    <div class="term" role="img" aria-label="A terminal: a Raspberry Pi creates a mesh, a laptop asks to join, the Pi invites it, and the laptop sends a file and opens a shell on the Pi.">
+      <div class="term-bar"><i></i><i></i><i></i><b>pi and laptop</b></div>
+<pre><span class="host b">pi $</span> noscat mesh create home
+<span class="host b">pi $</span> noscat up --reachable
+<span class="sep"></span><span class="host">laptop $</span> noscat mesh join noscat:npub1x7k…q9m
+<span class="sep"></span><span class="out"># 🙋 laptop (npub1f3a…2vd) asks to join;</span>
+<span class="out">#    type `invite npub1f3a…2vd` to add it</span>
+invite npub1f3a…2vd
+<span class="sep"></span><span class="host">laptop $</span> noscat send ./report.pdf npub1x7k…q9m
+<span class="host">laptop $</span> noscat shell pi <span class="cursor"></span></pre>
+    </div>
+  </div>
+</header>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Think Tailscale, but</span>
+      <h2>Your devices run the mesh themselves.</h2>
+    </div>
+    <div class="but">
+      <div>
+        <h3>No company in the control plane</h3>
+        <p>Membership is a Marmot group (MLS, the IETF group encryption standard) carried by ordinary Nostr relays. Use public ones or run your own.</p>
+      </div>
+      <div>
+        <h3>No coordinator, no owner</h3>
+        <p>Every member can verify who is in, and any member can invite or remove. Lose a device and the mesh carries on.</p>
+      </div>
+      <div>
+        <h3>No root, no kernel module</h3>
+        <p>Everything runs in userspace, on a Raspberry Pi as well as a Windows desktop. The CLI is a single binary, and Android has a native app.</p>
+      </div>
+      <div>
+        <h3>No accounts</h3>
+        <p>Each device generates its own keypair, and its npub is its address. There is no sign-up, email address or phone number.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="how">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">How it works</span>
+      <h2>Membership goes through a relay. Your data doesn't.</h2>
+    </div>
+    <div class="seg" role="group" aria-label="Which mesh to show">
+      <button type="button" data-show="plane-private" aria-pressed="true">Private mesh</button>
+      <button type="button" data-show="plane-shared" aria-pressed="false">On public relays</button>
+    </div>
+
+    <div class="planes" id="plane-shared" hidden>
+      <div class="diagram"><svg viewBox="0 0 720 380" role="img" aria-label="Three public Nostr relays above four devices. Dashed lines from devices to relays carry encrypted membership; solid lines between devices carry data directly.">
+            <g>
+              <rect x="40" y="24" width="190" height="44" rx="10" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-opacity="0.7"/>
+              <text x="135" y="51" text-anchor="middle">relay.snort.social</text>
+              <rect x="265" y="24" width="190" height="44" rx="10" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-opacity="0.7"/>
+              <text x="360" y="51" text-anchor="middle">relay.ditto.pub</text>
+              <rect x="490" y="24" width="190" height="44" rx="10" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-opacity="0.7"/>
+              <text x="585" y="51" text-anchor="middle">nostr.mom</text>
+            </g>
+            <g stroke="var(--accent-2)" stroke-width="1.5" stroke-dasharray="4 6" fill="none" stroke-opacity="0.8">
+              <path d="M110 230 L135 68"/><path d="M290 300 L360 68"/><path d="M450 220 L585 68"/><path d="M450 220 L360 68"/><path d="M620 290 L585 68"/>
+            </g>
+            <g stroke="var(--accent)" stroke-width="3" fill="none">
+              <path class="data-line" d="M110 230 L290 300"/><path class="data-line" d="M110 230 L450 220"/><path class="data-line" d="M290 300 L450 220"/><path class="data-line" d="M450 220 L620 290"/><path class="data-line" d="M290 300 L620 290"/>
+            </g>
+            <g>
+              <circle cx="110" cy="230" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="110" y="268" text-anchor="middle">laptop</text><text x="110" y="286" text-anchor="middle" class="sub">behind NAT</text>
+              <circle cx="290" cy="300" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="290" y="338" text-anchor="middle">phone</text><text x="290" y="356" text-anchor="middle" class="sub">on mobile data</text>
+              <circle cx="450" cy="220" r="18" fill="var(--accent)"/>
+              <text x="450" y="262" text-anchor="middle">raspberry pi</text><text x="450" y="280" text-anchor="middle" class="sub">--reachable</text>
+              <circle cx="620" cy="290" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="620" y="328" text-anchor="middle">desktop</text><text x="620" y="346" text-anchor="middle" class="sub">same LAN: mDNS</text>
+            </g>
+          </svg>
+</div>
+      <div class="legend">
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="4 5"/></svg>
+          <h3>Membership over Nostr</h3>
+          <p>Invitations, removals, key packages and presence travel as MLS messages through public relays. The relays never learn who is in a mesh, what the devices are called or where they are.</p>
+        </div>
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/></svg>
+          <h3>Data device to device</h3>
+          <p>Files, chat and forwarded ports go over FIPS, an encrypted overlay keyed by the same identities, with QUIC streams on top. Devices behind NAT connect directly where they can and through a reachable member otherwise.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="planes" id="plane-private">
+      <div class="diagram"><svg viewBox="0 0 720 400" role="img" aria-label="Your own server at the top runs the relay, STUN and a reachable Noscat device. Four devices below talk to it and to each other. Public relays and public STUN servers off to the sides are never contacted.">
+            <g>
+              <rect x="20" y="30" width="170" height="60" rx="10" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/>
+              <text x="105" y="57" text-anchor="middle" class="ghost">public relays</text>
+              <text x="105" y="76" text-anchor="middle" class="sub">never contacted</text>
+              <rect x="530" y="30" width="170" height="60" rx="10" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/>
+              <text x="615" y="57" text-anchor="middle" class="ghost">public STUN</text>
+              <text x="615" y="76" text-anchor="middle" class="sub">never contacted</text>
+            </g>
+            <rect x="225" y="14" width="270" height="106" rx="12" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-width="1.5"/>
+            <text x="360" y="42" text-anchor="middle">your server (a small VPS)</text>
+            <text x="360" y="66" text-anchor="middle" class="sub">noscat-relay: members only</text>
+            <text x="360" y="84" text-anchor="middle" class="sub">STUN on UDP 3478</text>
+            <g stroke="var(--accent-2)" stroke-width="1.5" stroke-dasharray="4 6" fill="none" stroke-opacity="0.85">
+              <path d="M110 250 L270 120"/><path d="M280 320 L320 120"/><path d="M460 320 L400 120"/><path d="M630 250 L450 120"/>
+            </g>
+            <g stroke="var(--accent)" stroke-width="3" fill="none">
+              <path class="data-line" d="M110 250 L360 132"/><path class="data-line" d="M630 250 L360 132"/>
+              <path class="data-line" d="M110 250 L280 320"/><path class="data-line" d="M280 320 L460 320"/><path class="data-line" d="M460 320 L630 250"/>
+            </g>
+            <circle cx="360" cy="132" r="17" fill="var(--accent)"/>
+            <text x="360" y="170" text-anchor="middle" class="sub">Noscat, --reachable</text>
+            <g>
+              <circle cx="110" cy="250" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="110" y="288" text-anchor="middle">laptop</text><text x="110" y="306" text-anchor="middle" class="sub">café Wi-Fi</text>
+              <circle cx="280" cy="320" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="280" y="358" text-anchor="middle">raspberry pi</text><text x="280" y="376" text-anchor="middle" class="sub">at home</text>
+              <circle cx="460" cy="320" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="460" y="358" text-anchor="middle">desktop</text><text x="460" y="376" text-anchor="middle" class="sub">at home</text>
+              <circle cx="630" cy="250" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="630" y="288" text-anchor="middle">phone</text><text x="630" y="306" text-anchor="middle" class="sub">mobile data</text>
+            </g>
+          </svg>
+</div>
+      <div class="legend">
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="4 5"/></svg>
+          <h3>Your relay, members only</h3>
+          <p>noscat-relay serves only your mesh's devices, which log in with their keys. Your devices stop using public relays, and because the relay also runs STUN, no public STUN server learns their addresses.</p>
+        </div>
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/></svg>
+          <h3>The server is an ordinary member</h3>
+          <p>It is reachable from the internet, so devices that cannot reach each other connect through it. It cannot read the traffic it passes on, because that traffic is encrypted between the two devices.</p>
+        </div>
+        <p class="more"><a href="private-mesh.html">How to set up a private mesh →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What you do with it</span>
+      <h2>What members can do</h2>
+      <p class="lede">Only members can connect to a device, and each device sets what every member may do to it: send it files and messages, use its forwarded services, or open a terminal on it.</p>
+    </div>
+    <div class="verbs">
+      <div class="verb"><h3>Send files</h3><p>Interrupted transfers resume, and each file is checked against its SHA-256 on arrival.</p><code>noscat send ./report.pdf npub1…</code></div>
+      <div class="verb"><h3>Chat</h3><p>Chat in the terminal while <code>noscat up</code> runs, or send a single message from a script.</p><code>noscat chat npub1… lunch at noon?</code></div>
+      <div class="verb"><h3>Share a clipboard</h3><p>Copy on one device and paste on another, across operating systems.</p><code>noscat clip npub1…</code></div>
+      <div class="verb"><h3>Forward ports</h3><p>Reach a member's SSH server, web interface or database on a local port.</p><code>noscat forward npub1… --port 2222</code></div>
+      <div class="verb"><h3>Open a shell</h3><p>Open the member's login shell in your terminal. The member asks first unless it already allows you.</p><code>noscat shell pi</code></div>
+      <div class="verb"><h3>Pipe data</h3><p>Netcat mode connects stdin and stdout to another member.</p><code>echo hello | noscat pipe npub1…</code></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="install">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Install</span>
+      <h2>Install</h2>
+      <p class="lede">The Linux packages are static builds with no dependencies, for x86_64 and ARM64 (including a Raspberry Pi running a 64-bit OS). Every package includes shell completions and a man page.</p>
+    </div>
+    <div class="install">
+      <div class="tabs" role="tablist" aria-label="Install method">
+        <button role="tab" id="tab-script" aria-selected="true" aria-controls="p-script">Linux &amp; macOS</button>
+        <button role="tab" id="tab-brew" aria-selected="false" aria-controls="p-brew">Homebrew</button>
+        <button role="tab" id="tab-arch" aria-selected="false" aria-controls="p-arch">Arch</button>
+        <button role="tab" id="tab-win" aria-selected="false" aria-controls="p-win">Windows</button>
+        <button role="tab" id="tab-nix" aria-selected="false" aria-controls="p-nix">Nix</button>
+        <button role="tab" id="tab-cargo" aria-selected="false" aria-controls="p-cargo">cargo</button>
+      </div>
+      <div class="panel" role="tabpanel" id="p-script" aria-labelledby="tab-script">
+        <div class="snippet"><pre>curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh</pre><button type="button">copy</button></div>
+        <p>Installs into <code>~/.local/bin</code>. Prefer a package? <code>.deb</code>, <code>.rpm</code> and <code>.apk</code> files are attached to every release.</p>
+      </div>
+      <div class="panel" role="tabpanel" id="p-brew" aria-labelledby="tab-brew" hidden>
+        <div class="snippet"><pre>brew install Letdown2491/tap/noscat</pre><button type="button">copy</button></div>
+        <p>macOS (Intel and Apple Silicon) and Linux, with prebuilt bottles. <code>brew services start noscat</code> keeps it running.</p>
+      </div>
+      <div class="panel" role="tabpanel" id="p-arch" aria-labelledby="tab-arch" hidden>
+        <div class="snippet"><pre>[noscat]
+SigLevel = Never
+Server = https://nos.cat/x86_64</pre><button type="button">copy</button></div>
+        <p>Add to <code>/etc/pacman.conf</code> (use <code>aarch64</code> on ARM), then <code>pacman -Sy noscat</code>. Upgrades arrive with <code>pacman -Syu</code>.</p>
+      </div>
+      <div class="panel" role="tabpanel" id="p-win" aria-labelledby="tab-win" hidden>
+        <div class="snippet"><pre>scoop bucket add letdown2491 https://github.com/Letdown2491/scoop-bucket
+scoop install noscat</pre><button type="button">copy</button></div>
+        <p>Or grab the zip from the release page. winget support is in community review.</p>
+      </div>
+      <div class="panel" role="tabpanel" id="p-nix" aria-labelledby="tab-nix" hidden>
+        <div class="snippet"><pre>nix run github:Letdown2491/noscat</pre><button type="button">copy</button></div>
+        <p>Linux and macOS, x86_64 and aarch64. Builds <code>main</code>; add <code>?ref=v{{version}}</code> for the release.</p>
+      </div>
+      <div class="panel" role="tabpanel" id="p-cargo" aria-labelledby="tab-cargo" hidden>
+        <div class="snippet"><pre>cargo install --locked noscat</pre><button type="button">copy</button></div>
+        <p>Any platform with a Rust toolchain, including the BSDs once an upstream fix lands.</p>
+      </div>
+    </div>
+    <p class="more">Every option, with details: <a href="https://github.com/Letdown2491/noscat/blob/main/INSTALL.md">INSTALL.md</a> · <a href="https://github.com/Letdown2491/noscat/releases">all releases</a></p>
+  </div>
+</section>
+
+<section class="band" id="apps">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Apps</span>
+      <h2>Three clients for the same mesh</h2>
+    </div>
+    <div class="apps">
+      <div class="app">
+        <span class="kind">Command line</span>
+        <h3>noscat</h3>
+        <p>Creates meshes, runs on headless machines as a background service, and does everything described above. Runs on Linux, macOS and Windows.</p>
+        <a href="https://github.com/Letdown2491/noscat">Letdown2491/noscat →</a>
+      </div>
+      <div class="app">
+        <span class="kind">Desktop</span>
+        <h3>Noscat for desktop</h3>
+        <p>A native app written in Rust, with chat, file transfer, port forwards, clipboard sharing and terminals, including hosting terminals for other members.</p>
+        <a href="https://github.com/Letdown2491/noscat-desktop/releases">Download from releases →</a>
+      </div>
+      <div class="app">
+        <span class="kind">Android</span>
+        <h3>Noscat for Android</h3>
+        <p>A native Kotlin app. Join a mesh by scanning a member's QR code, then chat, send files, forward ports and open terminals.</p>
+        <a href="https://github.com/Letdown2491/noscat-android/releases">Get the APK →</a>
+      </div>
+    </div>
+    <p class="note">The apps join existing meshes and approve new devices; a device running the CLI creates the mesh.</p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap proto">
+    <div class="section-head">
+      <span class="eyebrow">Open protocol</span>
+      <h2>The protocol is documented</h2>
+      <p class="lede">Everything Noscat sends is specified in a draft NIP, so other clients can be written against it. A White Noise account can also be invited into a mesh.</p>
+    </div>
+    <div class="cta">
+      <a class="btn ghost" href="https://github.com/Letdown2491/noscat/blob/main/docs/nip-noscat.md">Read the NIP</a>
+      <a class="btn ghost" href="https://github.com/Letdown2491/noscat/tree/main/docs/adr">Design decisions</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Noscat {{version}} · MIT licensed</span>
+    <span><a href="https://github.com/Letdown2491/noscat">Source</a> · <a href="https://github.com/Letdown2491/noscat/issues">Issues</a> · <a href="https://github.com/Letdown2491/noscat/releases">Releases</a></span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

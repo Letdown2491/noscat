@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Private mesh guide · Noscat</title>
+<meta name="description" content="Set up a Noscat mesh that runs entirely on infrastructure you control: your own relay, your own STUN server, and your devices.">
+<link rel="stylesheet" href="site.css">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="Noscat home"><img src="logo.svg" alt="" width="34" height="34">Noscat</a>
+    <div class="navlinks">
+      <a href="./#how">How it works</a>
+      <a href="./#install">Install</a>
+      <a href="./#apps">Apps</a>
+      <a href="private-mesh.html" aria-current="page">Private mesh</a>
+      <a href="https://github.com/Letdown2491/noscat">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="guide-hero">
+  <div class="wrap">
+    <div class="hero-copy">
+      <span class="eyebrow">Guide · 30 to 45 minutes</span>
+      <h1>Set up a private mesh</h1>
+      <p class="lede">From nothing to a Noscat mesh that runs entirely on infrastructure you control: your own relay, your own STUN server and your devices. No company or account is involved, and no third-party server learns which devices are in your mesh or where they are.</p>
+      <p class="lede">You will copy commands into a terminal on a small server, then join your computers and phone. No programming is needed.</p>
+    </div>
+    <form class="yours" id="yours" autocomplete="off" onsubmit="return false">
+      <h2>Your server</h2>
+      <p>Enter these and the commands on this page will use them. What you type stays in your browser.</p>
+      <div class="field">
+        <label for="in-domain">Relay domain</label>
+        <input id="in-domain" type="text" inputmode="url" placeholder="relay.example.com" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="in-ip">Server's public IPv4 address</label>
+        <input id="in-ip" type="text" inputmode="decimal" placeholder="203.0.113.10" spellcheck="false">
+      </div>
+    </form>
+  </div>
+</header>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What you end up with</span>
+      <h2>One small server and your devices</h2>
+    </div>
+    <div class="planes">
+      <div class="diagram"><svg viewBox="0 0 720 400" role="img" aria-label="Your own server at the top runs the relay, STUN and a reachable Noscat device. Four devices below talk to it and to each other. Public relays and public STUN servers off to the sides are never contacted.">
+            <g>
+              <rect x="20" y="30" width="170" height="60" rx="10" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/>
+              <text x="105" y="57" text-anchor="middle" class="ghost">public relays</text>
+              <text x="105" y="76" text-anchor="middle" class="sub">never contacted</text>
+              <rect x="530" y="30" width="170" height="60" rx="10" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/>
+              <text x="615" y="57" text-anchor="middle" class="ghost">public STUN</text>
+              <text x="615" y="76" text-anchor="middle" class="sub">never contacted</text>
+            </g>
+            <rect x="225" y="14" width="270" height="106" rx="12" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-width="1.5"/>
+            <text x="360" y="42" text-anchor="middle">your server (a small VPS)</text>
+            <text x="360" y="66" text-anchor="middle" class="sub">noscat-relay: members only</text>
+            <text x="360" y="84" text-anchor="middle" class="sub">STUN on UDP 3478</text>
+            <g stroke="var(--accent-2)" stroke-width="1.5" stroke-dasharray="4 6" fill="none" stroke-opacity="0.85">
+              <path d="M110 250 L270 120"/><path d="M280 320 L320 120"/><path d="M460 320 L400 120"/><path d="M630 250 L450 120"/>
+            </g>
+            <g stroke="var(--accent)" stroke-width="3" fill="none">
+              <path class="data-line" d="M110 250 L360 132"/><path class="data-line" d="M630 250 L360 132"/>
+              <path class="data-line" d="M110 250 L280 320"/><path class="data-line" d="M280 320 L460 320"/><path class="data-line" d="M460 320 L630 250"/>
+            </g>
+            <circle cx="360" cy="132" r="17" fill="var(--accent)"/>
+            <text x="360" y="170" text-anchor="middle" class="sub">Noscat, --reachable</text>
+            <g>
+              <circle cx="110" cy="250" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="110" y="288" text-anchor="middle">laptop</text><text x="110" y="306" text-anchor="middle" class="sub">café Wi-Fi</text>
+              <circle cx="280" cy="320" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="280" y="358" text-anchor="middle">raspberry pi</text><text x="280" y="376" text-anchor="middle" class="sub">at home</text>
+              <circle cx="460" cy="320" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="460" y="358" text-anchor="middle">desktop</text><text x="460" y="376" text-anchor="middle" class="sub">at home</text>
+              <circle cx="630" cy="250" r="14" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
+              <text x="630" y="288" text-anchor="middle">phone</text><text x="630" y="306" text-anchor="middle" class="sub">mobile data</text>
+            </g>
+          </svg>
+</div>
+      <div class="legend">
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="4 5"/></svg>
+          <h3>The relay</h3>
+          <p>noscat-relay passes the mesh's control messages between devices: who is a member, invitations, "I'm online here" notes. Every one is encrypted, and it serves only your mesh's devices.</p>
+        </div>
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><line x1="1" y1="5" x2="33" y2="5" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/></svg>
+          <h3>The server's Noscat device</h3>
+          <p>An ordinary member that is reachable from the internet, so devices behind home routers and on mobile networks connect through it when they cannot connect directly.</p>
+        </div>
+        <div>
+          <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden="true"><circle cx="17" cy="5" r="4" fill="none" stroke="var(--accent-2)" stroke-width="2"/></svg>
+          <h3>STUN</h3>
+          <p>Built into the relay. It tells your devices their public addresses so they can connect directly where possible, without asking Google or any other third party.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What private means here</span>
+      <h2>Private, decentralized and trustless</h2>
+    </div>
+    <div class="trio">
+      <div><h3>Private</h3><p>Membership, invitations and presence go only through your relay. Files, chat, forwards and terminals go device to device, end-to-end encrypted. Your devices never contact public Nostr relays or public STUN servers.</p></div>
+      <div><h3>Decentralized</h3><p>There is no coordinator and no owner. Every member can invite and remove devices, and every member checks the group's state for itself (it is an MLS group, the IETF standard for group encryption). The server is just one member.</p></div>
+      <div><h3>Trustless</h3><p>Each device makes its own key; there is no account to take over and no password to leak. The relay stores only encrypted messages it cannot read, and traffic the server passes between two devices is encrypted between those two devices.</p></div>
+    </div>
+    <div class="section-head">
+      <h3>What this does not hide</h3>
+    </div>
+    <ul class="edges">
+      <li>Your hosting provider sees the server's traffic: which IP addresses talk to it, when, and how much. Not what is said.</li>
+      <li>Your relay's domain name is public: anyone can see it exists (HTTPS certificates are published in public logs). Only your devices can use it.</li>
+      <li>The server is a full member. Anyone who takes it over can do what any member can: invite a device, see who is in the mesh, use whatever your other devices allow it. Keep it updated and use SSH keys.</li>
+      <li>The domain brings in a registrar, a DNS provider and a certificate authority. None of them can read or forge your mesh's messages, but whoever controls the domain could redirect it and see which devices log in, and when. <a href="#no-domain" style="color: var(--accent)">Running without a domain</a> is covered below.</li>
+      <li>Installing touches a few sites once: GitHub (Noscat and the apps) and go.dev (Go). After that, running the mesh needs none of them.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap guide">
+    <aside class="toc" aria-label="Steps">
+      <a href="#need">What you need</a>
+      <a href="#s1">1. Domain and ports</a>
+      <a href="#s2">2. Install Noscat</a>
+      <a href="#s3">3. Install the relay</a>
+      <a href="#s4">4. HTTPS</a>
+      <a href="#s5">5. Create the mesh</a>
+      <a href="#s6">6. Join your devices</a>
+      <a href="#s7">7. Check it works</a>
+      <a href="#daily">Day to day</a>
+      <a href="#trouble">Troubleshooting</a>
+      <a href="#no-domain">Without a domain</a>
+    </aside>
+
+    <div class="steps">
+      <div class="step" id="need">
+        <h2>What you need</h2>
+        <div class="prose">
+          <ul>
+            <li><strong>A server</strong> with a public IPv4 address: any small VPS (1 CPU and 1 GB of RAM is plenty) running Debian 12 or 13, or Ubuntu 24.04, with SSH access and <code>sudo</code>.</li>
+            <li><strong>A domain name</strong> (or a subdomain of one you own) that you can point at the server, for example <code>relay.example.com</code>.</li>
+            <li><strong>Your devices</strong>: Linux, macOS or Windows computers, Raspberry Pis, and Android phones.</li>
+          </ul>
+          <p class="muted">Every command in steps 1 to 5 runs <strong>on the server</strong>, over SSH, as your normal user (not root). <code>sudo</code> is used only where needed.</p>
+        </div>
+      </div>
+
+      <div class="step" id="s1">
+        <div class="step-head"><span class="step-num">1</span><h2>Point your domain at the server, and open its ports</h2></div>
+        <div class="prose">
+          <p>At your domain registrar or DNS provider, add an <strong>A record</strong> from <code>relay.example.com</code> to <code>203.0.113.10</code>. It can take a few minutes to apply. Check it from any computer:</p>
+        </div>
+        <div class="snippet"><pre>ping -c 1 relay.example.com     # should show 203.0.113.10</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Open these ports on the server. If your provider has a firewall in its web dashboard, open them there too.</p></div>
+        <div class="tablebox"><table>
+          <thead><tr><th>Port</th><th>For</th></tr></thead>
+          <tbody>
+            <tr><td><code>TCP 80, 443</code></td><td>HTTPS for the relay (Caddy, which gets the certificate)</td></tr>
+            <tr><td><code>UDP 41641</code></td><td>Noscat: your devices connect to the server here</td></tr>
+            <tr><td><code>UDP 3478</code></td><td>STUN: your devices learn their public address here</td></tr>
+          </tbody>
+        </table></div>
+        <div class="prose"><p>With <code>ufw</code> (Ubuntu's firewall; on Debian, <code>sudo apt install ufw</code> first):</p></div>
+        <div class="snippet"><pre>sudo ufw allow OpenSSH
+sudo ufw allow 80,443/tcp
+sudo ufw allow 41641/udp
+sudo ufw allow 3478/udp
+sudo ufw enable</pre><button type="button">copy</button></div>
+      </div>
+
+      <div class="step" id="s2">
+        <div class="step-head"><span class="step-num">2</span><h2>Install Noscat on the server</h2></div>
+        <div class="snippet"><pre>curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh</pre><button type="button">copy</button></div>
+        <div class="prose"><p>This puts <code>noscat</code> in <code>~/.local/bin</code>. Check it works (log out and back in first if <code>noscat</code> is not found), and give the server a name your devices will show (optional; it is the hostname otherwise):</p></div>
+        <div class="snippet"><pre>noscat --version
+noscat name server</pre><button type="button">copy</button></div>
+      </div>
+
+      <div class="step" id="s3">
+        <div class="step-head"><span class="step-num">3</span><h2>Install the relay</h2></div>
+        <div class="prose"><p>The relay is built from source with Go (1.25 or later). Install Go from the official site (this is for x86_64 servers; on ARM use the <code>linux-arm64</code> file from <a href="https://go.dev/dl/">go.dev/dl</a>):</p></div>
+        <div class="snippet"><pre>curl -fsSLO https://go.dev/dl/go1.25.4.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.4.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+go version</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Download and build the relay (no <code>git</code>? <code>sudo apt install git</code>):</p></div>
+        <div class="snippet"><pre>git clone https://github.com/Letdown2491/noscat-relay ~/noscat-relay
+cd ~/noscat-relay
+go build -trimpath -ldflags="-s -w" -o noscat-relay .
+cp .env.example .env</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Open <code>.env</code> in an editor (<code>nano .env</code>) and set these three lines; the other settings can stay as they are:</p></div>
+        <div class="snippet"><pre>RELAY_URL="wss://relay.example.com"
+MEMBERS_COMMAND="$HOME/.local/bin/noscat mesh members"
+STUN_ADDR=":3478"</pre><button type="button">copy</button></div>
+        <div class="prose">
+          <ul>
+            <li><code>RELAY_URL</code> must be exactly your domain with <code>wss://</code> in front: devices log in to the relay by name, and a mismatch refuses every login.</li>
+            <li><code>MEMBERS_COMMAND</code> is how the relay learns who may use it: it asks the server's Noscat device for the mesh's members, every minute.</li>
+            <li><code>STUN_ADDR</code> turns on the relay's STUN server.</li>
+          </ul>
+          <p>Save (in nano: Ctrl+O, Enter, Ctrl+X), then run the relay as a service that starts at boot:</p>
+        </div>
+        <div class="snippet"><pre>mkdir -p ~/.config/systemd/user
+cp noscat-relay.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now noscat-relay
+sudo loginctl enable-linger "$USER"     # keep your services running when you log out
+journalctl --user -u noscat-relay -n 20</pre><button type="button">copy</button></div>
+        <div class="callout">You should see <code>Relay listening on 127.0.0.1:3340 for wss://relay.example.com</code> and <code>STUN on udp [::]:3478</code>. Lines saying <code>members: source listed nobody</code> are expected for now: there is no mesh yet.</div>
+      </div>
+
+      <div class="step" id="s4">
+        <div class="step-head"><span class="step-num">4</span><h2>Put HTTPS in front of the relay</h2></div>
+        <div class="prose"><p>Caddy gets a free certificate for your domain and renews it by itself. Install it, then replace the contents of <code>/etc/caddy/Caddyfile</code> with these three lines (<code>sudo nano /etc/caddy/Caddyfile</code>):</p></div>
+        <div class="snippet"><pre>sudo apt install caddy</pre><button type="button">copy</button></div>
+        <div class="snippet"><pre>relay.example.com {
+    reverse_proxy localhost:3340
+}</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Then reload Caddy and check the relay answers over HTTPS:</p></div>
+        <div class="snippet"><pre>sudo systemctl reload caddy
+curl -s -H 'Accept: application/nostr+json' https://relay.example.com</pre><button type="button">copy</button></div>
+        <div class="callout">The <code>curl</code> prints a short JSON description of the relay (its name, "noscat relay"). If it fails, wait a minute while the certificate is issued, and check that ports 80 and 443 are open and the A record is right.</div>
+      </div>
+
+      <div class="step" id="s5">
+        <div class="step-head"><span class="step-num">5</span><h2>Create the mesh on the server</h2></div>
+        <div class="prose"><p>Start the server's Noscat device as a service. It uses only your relay from the start, and tells the mesh it is reachable at its public address:</p></div>
+        <div class="snippet"><pre>noscat --relay wss://relay.example.com --reachable 203.0.113.10:41641 service install
+noscat service status</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Now create the mesh (call it whatever you like; <code>home</code> here), make it private, and give it your STUN server:</p></div>
+        <div class="snippet"><pre>noscat mesh create home
+noscat mesh private
+noscat mesh stun add 203.0.113.10:3478
+noscat mesh relays</pre><button type="button">copy</button></div>
+        <div class="callout"><code>noscat mesh relays</code> should say the mesh is <strong>private</strong> and list only <code>wss://relay.example.com</code>. Within a minute the relay's log shows <code>members: 1 (was 0)</code>: the server is in.</div>
+      </div>
+
+      <div class="step" id="s6">
+        <div class="step-head"><span class="step-num">6</span><h2>Join your devices</h2></div>
+        <div class="prose"><p>Every new device joins the same way: it reads the server's <strong>pairing code</strong>, asks to join, and you approve it on a member. On the server, show the pairing code:</p></div>
+        <div class="snippet"><pre>noscat mesh qr</pre><button type="button">copy</button></div>
+        <div class="prose"><p>It prints a QR code and a line like <code>noscat:npub1...?relay=wss%3A%2F%2Frelay.example.com</code>. The <code>?relay=</code> part matters: it tells a new device to use your relay and nothing else, so not even its first message reaches a public relay. Always use the whole code.</p></div>
+        <div class="sub-steps">
+          <div>
+            <h3>A phone (Android)</h3>
+            <ol>
+              <li>Install the APK from the <a href="https://github.com/Letdown2491/noscat-android/releases" style="color: var(--accent)">Android releases</a> and open it.</li>
+              <li>Tap <strong>Scan pairing code</strong> and scan the QR in your SSH terminal, or paste the <code>noscat:</code> line.</li>
+              <li>Approve it on the server (below).</li>
+            </ol>
+          </div>
+          <div>
+            <h3>A desktop computer (the app)</h3>
+            <ol>
+              <li>Install Noscat for desktop from its <a href="https://github.com/Letdown2491/noscat-desktop/releases" style="color: var(--accent)">releases</a> and open it.</li>
+              <li>Paste the whole <code>noscat:</code> line into the join screen and press <strong>Request to join</strong>.</li>
+              <li>Approve it on the server (below).</li>
+            </ol>
+          </div>
+          <div>
+            <h3>Any computer or Pi (command line)</h3>
+            <ol>
+              <li><a href="./#install" style="color: var(--accent)">Install Noscat</a>, then run the join below.</li>
+              <li>Keep the single quotes: the code has characters your shell would change.</li>
+              <li>Approve it on the server, then <code>noscat service install</code> to keep it running.</li>
+            </ol>
+          </div>
+        </div>
+        <div class="snippet"><pre>noscat mesh join 'noscat:npub1...?relay=wss%3A%2F%2Frelay.example.com'</pre><button type="button">copy</button></div>
+        <div class="prose">
+          <p class="muted">A joined device needs no <code>--relay</code>: a device in a private mesh uses the mesh's relays by itself.</p>
+          <h3>Approving on the server</h3>
+          <p>On the server, while the new device waits:</p>
+        </div>
+        <div class="snippet"><pre>noscat mesh requests</pre><button type="button">copy</button></div>
+        <div class="callout">It lists the devices that asked to join and asks <code>y/n</code> for each. <strong>Check the npub</strong> against the one the new device shows on its screen before answering <code>y</code>: the name is the device's own claim, the npub is its identity. Once one app device is in, you can approve the rest from its <strong>Devices</strong> tab instead.</div>
+      </div>
+
+      <div class="step" id="s7">
+        <div class="step-head"><span class="step-num">7</span><h2>Check it works</h2></div>
+        <div class="snippet"><pre>noscat mesh members</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Every device should be listed as <strong>online</strong> and <strong>connected</strong>; in the apps, the ring around the Noscat logo turns green. Try it: send a chat message or a file from your phone to your laptop. It goes device to device, or through your server, encrypted, when the two cannot reach each other directly.</p></div>
+      </div>
+
+      <div class="step" id="daily">
+        <h2>Day to day</h2>
+        <div class="prose">
+          <ul>
+            <li><strong>Adding a device</strong>: step 6 again, with any member's pairing code (in the apps: <strong>Invite a device</strong>).</li>
+            <li><strong>Removing a lost or sold device</strong>: <code>noscat mesh remove &lt;its npub&gt;</code> on any member with the command line; <code>noscat mesh members</code> lists the npubs. Its key no longer opens anything in the mesh, and the relay refuses it at once.</li>
+            <li><strong>Terminals and access</strong>: each device decides what the others may do to it. The server has no app to ask you, so it refuses terminals until you allow a device: <code>noscat allow laptop control</code>.</li>
+            <li><strong>Updating</strong>: rerun the install line from step 2 and <code>noscat service install</code> with the same options as in step 5. For the relay: <code>git pull</code>, build again, and <code>systemctl --user restart noscat-relay</code>.</li>
+            <li><strong>Backups</strong>: the server's identity and mesh state are in <code>~/.local/share/noscat</code>. If the server is lost, set up a new one, join it as a new device, and remove the old server's npub. Your other devices keep their keys and their place in the mesh.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="step" id="trouble">
+        <h2>If something is not working</h2>
+        <div class="tablebox"><table>
+          <thead><tr><th>What you see</th><th>Likely cause and fix</th></tr></thead>
+          <tbody>
+            <tr><td>A device stays "online" but never "connected"</td><td>UDP 41641 is blocked on the server (step 1, including the provider's firewall), or the address in <code>--reachable</code> is wrong.</td></tr>
+            <tr><td>Nothing ever connects (the apps stay amber), though <code>curl</code> works</td><td><code>RELAY_URL</code> in <code>.env</code> does not match the domain exactly (<code>wss://</code>, no trailing slash), so every login is refused. Fix it and restart the relay.</td></tr>
+            <tr><td><code>curl https://relay.example.com</code> fails</td><td>The A record is not there yet, or TCP 80 or 443 is closed (Caddy needs both). <code>sudo journalctl -u caddy -n 50</code> says which.</td></tr>
+            <tr><td>A joining device waits forever</td><td>The request went to a member nobody is approving: run <code>noscat mesh requests</code> on the device whose code you used. Or the code was cut short: use the whole <code>noscat:</code> line.</td></tr>
+            <tr><td>Devices take a long time to connect directly</td><td>UDP 3478 is closed, so STUN does not answer; devices still connect, through the server. Open the port and restart the apps.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="snippet"><pre>journalctl --user -u noscat -f           # the server's Noscat device
+journalctl --user -u noscat-relay -f     # the relay</pre><button type="button">copy</button></div>
+      </div>
+
+      <div class="step" id="no-domain">
+        <h2>Without a domain</h2>
+        <div class="prose">
+          <p>The domain is there only so the relay can have an HTTPS certificate. You can skip it today with a plain <code>ws://</code> relay on the server's IP address: in <code>.env</code>, set the two lines below, open TCP 3340 instead of 80 and 443, and skip step 4. Everywhere this guide says <code>wss://relay.example.com</code>, use <code>ws://203.0.113.10:3340</code>.</p>
+        </div>
+        <div class="snippet"><pre>RELAY_URL="ws://203.0.113.10:3340"
+RELAY_PORT="0.0.0.0:3340"</pre><button type="button">copy</button></div>
+        <div class="callout">The cost: the connection to the relay is not encrypted. Messages stay end-to-end encrypted and signed, so nobody on the way can read or forge them, but anyone between your devices and the server (a café's Wi-Fi, an ISP) can see which device keys log in, when, and how much they send. Noscat 0.6.1 removes the trade-off: the relay makes its own certificate and your pairing code carries its fingerprint, so there is no domain, no DNS and no certificate authority, and the connection is still encrypted.</div>
+        <p class="more">Going further: moving an existing mesh onto your own relay is in <a href="https://github.com/Letdown2491/noscat-relay">noscat-relay's README</a>; the protocol is in <a href="https://github.com/Letdown2491/noscat/blob/main/docs/nip-noscat.md">the NIP</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Noscat {{version}} · MIT licensed</span>
+    <span><a href="https://github.com/Letdown2491/noscat">Source</a> · <a href="https://github.com/Letdown2491/noscat/blob/main/docs/private-mesh.md">This guide on GitHub</a></span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

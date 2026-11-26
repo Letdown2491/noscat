@@ -101,6 +101,15 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   for each push to main, plus a crates.io dry run;
   `.github/workflows/release.yml`: the whole release pipeline on a tag
   (builds, crates.io, tap, scoop, pacman, AUR and winget files).
+- `site/`: the website (nos.cat), plain HTML, CSS and JS with no build
+  step; `.github/workflows/site.yml` copies it to the root of the
+  `gh-pages` branch, beside the pacman repository's `x86_64/` and
+  `aarch64/`, and fills `{{version}}` from the newest tag. Fonts are
+  self-hosted (no Google Fonts: the site loads nothing from third
+  parties). `site/private-mesh.html` is the web copy of
+  `docs/private-mesh.md`: a change to one updates the other in the same
+  commit. A change to commands, install methods or the apps' features
+  checks `site/index.html` too.
 - `containers/noscat-dev.containerfile`: the dev image (Rust plus the
   libdbus and libclang the FIPS crates need on glibc).
 - `docs/plan-0.6.0.md`: next release, access and privacy: access

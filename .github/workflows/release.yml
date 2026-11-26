@@ -351,6 +351,10 @@ jobs:
     name: pacman repo (github pages)
     needs: release
     runs-on: ubuntu-24.04
+    # site.yml pushes to gh-pages too; one at a time
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
     container:
       image: archlinux:latest
     steps:

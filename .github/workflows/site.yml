@@ -1,0 +1,62 @@
+# Site: publishes site/ (the nos.cat website) to the root of the gh-pages
+# branch, which GitHub Pages serves. The same branch carries the pacman
+# repository in x86_64/ and aarch64/ (release.yml's pacman-repo job); this
+# job only copies site/ over the root and never touches those folders.
+#
+# The pages say which version is current through a {{version}} placeholder,
+# filled here from the newest v* tag, so the site moves to a new version
+# when its release workflow finishes, not when Cargo.toml is bumped.
+#
+# A file deleted from site/ stays on gh-pages until it is removed there.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/site.yml"]
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Shared with release.yml's pacman-repo job: both push to gh-pages.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish nos.cat
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+      - name: Copy the site, with the newest release's version
+        run: |
+          VERSION="$(git -C src tag --list 'v*' --sort=-v:refname | head -n1)"
+          VERSION="${VERSION#v}"
+          test -n "$VERSION"
+          cp -r src/site/. pages/
+          for f in pages/*.html; do sed -i "s/{{version}}/$VERSION/g" "$f"; done
+          if grep -l '{{version}}' pages/*.html; then echo "unfilled placeholder"; exit 1; fi
+      - name: Commit and push
+        run: |
+          git -C pages config user.name "noscat-release-bot"
+          git -C pages config user.email "noreply@github.com"
+          git -C pages add -A
+          if git -C pages diff --cached --quiet; then
+            echo "site unchanged; nothing to push"
+          else
+            git -C pages commit -m "site: $(git -C src rev-parse --short HEAD)"
+            git -C pages push origin gh-pages
+          fi
