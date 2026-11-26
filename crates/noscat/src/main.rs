@@ -54,7 +54,8 @@ struct DeviceArgs {
     #[arg(long, global = true)]
     name: Option<String>,
     /// This device is reachable from the internet (port forward, server,
-    /// public IPv6). Give the public address, or nothing to learn it by STUN.
+    /// public IPv6). Give the public address, or nothing to learn it by STUN
+    /// (the mesh's STUN servers; a private mesh without any needs the address).
     /// Every mesh needs at least one reachable member.
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     reachable: Option<String>,
@@ -64,8 +65,10 @@ struct DeviceArgs {
     /// Do not look for members on the LAN (mDNS).
     #[arg(long, global = true)]
     no_lan: bool,
-    /// STUN server (repeatable) [default: the data plane's set].
-    #[arg(long = "stun", global = true, hide = true)]
+    /// STUN server, `host:port` (repeatable). Overrides the mesh's own
+    /// (`mesh stun`); without it a shared mesh with none uses public STUN
+    /// servers and a private mesh uses none.
+    #[arg(long = "stun", global = true)]
     stun: Vec<String>,
 }
 
@@ -282,6 +285,14 @@ enum MeshCommand {
         #[command(subcommand)]
         cmd: Option<RelaysCommand>,
     },
+    /// List the mesh's STUN servers, or change them (admins). Devices learn
+    /// their public address from these instead of public STUN servers; a
+    /// private mesh without any uses none. Applies from each device's next
+    /// start.
+    Stun {
+        #[command(subcommand)]
+        cmd: Option<StunCommand>,
+    },
     /// Make the mesh private: its devices use only the mesh's relays, log
     /// in to them (NIP-42) and leave the public ones. For a members-only
     /// relay such as noscat-relay; add it with `mesh relays add` first.
@@ -301,6 +312,21 @@ enum RelaysCommand {
     Remove {
         #[arg(required = true)]
         urls: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StunCommand {
+    /// Add STUN servers (`ip:port`, e.g. noscat-relay's `STUN_ADDR`; no
+    /// hostnames).
+    Add {
+        #[arg(required = true)]
+        servers: Vec<String>,
+    },
+    /// Remove STUN servers.
+    Remove {
+        #[arg(required = true)]
+        servers: Vec<String>,
     },
 }
 
@@ -777,6 +803,11 @@ fn main() -> Result<()> {
                     None => Op::Relays { add: Vec::new(), remove: Vec::new() },
                     Some(RelaysCommand::Add { urls }) => Op::Relays { add: urls, remove: Vec::new() },
                     Some(RelaysCommand::Remove { urls }) => Op::Relays { add: Vec::new(), remove: urls },
+                },
+                MeshCommand::Stun { cmd } => match cmd {
+                    None => Op::Stun { add: Vec::new(), remove: Vec::new() },
+                    Some(StunCommand::Add { servers }) => Op::Stun { add: servers, remove: Vec::new() },
+                    Some(StunCommand::Remove { servers }) => Op::Stun { add: Vec::new(), remove: servers },
                 },
                 MeshCommand::Private => Op::Private { private: true },
                 MeshCommand::Shared => Op::Private { private: false },

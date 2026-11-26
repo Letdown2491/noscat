@@ -33,20 +33,32 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
 
 ## Phase 1: STUN for private meshes ([#1](https://github.com/Letdown2491/noscat/issues/1))
 
-- [ ] noscat-relay serves STUN on UDP (`STUN_PORT`, off by default), with
+- [x] noscat-relay serves STUN on UDP (`STUN_ADDR`, off by default), with
       pion/stun next to the relay: same box and operator as the relay, so
-      no new exposure. Its own release, before noscat 0.6.0.
-- [ ] The mesh carries its STUN servers like its relays: in the group
-      state of a private mesh and in the pairing QR
-      (`noscat:<npub>?relay=...&stun=...`, which phase 0 puts in the
-      apps), so a joining device uses them from its first moment. Spec change in `docs/nip-noscat.md`.
-- [ ] A private mesh never falls back to the public defaults: with no
+      no new exposure. Its own release (0.2.0), before noscat 0.6.0.
+- [x] The mesh carries its STUN servers in the group state
+      (`noscat.stun.v1`, `0xf3a2`: IP literals with a port, no hostnames).
+      Spec change in `docs/nip-noscat.md`.
+- [x] A private mesh never falls back to the public defaults: with no
       STUN of its own, its devices advertise no NAT address and connect
-      through the reachable member.
-- [ ] CLI: `--stun` shown in `--help` and the man page; `noscat mesh stun
-      add|remove`. Apps show the mesh's STUN servers next to its relays.
-- [ ] Deployment note: Caddy proxies TCP only, so STUN needs UDP 3478
-      open on the relay's host (on vm-2252, ask before changing it).
+      through the reachable member. A device in no mesh uses none either.
+- [x] CLI: `--stun` shown in `--help` and the man page; `noscat mesh stun
+      add|remove`.
+- [ ] Apps show the mesh's STUN servers next to its relays (needs
+      `mesh_stun()` in the FFI).
+- [ ] Deployment: Caddy proxies TCP only, so STUN needs UDP 3478 open on
+      the relay's host (on vm-2252, ask before changing it). The VPS's
+      noscat is reachable without an address today, so before it runs a
+      0.6 build it needs `--reachable <ip:port>` or the mesh's STUN.
+
+Changed from the first draft (2026-11-25): FIPS takes its STUN list when
+the data plane binds and has no way to change it at runtime, so a device
+picks its list at start (explicit `--stun`, else the mesh's, else public
+for a shared mesh, else none) and a new list applies from each device's
+next start. That makes `&stun=` in the pairing QR pointless (a device
+that just joined takes the list from the group at its next start), so the
+QR carries no STUN. A device that just joined a private mesh has no STUN
+until it restarts: it still connects, through the reachable member.
 
 ## Phase 2: access groups
 

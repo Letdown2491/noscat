@@ -59,7 +59,7 @@ async fn start_joining(n: &Node, name: &str, relay: &str, join: &[String], all: 
         dataplane: DataplaneConfig {
             bind: n.addr,
             reachability: Reachability::BehindNat,
-            stun_servers: vec!["stun:127.0.0.1:9".into()],
+            stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
             lan_discovery: false,
         },
         peer_addresses,

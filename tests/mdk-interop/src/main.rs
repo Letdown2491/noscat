@@ -88,10 +88,11 @@ async fn noscat(relay: &str, dir: &Path, name: &str) -> Result<Device> {
         dir: dir.to_path_buf(),
         name: name.into(),
         relays: vec![relay.into()],
+        join_relays: Vec::new(),
         dataplane: DataplaneConfig {
             bind: "127.0.0.1:0".parse()?,
             reachability: Reachability::BehindNat,
-            stun_servers: vec!["stun:127.0.0.1:9".into()],
+            stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
             lan_discovery: false,
         },
         peer_addresses: Default::default(),
@@ -143,7 +144,7 @@ async fn main() -> Result<()> {
         let a = noscat(&url, &base.join("a"), "noscat-a").await?;
         let joining = {
             let a = a.clone();
-            tokio::spawn(async move { a.join(wn_pk, T).await })
+            tokio::spawn(async move { a.join(wn_pk, &[], T).await })
         };
         tokio::time::sleep(Duration::from_secs(2)).await;
         match wn.run(&["keys", "check", &a.device().to_hex()]) {

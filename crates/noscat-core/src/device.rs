@@ -317,6 +317,27 @@ fn group_filter(ids: &[[u8; 32]]) -> Filter {
         .custom_tags(SingleLetterTag::from_char('h').expect("h is a single-letter tag"), ids.iter().map(hex::encode))
 }
 
+/// The STUN servers a device starts with. An explicit list (`--stun`)
+/// always wins. Otherwise: the mesh's own (`noscat.stun.v1`); a shared mesh
+/// without any falls back to [`crate::dataplane::PUBLIC_STUN`]; a private
+/// mesh without any uses none (its devices advertise no NAT address and
+/// connect through the reachable member), and so does a device in no mesh
+/// (it has nothing to advertise yet). FIPS takes the list when the data
+/// plane binds, so a change applies from the next start.
+#[must_use]
+pub fn effective_stun(explicit: Option<&[String]>, in_mesh: bool, private: bool, mesh_stun: &[String]) -> Vec<String> {
+    if let Some(list) = explicit {
+        return list.to_vec();
+    }
+    if !mesh_stun.is_empty() {
+        return mesh_stun.iter().map(|s| format!("stun:{s}")).collect();
+    }
+    if in_mesh && !private {
+        return crate::dataplane::PUBLIC_STUN.iter().map(|s| (*s).to_string()).collect();
+    }
+    Vec::new()
+}
+
 fn union(a: &[String], b: &[String]) -> Vec<String> {
     let mut v: Vec<String> = a.iter().chain(b).cloned().collect::<BTreeSet<_>>().into_iter().collect();
     v.retain(|r| marmot::codec::valid_relay_url(r));
@@ -330,7 +351,14 @@ impl Device {
         let join_relays = union(&cfg.join_relays, &[]);
         std::fs::create_dir_all(&cfg.dir).map_err(|e| DeviceError::Other(e.to_string()))?;
         let group = MeshGroup::open(&cfg.dir, &identity)?;
-        let dp = Arc::new(Dataplane::start(&identity, cfg.dataplane.clone()).await?);
+        let mut dp_cfg = cfg.dataplane.clone();
+        dp_cfg.stun_servers = Some(effective_stun(
+            cfg.dataplane.stun_servers.as_deref(),
+            group.in_mesh(),
+            group.is_private(),
+            &group.stun(),
+        ));
+        let dp = Arc::new(Dataplane::start(&identity, dp_cfg).await?);
         let streams = Arc::new(Streams::start(dp.clone()).await?);
         let my_name = cfg.name.clone();
         let sync: SyncState = std::fs::read(cfg.dir.join(SYNC_FILE))
@@ -1303,6 +1331,18 @@ impl Device {
         self.commit(out).await
     }
 
+    /// The mesh's STUN servers (`ip:port`); empty when it lists none.
+    pub async fn mesh_stun(&self) -> Vec<String> {
+        self.inner.group.lock().await.stun()
+    }
+
+    /// Replace the mesh's STUN servers (admins; empty removes them). Every
+    /// member uses the new list from its next start.
+    pub async fn set_mesh_stun(&self, servers: &[String]) -> Result<(), DeviceError> {
+        let out = self.inner.group.lock().await.set_stun(servers)?;
+        self.commit(out).await
+    }
+
     /// Make the mesh private (its devices use only its relays, log in to
     /// them, and leave the public ones) or shared again (admins).
     pub async fn set_private(&self, private: bool) -> Result<(), DeviceError> {
@@ -1475,5 +1515,22 @@ impl Device {
         self.inner.streams.close();
         let _ = self.inner.dp.shutdown().await;
         self.inner.client.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_stun;
+
+    #[test]
+    fn stun_comes_from_the_flag_then_the_mesh_and_never_public_for_a_private_mesh() {
+        let own = vec!["185.18.221.60:3478".to_string()];
+        let flag = vec!["stun:192.0.2.9:3478".to_string()];
+        assert_eq!(effective_stun(Some(&flag), true, true, &own), flag, "the flag wins");
+        assert_eq!(effective_stun(None, true, true, &own), ["stun:185.18.221.60:3478"]);
+        assert_eq!(effective_stun(None, true, false, &own), ["stun:185.18.221.60:3478"]);
+        assert!(effective_stun(None, true, true, &[]).is_empty(), "private: no third party");
+        assert_eq!(effective_stun(None, true, false, &[]).len(), crate::dataplane::PUBLIC_STUN.len());
+        assert!(effective_stun(None, false, false, &[]).is_empty(), "no mesh, nothing to advertise");
     }
 }

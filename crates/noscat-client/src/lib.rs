@@ -795,9 +795,7 @@ impl Client {
             lan_discovery: config.lan_discovery,
             ..DataplaneConfig::default()
         };
-        if let Some(stun) = config.stun_servers.clone() {
-            dataplane.stun_servers = stun;
-        }
+        dataplane.stun_servers = config.stun_servers.clone();
         let mut peer_addresses: HashMap<PublicKey, Vec<SocketAddr>> = HashMap::new();
         for (who, addr) in &config.static_peers {
             peer_addresses.entry(parse_target(who)?).or_default().push(*addr);
@@ -942,6 +940,20 @@ impl Client {
     /// Replace the mesh's relays (1 to 16 `wss://` URLs).
     pub fn set_mesh_relays(&self, relays: &[String]) -> Result<(), ClientError> {
         self.inner.rt().block_on(self.inner.device.set_mesh_relays(relays))?;
+        Ok(())
+    }
+
+    /// The mesh's STUN servers (`ip:port`); empty when it lists none.
+    #[must_use]
+    pub fn mesh_stun(&self) -> Vec<String> {
+        self.inner.rt().block_on(self.inner.device.mesh_stun())
+    }
+
+    /// Replace the mesh's STUN servers (`ip:port`, no hostnames, at most
+    /// 8; empty removes them). Members use the new list from their next
+    /// start.
+    pub fn set_mesh_stun(&self, servers: &[String]) -> Result<(), ClientError> {
+        self.inner.rt().block_on(self.inner.device.set_mesh_stun(servers))?;
         Ok(())
     }
 

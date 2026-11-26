@@ -371,6 +371,8 @@ struct GroupState {
     routing: Routing,
     name: String,
     private: bool,
+    /// `noscat.stun.v1`, empty when absent.
+    stun: Vec<String>,
 }
 
 fn group_state(group: &MlsGroup) -> Result<GroupState, String> {
@@ -403,6 +405,10 @@ fn group_state(group: &MlsGroup) -> Result<GroupState, String> {
         routing,
         name,
         private: dict.get(&codec::NOSCAT_PRIVATE).is_some(),
+        stun: match dict.get(&codec::NOSCAT_STUN) {
+            Some(b) => codec::decode_stun(b).map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        },
     })
 }
 
@@ -455,6 +461,7 @@ fn check_app_data_update(update: &AppDataUpdateProposal, required: &BTreeSet<u16
         },
         codec::NOSCAT_MESH => codec::decode_mesh(data).map(|_| ()),
         codec::NOSCAT_PRIVATE => codec::validate_private(data),
+        codec::NOSCAT_STUN => codec::decode_stun(data).map(|_| ()),
         codec::GROUP_PROFILE => codec::validate_group_profile(data),
         codec::IDENTITY_PROOF | codec::SAFE_AAD => Err(codec::CodecError("not a GroupContext component".into())),
         _ => Ok(()),
@@ -573,6 +580,34 @@ impl MeshGroup {
     #[must_use]
     pub fn is_private(&self) -> bool {
         self.group().ok().and_then(|g| group_state(g).ok()).is_some_and(|s| s.private)
+    }
+
+    /// The mesh's STUN servers (`noscat.stun.v1`); empty when it lists none
+    /// or outside a mesh.
+    #[must_use]
+    pub fn stun(&self) -> Vec<String> {
+        self.group().ok().and_then(|g| group_state(g).ok()).map(|s| s.stun).unwrap_or_default()
+    }
+
+    /// Replace the mesh's STUN servers (admins only): `ip:port` entries, no
+    /// hostnames, at most 8. An empty list removes them (shared meshes then
+    /// use public STUN servers, private meshes none).
+    pub fn set_stun(&mut self, servers: &[String]) -> Result<Outgoing, MeshError> {
+        let st = self.require_admin()?;
+        let servers = codec::stun_list(servers)?;
+        if servers == st.stun {
+            return Err(MeshError::NotAllowed("the mesh already uses exactly these STUN servers".into()));
+        }
+        let update = if servers.is_empty() {
+            AppDataUpdateProposal::remove(codec::NOSCAT_STUN)
+        } else {
+            AppDataUpdateProposal::update(codec::NOSCAT_STUN, codec::encode_stun(&servers))
+        };
+        let (commit, _) = self.stage_own(Vec::new(), Vec::new(), vec![Proposal::AppDataUpdate(Box::new(update))])?;
+        Ok(Outgoing {
+            commit,
+            welcomes: Vec::new(),
+        })
     }
 
     /// Replace the mesh's relays (admins only). The routing id stays, so

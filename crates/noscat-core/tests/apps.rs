@@ -25,7 +25,7 @@ async fn dev() -> Dev {
     let cfg = DataplaneConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         reachability: Reachability::BehindNat,
-        stun_servers: vec!["stun:127.0.0.1:9".into()],
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
         lan_discovery: false,
     };
     let dp = Arc::new(Dataplane::start(&id, cfg).await.unwrap());

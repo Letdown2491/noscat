@@ -87,6 +87,7 @@ and carries, without requiring it:
 |---|---|---|
 | `0xf3a0` | `noscat.mesh.v1` | `opaque name<V>` (UTF-8, at most 64 bytes) |
 | `0xf3a1` | `noscat.private.v1` | empty; present means the mesh is private |
+| `0xf3a2` | `noscat.stun.v1` | `opaque servers<V>`: a list of `opaque server<V>` |
 
 `noscat.mesh.v1` marks the group as a noscat mesh and names it. Because
 it is not required, non-noscat Marmot clients can join; they simply
@@ -105,9 +106,20 @@ adds the component (an AppDataUpdate with empty state) or removes it.
 Devices that do not know it keep using their own relays too, as in a
 shared mesh.
 
+`noscat.stun.v1` lists the STUN servers the mesh's devices use to learn
+their public address, typically the mesh's own relay. Each server is an
+IP literal and a port in canonical form (`198.51.100.7:3478`,
+`[2001:db8::1]:3478`): no hostnames, so a mesh's STUN never needs DNS.
+The list holds 1 to 8 servers, sorted by bytes and unique; any admin
+replaces it (AppDataUpdate) or removes it. A device uses it from its next
+start. Without the component, a shared mesh's devices use public STUN
+servers and a private mesh's devices use none: they advertise no NAT
+address and connect through the reachable member, so no third party
+learns their addresses.
+
 A noscat device's leaf and key package advertise support for `0x0001`
 and `0x8001`, `0x8003`, `0x8004`, `0x8009`, `0x800b`, `0x800c`,
-`0xf3a0` and `0xf3a1`. `0x800b` (encrypted media v2) is listed because MDK clients
+`0xf3a0`, `0xf3a1` and `0xf3a2`. `0x800b` (encrypted media v2) is listed because MDK clients
 require it in every new group; noscat never sends media and leaves the
 policy unchanged. Per Marmot, the key package event's `app_components`
 tag lists exactly the advertised ids from `0x8000` up.

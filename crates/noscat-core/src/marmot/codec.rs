@@ -31,6 +31,11 @@ pub const NOSCAT_MESH: u16 = 0xf3a0;
 /// them (NIP-42), and leave the public default relays. Not required, so
 /// other Marmot clients ignore it.
 pub const NOSCAT_PRIVATE: u16 = 0xf3a1;
+/// `noscat.stun.v1`: the STUN servers the mesh's devices use to learn their
+/// public address (typically the mesh's own relay), as IP literals with a
+/// port. Absent: shared meshes use public STUN servers, private meshes none.
+/// Not required, so other Marmot clients ignore it.
+pub const NOSCAT_STUN: u16 = 0xf3a2;
 /// Marmot encrypted media policy v2. White Noise requires it in every new
 /// group. noscat never sends media; it supports the component in the sense
 /// Marmot means (it can be a member of a group that carries the policy and
@@ -44,7 +49,7 @@ pub const REQUIRED_COMPONENTS: [u16; 4] = [ADMIN_POLICY, NOSTR_ROUTING, IDENTITY
 /// itself plus every app component it supports. The key package's
 /// `app_components` tag carries only the app components (ids from
 /// [`FIRST_APP_COMPONENT`]), as MDK checks.
-pub const SUPPORTED_COMPONENTS: [u16; 9] = [
+pub const SUPPORTED_COMPONENTS: [u16; 10] = [
     APP_COMPONENTS,
     GROUP_PROFILE,
     ADMIN_POLICY,
@@ -53,6 +58,7 @@ pub const SUPPORTED_COMPONENTS: [u16; 9] = [
     LIFECYCLE,
     NOSCAT_MESH,
     NOSCAT_PRIVATE,
+    NOSCAT_STUN,
     ENCRYPTED_MEDIA_V2,
 ];
 
@@ -61,6 +67,8 @@ pub const FIRST_APP_COMPONENT: u16 = 0x8000;
 
 /// Most relays a routing component may list.
 pub const MAX_RELAYS: usize = 16;
+/// Most STUN servers a mesh may list.
+pub const MAX_STUN: usize = 8;
 /// Longest mesh name noscat writes.
 pub const MAX_MESH_NAME: usize = 64;
 
@@ -325,6 +333,73 @@ pub fn decode_mesh(bytes: &[u8]) -> Result<String, CodecError> {
     String::from_utf8(body.to_vec()).map_err(|_| CodecError("mesh name is not UTF-8".into()))
 }
 
+/// One STUN server in canonical form: an IP literal and a port, as Rust's
+/// `SocketAddr` prints it (`198.51.100.7:3478`, `[2001:db8::1]:3478`).
+/// Hostnames are refused: a mesh's STUN never needs DNS. `None` for
+/// anything else, including a non-canonical spelling or port 0.
+#[must_use]
+pub fn canonical_stun(addr: &str) -> Option<String> {
+    let parsed: std::net::SocketAddr = addr.trim().strip_prefix("stun:").unwrap_or(addr.trim()).parse().ok()?;
+    (parsed.port() != 0).then(|| parsed.to_string())
+}
+
+/// Encode `noscat.stun.v1` state: a var-bytes list of canonical addresses,
+/// sorted and unique (see [`stun_list`]).
+#[must_use]
+pub fn encode_stun(servers: &[String]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for s in servers {
+        put_vec(s.as_bytes(), &mut body);
+    }
+    let mut out = Vec::with_capacity(body.len() + 2);
+    put_vec(&body, &mut out);
+    out
+}
+
+/// Decode `noscat.stun.v1` state exactly: 1 to 8 canonical addresses,
+/// sorted and unique, nothing trailing.
+pub fn decode_stun(bytes: &[u8]) -> Result<Vec<String>, CodecError> {
+    let (mut body, rest) = take_vec(bytes)?;
+    if !rest.is_empty() {
+        return err("stun state has trailing bytes");
+    }
+    let mut out: Vec<String> = Vec::new();
+    while !body.is_empty() {
+        let (entry, more) = take_vec(body)?;
+        body = more;
+        let entry = std::str::from_utf8(entry).map_err(|_| CodecError("stun server is not UTF-8".into()))?;
+        if canonical_stun(entry).as_deref() != Some(entry) {
+            return err("stun server is not a canonical ip:port");
+        }
+        if out.last().is_some_and(|p| p.as_bytes() >= entry.as_bytes()) {
+            return err("stun list is not sorted and unique");
+        }
+        out.push(entry.to_string());
+    }
+    if out.is_empty() || out.len() > MAX_STUN {
+        return err("stun list must hold 1 to 8 servers");
+    }
+    Ok(out)
+}
+
+/// Build a STUN list from user input: canonical, sorted, unique, at most
+/// 8. Errors name the first entry that is not an `ip:port`.
+pub fn stun_list(servers: &[String]) -> Result<Vec<String>, CodecError> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for s in servers {
+        match canonical_stun(s) {
+            Some(c) => {
+                set.insert(c);
+            }
+            None => return Err(CodecError(format!("not an ip:port (no hostnames): {}", s.trim()))),
+        }
+    }
+    if set.len() > MAX_STUN {
+        return err("a mesh lists at most 8 STUN servers");
+    }
+    Ok(set.into_iter().collect())
+}
+
 /// Check `noscat.private.v1` state: always empty.
 pub fn validate_private(bytes: &[u8]) -> Result<(), CodecError> {
     if bytes.is_empty() { Ok(()) } else { err("private state must be empty") }
@@ -409,5 +484,26 @@ mod tests {
         assert!(encode_mesh(&"x".repeat(65)).is_err());
         assert_eq!(decode_lifecycle(&LIFECYCLE_ACTIVE), Ok(true));
         assert!(decode_lifecycle(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn stun_lists_are_canonical_ip_literals() {
+        assert_eq!(canonical_stun("185.18.221.60:3478").as_deref(), Some("185.18.221.60:3478"));
+        assert_eq!(canonical_stun(" stun:185.18.221.60:3478 ").as_deref(), Some("185.18.221.60:3478"));
+        assert_eq!(canonical_stun("[2001:db8::1]:3478").as_deref(), Some("[2001:db8::1]:3478"));
+        assert_eq!(canonical_stun("stun.example.net:3478"), None, "no hostnames");
+        assert_eq!(canonical_stun("185.18.221.60:0"), None);
+        assert_eq!(canonical_stun("185.18.221.60"), None, "a port is required");
+
+        let list = stun_list(&["[2001:db8::1]:3478".into(), "185.18.221.60:3478".into(), "185.18.221.60:3478".into()]).unwrap();
+        assert_eq!(list, ["185.18.221.60:3478", "[2001:db8::1]:3478"]);
+        assert_eq!(decode_stun(&encode_stun(&list)).unwrap(), list);
+        assert!(stun_list(&["host.example:3478".into()]).unwrap_err().0.contains("host.example"));
+
+        let unsorted = encode_stun(&["[2001:db8::1]:3478".into(), "185.18.221.60:3478".into()]);
+        assert!(decode_stun(&unsorted).is_err(), "unsorted lists are not canonical");
+        let spelled = encode_stun(&["[2001:0db8::1]:3478".into()]);
+        assert!(decode_stun(&spelled).is_err(), "non-canonical spellings are refused");
+        assert!(decode_stun(&encode_stun(&[])).is_err(), "an empty list is a removed component");
     }
 }

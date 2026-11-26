@@ -175,7 +175,8 @@ noscat mesh leave              # this device leaves
 **Reachability.** Every mesh needs at least one member the others can
 reach from the internet: a home server with a forwarded UDP port, a VPS,
 anything with a public IPv6 address. Start it with `--reachable` (learn
-the address by STUN) or `--reachable <ip:port>`; it listens on UDP 41641
+the address by STUN) or `--reachable <ip:port>` (required in a private
+mesh without STUN servers of its own); it listens on UDP 41641
 unless `--listen` says otherwise. Members behind NAT reach
 each other directly where they can and through that member otherwise.
 Members on the same LAN find each other by mDNS.
@@ -276,6 +277,7 @@ relays a mesh lists, and make it private:
 noscat mesh relays                         # the mesh's relays, and whether it is private
 noscat mesh relays add wss://relay.example
 noscat mesh relays remove wss://nostr.mom
+noscat mesh stun add 198.51.100.7:3478     # STUN from the mesh's own relay
 noscat mesh private                        # devices use only the mesh's relays
 noscat mesh shared                         # devices use their own relays too
 ```
@@ -291,6 +293,14 @@ joins through them alone: from its first moment it uses only those relays,
 so not even its key package reaches the public ones. (A `noscat up`
 already running when `mesh join` is called has used its relays since it
 started.)
+
+STUN (how a device behind NAT learns its public address) comes from the
+mesh too. noscat-relay answers it when started with `STUN_ADDR=":3478"`;
+add it with `noscat mesh stun add <its ip>:3478`. A private mesh without
+STUN servers of its own uses none, so no third party learns its devices'
+addresses: they connect through the reachable member instead. A shared
+mesh without any uses public STUN servers. Each device takes a new list
+at its next start; `--stun` overrides it.
 
 ## Development
 

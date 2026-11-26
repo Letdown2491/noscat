@@ -70,6 +70,10 @@ pub enum Reachability {
     Public { external_addr: Option<SocketAddr> },
 }
 
+/// Public STUN servers: a shared mesh's fallback when it lists none of its
+/// own. A private mesh never uses them.
+pub const PUBLIC_STUN: [&str; 2] = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"];
+
 /// Data plane settings. `Default` suits a device behind NAT.
 #[derive(Debug, Clone)]
 pub struct DataplaneConfig {
@@ -78,7 +82,10 @@ pub struct DataplaneConfig {
     pub bind: SocketAddr,
     pub reachability: Reachability,
     /// STUN servers (`stun:host:port`) for learning the public address.
-    pub stun_servers: Vec<String>,
+    /// `None`: a device takes them from its mesh (see
+    /// [`crate::device::effective_stun`]); a bare data plane uses
+    /// [`PUBLIC_STUN`]. `Some`: exactly these, whatever the mesh says.
+    pub stun_servers: Option<Vec<String>>,
     /// Find members on the same LAN by mDNS. FIPS ignores private and
     /// loopback addresses in adverts, so without this two devices on one
     /// home network only meet through NAT traversal.
@@ -90,10 +97,7 @@ impl Default for DataplaneConfig {
         Self {
             bind: SocketAddr::from(([0, 0, 0, 0], 0)),
             reachability: Reachability::BehindNat,
-            stun_servers: vec![
-                "stun:stun.l.google.com:19302".into(),
-                "stun:stun.cloudflare.com:3478".into(),
-            ],
+            stun_servers: None,
             lan_discovery: true,
         }
     }
@@ -215,15 +219,29 @@ impl Dataplane {
         nd.advertise = true;
         nd.peerfinding_source = NostrPeerfindingSource::External;
         nd.advert_relays = Vec::new();
-        nd.stun_servers.clone_from(&cfg.stun_servers);
+        nd.stun_servers = cfg
+            .stun_servers
+            .clone()
+            .unwrap_or_else(|| PUBLIC_STUN.iter().map(|s| (*s).to_string()).collect());
         let (public, external_addr) = match cfg.reachability {
             Reachability::BehindNat => (false, None),
             Reachability::Public { external_addr } => (true, external_addr.map(|a| a.to_string())),
         };
+        // Behind NAT the advertised address comes from STUN, and FIPS
+        // refuses a NAT advert without STUN servers. With none (a private
+        // mesh without its own, or no mesh yet) the device advertises no
+        // UDP address: it still dials the reachable member, which carries
+        // its traffic, and members on its LAN still find it by mDNS.
+        let advertise_udp = public || !nd.stun_servers.is_empty();
+        if public && nd.stun_servers.is_empty() && external_addr.is_none() {
+            return Err(DataplaneError::Config(
+                "a reachable device without STUN servers needs its public address (--reachable <ip:port>)".into(),
+            ));
+        }
         config.transports.udp = TransportInstances::Single(UdpConfig {
             bind_addr: Some(cfg.bind.to_string()),
             mtu: Some(FIPS_UDP_MTU),
-            advertise_on_nostr: Some(true),
+            advertise_on_nostr: Some(advertise_udp),
             public: Some(public),
             external_addr,
             ..UdpConfig::default()

@@ -44,6 +44,8 @@ pub enum Op {
     Rename { name: String },
     /// List the mesh's relays, or add and remove some.
     Relays { add: Vec<String>, remove: Vec<String> },
+    /// List the mesh's STUN servers, or add and remove some.
+    Stun { add: Vec<String>, remove: Vec<String> },
     Private { private: bool },
     Qr,
     /// Devices that asked to join and are not members yet.
@@ -214,6 +216,36 @@ pub async fn exec(
             line(out, format!("mesh relays ({mode}):"));
             for r in relays {
                 line(out, format!("  {r}"));
+            }
+        }
+        Op::Stun { add, remove } => {
+            let in_mesh = ctx.blocking(|c| Ok(c.in_mesh())).await?;
+            if !in_mesh {
+                return Err("not in a mesh".into());
+            }
+            if !add.is_empty() || !remove.is_empty() {
+                let canon = |s: &String| noscat_core::marmot::codec::canonical_stun(s).ok_or_else(|| format!("not an ip:port (no hostnames): {}", s.trim()));
+                let gone = remove.iter().map(canon).collect::<Result<Vec<_>, _>>()?;
+                let mut next: Vec<String> = ctx.blocking(|c| Ok(c.mesh_stun())).await?;
+                next.retain(|s| !gone.contains(s));
+                next.extend(add.iter().map(canon).collect::<Result<Vec<_>, _>>()?);
+                ctx.blocking(move |c| c.set_mesh_stun(&next)).await?;
+            }
+            let (stun, private) = ctx.blocking(|c| Ok((c.mesh_stun(), c.is_private()))).await?;
+            if stun.is_empty() {
+                line(
+                    out,
+                    if private {
+                        "no mesh STUN servers: devices of this private mesh use none and connect through the reachable member"
+                    } else {
+                        "no mesh STUN servers: devices use public STUN servers"
+                    },
+                );
+            } else {
+                line(out, "mesh STUN servers (each device uses them from its next start):");
+                for s in stun {
+                    line(out, format!("  {s}"));
+                }
             }
         }
         Op::Private { private } => {

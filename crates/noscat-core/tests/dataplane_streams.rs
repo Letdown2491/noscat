@@ -45,7 +45,7 @@ async fn device_with(reachability: Reachability) -> Device {
         bind,
         reachability,
         // FIPS requires STUN for NAT adverts; nothing listens here.
-        stun_servers: vec!["stun:127.0.0.1:9".into()],
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
         lan_discovery: false,
     };
     let dp = Arc::new(Dataplane::start(&id, cfg).await.unwrap());

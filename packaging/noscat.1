@@ -204,6 +204,15 @@ so a device that scans it joins through them alone.
 List the mesh's relays and whether it is private, or add and remove
 some. Any member can change them; every member moves to the new list.
 .TP
+.B mesh stun \fR[\fBadd\fR|\fBremove\fR \fIip:port\fR...]
+List the mesh's STUN servers, or add and remove some (IP addresses with a
+port, no hostnames; at most 8). Devices learn their public address from
+these instead of public STUN servers, typically from noscat-relay's
+.BR STUN_ADDR .
+Each device uses a new list from its next start. Without any, a shared
+mesh uses public STUN servers and a private mesh uses none (its devices
+connect through the reachable member).
+.TP
 .B mesh private
 Make the mesh private: every device uses only the mesh's relays, logs in
 to them with NIP-42 as its device key, and stops using its own and the
@@ -269,7 +278,9 @@ else the hostname.
 .TP
 .B \-\-reachable [<addr>]
 This device is reachable from the internet. Give its public address, or
-nothing to learn it by STUN. Forward UDP 41641 to it, or set
+nothing to learn it by STUN (the mesh's STUN servers, or public ones in a
+shared mesh; in a private mesh without STUN servers the address is
+required). Forward UDP 41641 to it, or set
 .BR \-\-listen .
 .TP
 .B \-\-peer <npub@ip:port>
@@ -277,6 +288,13 @@ A known address of a device (repeatable).
 .TP
 .B \-\-no\-lan
 Do not look for members on the LAN (mDNS).
+.TP
+.BI \-\-stun " host:port"
+A STUN server for learning this device's public address (repeatable).
+Overrides the mesh's own
+.RB ( "mesh stun" );
+without it, a shared mesh that lists none uses public STUN servers and a
+private mesh uses none.
 .TP
 .B \-\-verbose
 Info-level logs, plus the FIPS warnings hidden by default because they are

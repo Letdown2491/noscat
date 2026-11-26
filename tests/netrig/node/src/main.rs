@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         } else {
             Reachability::BehindNat
         },
-        stun_servers: std::env::var("STUN").ok().into_iter().collect(),
+        stun_servers: Some(std::env::var("STUN").ok().into_iter().collect()),
         lan_discovery: false,
     };
     let dp = Arc::new(Dataplane::start(&id, cfg).await.context("dataplane")?);
