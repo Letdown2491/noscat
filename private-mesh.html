@@ -127,7 +127,7 @@
       <li>Your relay's domain name is public: anyone can see it exists (HTTPS certificates are published in public logs). Only your devices can use it.</li>
       <li>The server is a full member. Anyone who takes it over can do what any member can: invite a device, see who is in the mesh, use whatever your other devices allow it. Keep it updated and use SSH keys.</li>
       <li>The domain brings in a registrar, a DNS provider and a certificate authority. None of them can read or forge your mesh's messages, but whoever controls the domain could redirect it and see which devices log in, and when. <a href="#no-domain" style="color: var(--accent)">Running without a domain</a> is covered below.</li>
-      <li>Installing touches a few sites once: GitHub (Noscat and the apps) and go.dev (Go). After that, running the mesh needs none of them.</li>
+      <li>Installing downloads from GitHub once (Noscat, the relay and the apps). After that, running the mesh needs no outside site at all.</li>
     </ul>
   </div>
 </section>
@@ -194,16 +194,13 @@ noscat name server</pre><button type="button">copy</button></div>
 
       <div class="step" id="s3">
         <div class="step-head"><span class="step-num">3</span><h2>Install the relay</h2></div>
-        <div class="prose"><p>The relay is built from source with Go (1.25 or later). Install Go from the official site (this is for x86_64 servers; on ARM use the <code>linux-arm64</code> file from <a href="https://go.dev/dl/">go.dev/dl</a>):</p></div>
-        <div class="snippet"><pre>curl -fsSLO https://go.dev/dl/go1.25.4.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.4.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
-go version</pre><button type="button">copy</button></div>
-        <div class="prose"><p>Download and build the relay (no <code>git</code>? <code>sudo apt install git</code>):</p></div>
-        <div class="snippet"><pre>git clone https://github.com/Letdown2491/noscat-relay ~/noscat-relay
-cd ~/noscat-relay
-go build -trimpath -ldflags="-s -w" -o noscat-relay .
-cp .env.example .env</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Download the relay (a single file) and its two configuration files. This is for x86_64 servers; on ARM, use <code>noscat-relay-linux-arm64</code> in the first <code>curl</code>:</p></div>
+        <div class="snippet"><pre>mkdir -p ~/noscat-relay && cd ~/noscat-relay
+curl -fsSL -o noscat-relay https://github.com/Letdown2491/noscat-relay/releases/latest/download/noscat-relay-linux-amd64
+chmod +x noscat-relay
+curl -fsSLO https://raw.githubusercontent.com/Letdown2491/noscat-relay/main/noscat-relay.service
+curl -fsSL -o .env https://raw.githubusercontent.com/Letdown2491/noscat-relay/main/.env.example</pre><button type="button">copy</button></div>
+        <div class="prose"><p>Prefer to build it yourself? The <a href="https://github.com/Letdown2491/noscat-relay#running-it">relay's README</a> shows how, with Go.</p></div>
         <div class="prose"><p>Open <code>.env</code> in an editor (<code>nano .env</code>) and set these three lines; the other settings can stay as they are:</p></div>
         <div class="snippet"><pre>RELAY_URL="wss://relay.example.com"
 MEMBERS_COMMAND="$HOME/.local/bin/noscat mesh members"
@@ -303,9 +300,9 @@ noscat mesh relays</pre><button type="button">copy</button></div>
         <div class="prose">
           <ul>
             <li><strong>Adding a device</strong>: step 6 again, with any member's pairing code (in the apps: <strong>Invite a device</strong>).</li>
-            <li><strong>Removing a lost or sold device</strong>: <code>noscat mesh remove &lt;its npub&gt;</code> on any member with the command line; <code>noscat mesh members</code> lists the npubs. Its key no longer opens anything in the mesh, and the relay refuses it at once.</li>
+            <li><strong>Removing a lost or sold device</strong>: <code>noscat mesh remove &lt;its npub&gt;</code> on any member with the command line; <code>noscat mesh members</code> lists the npubs. Its key no longer opens anything in the mesh, and the relay refuses it at once. (The apps cannot remove other devices yet; a phone or computer leaving on its own uses <strong>Forget mesh</strong> in its Settings.)</li>
             <li><strong>Terminals and access</strong>: each device decides what the others may do to it. The server has no app to ask you, so it refuses terminals until you allow a device: <code>noscat allow laptop control</code>.</li>
-            <li><strong>Updating</strong>: rerun the install line from step 2 and <code>noscat service install</code> with the same options as in step 5. For the relay: <code>git pull</code>, build again, and <code>systemctl --user restart noscat-relay</code>.</li>
+            <li><strong>Updating</strong>: rerun the install line from step 2 and <code>noscat service install</code> with the same options as in step 5. For the relay: run the first three lines of step 3 again, then <code>systemctl --user restart noscat-relay</code>.</li>
             <li><strong>Backups</strong>: the server's identity and mesh state are in <code>~/.local/share/noscat</code>. If the server is lost, set up a new one, join it as a new device, and remove the old server's npub. Your other devices keep their keys and their place in the mesh.</li>
           </ul>
         </div>
