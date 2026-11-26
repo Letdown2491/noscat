@@ -244,7 +244,7 @@ frees its directory, like dropping a Rust `Client`. In Kotlin that means
 the device running until the garbage collector frees it, and a new client
 on the same directory fails with `Busy` until then.
 
-`npub()`, `meshName()`, `deviceName()`, `setDeviceName(name)` (blocking), `members()`, `invite(npub)`, `remove(npub)`,
+`npub()`, `meshName()`, `pairingUri()` (blocking: what the QR shows, with a private mesh's relays), `deviceName()`, `setDeviceName(name)` (blocking), `members()`, `invite(npub)`, `remove(npub)`,
 `networkChanged()`, `forward(target, localPort)`, `listForwards()`,
 `cancelForward(id)`, `expose(toHost, toPort)`, `servePort(port, enabled)`,
 `sendFile(path, target)` (returns the transfer id), `cancelTransfer(path, target)`,

@@ -25,10 +25,11 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
 
 ## Phase 0: pairing codes in the apps (#20)
 
-- [ ] `noscat-ffi`: `NoscatClient::pairing_uri()`, a wrapper over
+- [x] `noscat-ffi`: `NoscatClient::pairing_uri()`, a wrapper over
       `Client::pairing_uri()`; listed in API.md.
-- [ ] noscat-android: cache it at client start (never on the main thread)
-      and use it in Invite a device instead of `Pairing.encode(npub)`.
+- [x] noscat-android: read it when Invite a device opens (off the main
+      thread, not cached: a mesh can turn private while the app runs)
+      instead of `Pairing.encode(npub)`.
 
 ## Phase 1: STUN for private meshes ([#1](https://github.com/Letdown2491/noscat/issues/1))
 

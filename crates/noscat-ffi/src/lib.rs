@@ -401,6 +401,14 @@ impl NoscatClient {
         self.client.mesh_name()
     }
 
+    /// What this device's pairing QR shows: `noscat:<npub>`, plus
+    /// `?relay=` for each of a private mesh's relays, so a device that
+    /// scans it joins through them. Blocking (reads the mesh state): call
+    /// it off the main thread and cache it.
+    pub fn pairing_uri(&self) -> String {
+        self.client.pairing_uri()
+    }
+
     /// This device's name, as members see it.
     pub fn device_name(&self) -> String {
         self.client.device_name()
