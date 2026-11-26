@@ -532,6 +532,44 @@ fn an_unanswered_ask_is_refused_after_the_timeout() {
     assert!(b.terminal_sessions().is_empty());
 }
 
+/// Windows hosts through ConPTY with `cmd` (portable-pty's default
+/// program there): the shell runs, the output and the exit status come
+/// through, and ending the session ends the shell.
+#[test]
+#[cfg(windows)]
+fn a_terminal_runs_cmd_on_windows() {
+    use noscat_client::{AccessGroup, AccessRule};
+    watchdog("a_terminal_runs_cmd_on_windows", 240);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let (a, b, _ea, eb) = mesh_pair(&url);
+    let (an, bn) = (a.npub().to_string(), b.npub().to_string());
+    b.set_access(Some(an.as_str()), AccessGroup::Control, Some(AccessRule::Allow)).unwrap();
+
+    // `set /a` prints the sum: 42 is in the output, not in what was typed.
+    let mut s = a.open_terminal(&bn, 100, 30, "xterm-256color").unwrap();
+    wait(&eb, "session opened", |e| matches!(e, Event::TerminalOpened { peer, .. } if *peer == an).then_some(()));
+    type_in(&rt, &mut s, "set /a 40+2\r");
+    std::thread::sleep(Duration::from_millis(500));
+    type_in(&rt, &mut s, "exit 3\r");
+    let (out, code) = session_output(&rt, &mut s);
+    assert!(out.contains("42"), "cmd ran: {out}");
+    assert_eq!(code, 3, "the exit status comes through");
+    wait(&eb, "session closed", |e| matches!(e, Event::TerminalClosed { error: None, .. }).then_some(()));
+
+    // The host ends a session: the viewer gets an exit status, not a hang.
+    let mut s = a.open_terminal(&bn, 80, 24, "xterm").unwrap();
+    let sid = wait(&eb, "second session", |e| match e {
+        Event::TerminalOpened { id, .. } => Some(*id),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(b.end_terminal(sid));
+    let (_, code) = session_output(&rt, &mut s);
+    assert_ne!(code, 0, "an ended shell does not report success");
+}
+
 #[test]
 #[cfg(unix)]
 fn a_terminal_asks_first_then_runs_a_real_shell() {

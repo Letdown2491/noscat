@@ -178,6 +178,7 @@ pub fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// OpenOptions for a secret file: owner-only on unix, plain elsewhere
 /// (Windows and the BSDs via cargo install get the default mode).
 fn new_secret_options() -> std::fs::OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut o = std::fs::OpenOptions::new();
     #[cfg(unix)]
     {

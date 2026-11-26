@@ -17,12 +17,93 @@ pub fn local_terminal() -> (u16, u16, String) {
 }
 
 /// Leaves raw mode however the session ends.
-struct Raw(bool);
+struct Raw {
+    on: bool,
+    #[cfg(windows)]
+    console: Option<win::Saved>,
+}
+
+impl Raw {
+    fn enter(tty: bool) -> Self {
+        let on = tty && crossterm::terminal::enable_raw_mode().is_ok();
+        Raw {
+            on,
+            #[cfg(windows)]
+            console: on.then(win::vt_utf8).flatten(),
+        }
+    }
+}
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        if self.0 {
+        if self.on {
             let _ = crossterm::terminal::disable_raw_mode();
+        }
+        #[cfg(windows)]
+        if let Some(saved) = self.console.take() {
+            saved.restore();
+        }
+    }
+}
+
+/// The Windows console speaks the same bytes as a Unix terminal only with
+/// VT input (keys arrive as escape sequences, not console key events),
+/// VT output (older consoles print escapes literally) and the UTF-8 code
+/// page both ways. All are set for the session and restored after.
+#[cfg(windows)]
+mod win {
+    use windows_sys::Win32::System::Console::{
+        DISABLE_NEWLINE_AUTO_RETURN, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
+    };
+
+    const UTF8: u32 = 65001;
+
+    pub struct Saved {
+        input: u32,
+        output: Option<u32>,
+        cp: u32,
+        out_cp: u32,
+    }
+
+    pub fn vt_utf8() -> Option<Saved> {
+        // Safety: plain Win32 console calls on this process's own standard
+        // handles; a handle that is not a console fails GetConsoleMode.
+        unsafe {
+            let (hin, hout) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+            let mut input = 0;
+            if GetConsoleMode(hin, &mut input) == 0 {
+                return None;
+            }
+            let mut out = 0;
+            let output = (GetConsoleMode(hout, &mut out) != 0).then_some(out);
+            let saved = Saved { input, output, cp: GetConsoleCP(), out_cp: GetConsoleOutputCP() };
+            SetConsoleMode(hin, input | ENABLE_VIRTUAL_TERMINAL_INPUT);
+            if let Some(out) = output {
+                // Older consoles lack DISABLE_NEWLINE_AUTO_RETURN: then VT
+                // output alone.
+                if SetConsoleMode(hout, out | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN) == 0 {
+                    SetConsoleMode(hout, out | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                }
+            }
+            SetConsoleCP(UTF8);
+            SetConsoleOutputCP(UTF8);
+            Some(saved)
+        }
+    }
+
+    impl Saved {
+        pub fn restore(self) {
+            // Safety: as above.
+            unsafe {
+                SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.input);
+                if let Some(out) = self.output {
+                    SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), out);
+                }
+                SetConsoleCP(self.cp);
+                SetConsoleOutputCP(self.out_cp);
+            }
         }
     }
 }
@@ -31,7 +112,7 @@ impl Drop for Raw {
 /// shell's exit status.
 pub async fn run(stream: impl AsyncRead + AsyncWrite + Send + 'static) -> Result<i32> {
     let tty = std::io::stdin().is_terminal();
-    let _raw = Raw(tty && crossterm::terminal::enable_raw_mode().is_ok());
+    let _raw = Raw::enter(tty);
     let (mut r, mut w) = tokio::io::split(stream);
 
     let input = async move {
