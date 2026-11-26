@@ -236,3 +236,60 @@ fn up_accept_joins() {
     let _ = up.wait();
     drop(relay);
 }
+
+/// A device started for one command (here a join nobody answers; at boot,
+/// a relay's MEMBERS_COMMAND) holds the directory: `up` waits for it
+/// instead of exiting, and a second `up` still fails at once.
+#[test]
+fn up_waits_for_a_command_holding_the_directory() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let (da, dx) = (tmp("a"), tmp("x"));
+    let a = Dev { npub: id(&da), dir: da, listen: free_udp() };
+    let nobody = id(&dx);
+    let rig = Rig { relay: url, peers: vec![] };
+
+    let mut join = rig
+        .cmd(&a, &["mesh", "join", &nobody, "--timeout", "8"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The join's device is up once its control channel is.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !a.dir.join("control.json").exists() {
+        assert!(Instant::now() < deadline, "the join never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let started = Instant::now();
+    let mut up = rig
+        .cmd(&a, &["up", "--out", tmp("inbox").to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = capture(&mut up);
+    let _show = ShowOnFailure("up", log.clone());
+    wait_for(&log, "waiting for another noscat command");
+    wait_for(&log, "not in a mesh yet");
+    assert!(started.elapsed() >= Duration::from_secs(2), "up started while the join held the directory");
+    let _ = join.wait();
+    assert!(up.try_wait().unwrap().is_none(), "up exited");
+
+    // A second long-running device fails at once, not after the wait.
+    let t = Instant::now();
+    let out = rig.cmd(&a, &["up"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already running"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(t.elapsed() < Duration::from_secs(15), "took {:?}", t.elapsed());
+    // A one-off command goes through the running device.
+    let members = rig.ok(&a, &["mesh", "members"]);
+    assert!(!members.is_empty());
+
+    let _ = up.kill();
+    let _ = up.wait();
+    drop(relay);
+}

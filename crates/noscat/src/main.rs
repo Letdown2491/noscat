@@ -485,16 +485,66 @@ fn config(dir: &Path, d: &DeviceArgs) -> Result<ClientConfig> {
 /// Start the device for `dir`, serving the control channel for others.
 /// `None` when another process runs it.
 fn start(dir: &Path, d: &DeviceArgs, rt: &tokio::runtime::Runtime) -> Result<Option<Ctx>> {
-    start_joining(dir, d, rt, Vec::new())
+    start_device(dir, d, rt, Vec::new(), false)
 }
 
-/// As [`start`], using only `join_relays` (a pairing code's) until the
-/// join ends, so nothing reaches this device's own or the default relays.
-fn start_joining(
+/// How long a device waits for another process holding its directory: a
+/// starting service (its control channel comes up after the relays) or a
+/// device started for one command (`mesh members` from a relay's
+/// MEMBERS_COMMAND, at boot, while `up` starts too).
+const HOLDER_WAIT: Duration = Duration::from_secs(30);
+
+/// Start the long-running device (`up`, `expose`, `serve`). A device
+/// started for one command may hold the directory for a moment: wait for
+/// it rather than fail. Another long-running device fails at once.
+fn start_service(dir: &Path, d: &DeviceArgs, rt: &tokio::runtime::Runtime) -> Result<Ctx> {
+    let deadline = std::time::Instant::now() + HOLDER_WAIT;
+    let mut said = false;
+    loop {
+        if let Some(ctx) = start_device(dir, d, rt, Vec::new(), true)? {
+            return Ok(ctx);
+        }
+        if rt.block_on(control::service_running(dir)) {
+            bail!("this device is already running (another noscat process uses {})", dir.display());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "another noscat command has used {} for {} s; stop it, or run the command through this one once it starts",
+                dir.display(),
+                HOLDER_WAIT.as_secs()
+            );
+        }
+        if !said {
+            eprintln!("# waiting for another noscat command to finish with {}", dir.display());
+            said = true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Wait up to [`HOLDER_WAIT`] for the process holding `dir` to answer on
+/// its control channel.
+fn wait_for_holder(dir: &Path, rt: &tokio::runtime::Runtime) -> Result<(tokio::net::TcpStream, String)> {
+    let deadline = std::time::Instant::now() + HOLDER_WAIT;
+    while std::time::Instant::now() < deadline {
+        if let Some(c) = rt.block_on(control::connect(dir)) {
+            return Ok(c);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    bail!("another noscat process is using {} and does not answer", dir.display());
+}
+
+/// As [`start`]; `join_relays` (a pairing code's) are the only relays used
+/// until the join ends, so nothing reaches this device's own or the
+/// default relays. `service`: the long-running device, as its control
+/// file says to other processes.
+fn start_device(
     dir: &Path,
     d: &DeviceArgs,
     rt: &tokio::runtime::Runtime,
     join_relays: Vec<String>,
+    service: bool,
 ) -> Result<Option<Ctx>> {
     let mut cfg = config(dir, d)?;
     cfg.join_relays = join_relays;
@@ -504,7 +554,7 @@ fn start_joining(
         Err(e) => return Err(e.into()),
     };
     let ctx = Ctx::new(client);
-    rt.block_on(control::serve(ctx.clone(), dir))?;
+    rt.block_on(control::serve(ctx.clone(), dir, service))?;
     Ok(Some(ctx))
 }
 
@@ -586,13 +636,8 @@ impl<'a> Dev<'a> {
             return Ok(Dev::Local(dir, ctx));
         }
         // Another process holds the directory; it may still be starting.
-        for _ in 0..20 {
-            if rt.block_on(control::connect(dir)).is_some() {
-                return Ok(Dev::Remote(dir));
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        bail!("another noscat process is using {} and does not answer", dir.display());
+        wait_for_holder(dir, rt)?;
+        Ok(Dev::Remote(dir))
     }
 
     fn call(&self, rt: &tokio::runtime::Runtime, op: Op, mut show: impl FnMut(Reply)) -> Result<()> {
@@ -643,15 +688,10 @@ fn run_op(dir: &Path, d: &DeviceArgs, op: Op) -> Result<()> {
         Op::Join { inviter, .. } => noscat_client::parse_pairing_relays(inviter),
         _ => Vec::new(),
     };
-    let Some(ctx) = start_joining(dir, d, &rt, join_relays)? else {
+    let Some(ctx) = start_device(dir, d, &rt, join_relays, false)? else {
         // Another process holds the directory; it may still be starting.
-        for _ in 0..20 {
-            if let Some((conn, token)) = rt.block_on(control::connect(dir)) {
-                return rt.block_on(control::ask(conn, token, op, show));
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        bail!("another noscat process is using {} and does not answer", dir.display());
+        let (conn, token) = wait_for_holder(dir, &rt)?;
+        return rt.block_on(control::ask(conn, token, op, show));
     };
     let res = if let Op::Pipe { target } = &op {
         ctx.client.pipe_stdio(target).map_err(anyhow::Error::from)
@@ -729,9 +769,7 @@ fn print_qr(target: &str) {
 /// Run a device in the foreground until Ctrl-C.
 fn run_device(dir: &Path, d: &DeviceArgs, accept_joins: bool, setup: impl FnOnce(&Client) -> Result<()>) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    let Some(ctx) = start(dir, d, &rt)? else {
-        bail!("this device is already running (another noscat process uses {})", dir.display());
-    };
+    let ctx = start_service(dir, d, &rt)?;
     spawn_printer(&ctx, accept_joins);
     setup(&ctx.client)?;
     if accept_joins {
@@ -838,9 +876,7 @@ fn main() -> Result<()> {
         }
         Command::Serve => {
             let rt = tokio::runtime::Runtime::new()?;
-            let Some(ctx) = start(&dir, d, &rt)? else {
-                bail!("this device is already running; stop it to use serve");
-            };
+            let ctx = start_service(&dir, d, &rt)?;
             eprintln!("# 🐈 waiting for a member to `noscat pipe {}`", ctx.client.npub());
             let res = ctx.client.serve_stdio();
             control::remove(&dir);

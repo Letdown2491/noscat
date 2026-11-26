@@ -25,6 +25,11 @@ const TEXT_TIMEOUT: Duration = Duration::from_secs(90);
 struct ControlFile {
     port: u16,
     token: String,
+    /// Written by the long-running device (`up`, `expose`, `serve`); a
+    /// device started for one command leaves it false. Missing in files
+    /// from before 0.6: false.
+    #[serde(default)]
+    service: bool,
 }
 
 /// What a command asks the device to do.
@@ -472,11 +477,11 @@ pub async fn exec(
 
 /// Serve the control channel for `ctx` until the process exits. Writes
 /// `<dir>/control.json`; [`remove`] deletes it on the way out.
-pub async fn serve(ctx: Ctx, dir: &Path) -> Result<()> {
+pub async fn serve(ctx: Ctx, dir: &Path, service: bool) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let token = hex::encode(rand::random::<[u8; 32]>());
-    let file = serde_json::to_vec(&ControlFile { port, token: token.clone() })?;
+    let file = serde_json::to_vec(&ControlFile { port, token: token.clone(), service })?;
     noscat_core::fsutil::write_private_atomic(&dir.join(FILE), &file)
         .with_context(|| format!("writing {}", dir.join(FILE).display()))?;
     tokio::spawn(async move {
@@ -621,6 +626,20 @@ pub async fn connect(dir: &Path) -> Option<(TcpStream, String)> {
         .ok()?
         .ok()?;
     Some((conn, file.token))
+}
+
+/// Whether the long-running device (not a device started for one command)
+/// runs on `dir` and answers. A stale control file, or one whose port now
+/// belongs to something else, does not count: it must answer a request.
+pub async fn service_running(dir: &Path) -> bool {
+    let Some(file) = std::fs::read(dir.join(FILE)).ok().and_then(|b| serde_json::from_slice::<ControlFile>(&b).ok()) else {
+        return false;
+    };
+    if !file.service {
+        return false;
+    }
+    let Some((conn, token)) = connect(dir).await else { return false };
+    matches!(tokio::time::timeout(Duration::from_secs(3), ask(conn, token, Op::Members, |_| {})).await, Ok(Ok(())))
 }
 
 /// Run `op` on the device behind `conn`, printing its narration through

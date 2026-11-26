@@ -103,7 +103,9 @@ noscat up      # run it: receive files, chat, serve members (Ctrl-C to stop)
 
 Only one process runs a device. While `noscat up` runs, every other
 `noscat` command on the same directory goes through it; when nothing
-runs, a command starts the device just for itself.
+runs, a command starts the device just for itself. If `noscat up` starts
+while such a command still holds the device, it waits for it (up to 30 s)
+instead of failing; a second `noscat up` fails at once.
 
 ### Running in the background
 

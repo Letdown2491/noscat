@@ -42,6 +42,11 @@ runs, every other
 .B noscat
 command on the same directory goes through it; when none runs, a command
 starts the device just for itself and stops it when done.
+.B noscat up
+started while such a command holds the device waits for it (up to 30 s)
+instead of failing; a second
+.B noscat up
+fails at once.
 .SH COMMANDS
 .TP
 .B id
