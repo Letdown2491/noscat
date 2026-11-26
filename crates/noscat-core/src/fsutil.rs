@@ -123,6 +123,28 @@ pub fn write_secret(path: &Path, plain: &[u8]) -> io::Result<()> {
     write_private_atomic(path, &seal(file_name(path), plain)?)
 }
 
+/// fsync `path`'s directory (best-effort, unix) so a rename into it
+/// survives power loss.
+fn sync_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(path.parent().unwrap_or_else(|| Path::new("."))) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// A temp file next to `path`, unique to this write (process and a
+/// counter): two writers of one file (a device stopping while the next
+/// starts) never rename each other's half-written file away.
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("noscat");
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("{name}.{}.{n}.tmp", std::process::id()))
+}
+
 /// Write `contents` to `path` atomically: the data lands in a temp file
 /// in the same directory (so the rename is a same-filesystem metadata
 /// op), is fsynced, then renamed over `path`. The directory entry is
@@ -130,24 +152,19 @@ pub fn write_secret(path: &Path, plain: &[u8]) -> io::Result<()> {
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("noscat");
-    let tmp = dir.join(format!("{name}.tmp"));
-    {
+    let tmp = temp_path(path);
+    let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(contents)?;
         f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)?;
-    #[cfg(unix)]
-    {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
+    written?;
+    sync_dir(path);
     Ok(())
 }
 
@@ -156,22 +173,19 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
 pub fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("noscat");
-    let tmp = dir.join(format!("{name}.tmp"));
-    let _ = std::fs::remove_file(&tmp);
-    {
+    let tmp = temp_path(path);
+    let written = (|| {
         let mut f = new_secret_options().write(true).create_new(true).open(&tmp)?;
         f.write_all(contents)?;
         f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)?;
-    #[cfg(unix)]
-    {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
+    written?;
+    sync_dir(path);
     Ok(())
 }
 

@@ -1590,8 +1590,16 @@ impl Device {
 
     /// Stop everything.
     pub async fn shutdown(&self) {
-        for h in self.tasks.lock().unwrap_or_else(|p| p.into_inner()).drain(..) {
+        let tasks: Vec<_> = self.tasks.lock().unwrap_or_else(|p| p.into_inner()).drain(..).collect();
+        for h in &tasks {
             h.abort();
+        }
+        // Abort takes effect at a task's next await: one in the middle of
+        // saving the mesh state keeps writing until it is done. Wait for
+        // them, so a device started next on this directory never races a
+        // write of this one (seen on Windows).
+        for h in tasks {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
         }
         self.inner.streams.close();
         let _ = self.inner.dp.shutdown().await;
