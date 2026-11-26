@@ -205,8 +205,9 @@ Done 2026-11-25; the rig test 2026-11-26. Choices:
       desktop): the desktop's terminal window ran the host's shell with
       colours and the cursor; the CLI's `noscat shell` raised the desktop's
       prompt and got a shell after Allow once.
-- [ ] Try it, then revisit: after the first real use, review the groups,
-      the prompt and the card with the user before the release.
+- [x] Try it, then revisit: after the first real use, review the groups,
+      the prompt and the card with the user before the release. Tested
+      in real use; kept as built (2026-11-26).
 
 ## Found in testing (2026-11-26)
 
