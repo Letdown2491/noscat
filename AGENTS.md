@@ -96,6 +96,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 - `docs/plan-0.8.0.md`: macOS (desktop app and Bluetooth).
 - `docs/plan-0.9.0.md`: viewing and controlling a member's screen (our own
   Rust implementation, royalty-free codecs).
+- `docs/plan-no-dns.md`: unscheduled: private meshes with no DNS, no
+  certificates and no URLs (QR carries npubs and addresses, relay over FIPS).
 - `docs/releasing.md`: the release checklist across the repos, from the
   tag on (crates.io first, then the desktop drops its git patch, then the
   Android release APK).
