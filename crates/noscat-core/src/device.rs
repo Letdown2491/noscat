@@ -70,6 +70,11 @@ const SUB_INBOX: &str = "noscat-inbox";
 /// Wait before subscribing again after an own relay refused (see
 /// [`Device::on_closed`]).
 const CLOSED_RETRY: Duration = Duration::from_secs(15);
+/// First wait after an "auth-required" refusal: the subscription went out
+/// before the login, which follows within a moment. Doubles on each
+/// further refusal, up to [`CLOSED_RETRY`], so a device the relay no
+/// longer admits does not hammer it.
+const AUTH_RETRY: Duration = Duration::from_secs(1);
 /// Events one catch-up query asks a relay for. Relays cap results on their
 /// own (often at a few hundred, newest first); catch-up pages backwards
 /// until a relay has nothing more, whatever its cap.
@@ -224,6 +229,8 @@ struct Inner {
     join_relays: StdMutex<Vec<String>>,
     /// A resubscription after a refusal is scheduled.
     retry_pending: std::sync::atomic::AtomicBool,
+    /// "auth-required" refusals since events last arrived (the backoff).
+    auth_retries: std::sync::atomic::AtomicU32,
     /// This device is publishing the commit that makes the mesh private:
     /// it logs in to the mesh's relays already, since a members-only relay
     /// takes the commit only from a logged-in member.
@@ -407,6 +414,7 @@ impl Device {
             login,
             join_relays: StdMutex::new(join_relays),
             retry_pending: std::sync::atomic::AtomicBool::new(false),
+            auth_retries: std::sync::atomic::AtomicU32::new(0),
             going_private: std::sync::atomic::AtomicBool::new(false),
             catching_up: Mutex::new(()),
         });
@@ -893,10 +901,16 @@ impl Device {
         if self.inner.retry_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        tracing::debug!(relay, sub, reason, "subscription refused; trying again shortly");
+        let wait = if reason.starts_with("auth-required") {
+            let n = self.inner.auth_retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst).min(4);
+            (AUTH_RETRY * 2u32.pow(n)).min(CLOSED_RETRY)
+        } else {
+            CLOSED_RETRY
+        };
+        tracing::debug!(relay, sub, reason, ?wait, "subscription refused; trying again shortly");
         let dev = self.clone();
         let h = tokio::spawn(async move {
-            tokio::time::sleep(CLOSED_RETRY).await;
+            tokio::time::sleep(wait).await;
             dev.inner.retry_pending.store(false, std::sync::atomic::Ordering::SeqCst);
             dev.subscribe_inbox().await;
             dev.resubscribe_group(true).await;
@@ -919,6 +933,9 @@ impl Device {
     }
 
     async fn on_event(&self, event: &Event) -> Result<(), DeviceError> {
+        // Events arrive: the subscriptions work, so a later refusal starts
+        // its backoff over.
+        self.inner.auth_retries.store(0, std::sync::atomic::Ordering::SeqCst);
         if event.kind == Kind::Custom(GROUP_KIND) {
             let changes = self.inner.group.lock().await.process(event)?;
             self.note_synced(event.created_at.as_secs());
