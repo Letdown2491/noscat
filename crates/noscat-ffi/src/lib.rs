@@ -364,6 +364,25 @@ pub struct ForwardInfo {
 /// Seal this device's secret files (identity, mesh state) with a 32-byte
 /// key from now on; existing plain files migrate on their next write. Call
 /// once at app start, before anything else. Keep the key in the Android
+/// Write noscat's logs at `filter` (a RUST_LOG filter, e.g.
+/// `noscat_core=debug`) to the file at `path`, appending, for diagnosing a
+/// start or a connection; phones have no stderr. The first call wins; the
+/// later ones do nothing. Call before the client starts to see its start.
+#[uniffi::export]
+pub fn start_debug_log(path: String, filter: String) -> Result<(), NoscatError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| NoscatError::Failed(format!("{path}: {e}")))?;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .try_init();
+    Ok(())
+}
+
 /// Keystore (wrapped); losing it makes the device unreadable, and only
 /// Forget mesh recovers. None: plain files.
 #[uniffi::export]

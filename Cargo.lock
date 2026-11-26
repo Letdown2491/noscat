@@ -2710,6 +2710,7 @@ dependencies = [
  "noscat-client",
  "noscat-core",
  "thiserror 2.0.21",
+ "tracing-subscriber",
  "uniffi",
 ]
 

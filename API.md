@@ -257,6 +257,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 | Function | Contract |
 |---|---|
 | `set_storage_key(key?)` | Seal secret files with this 32-byte key (see `set_storage_key` above). Call first. Throws for a key of the wrong length. |
+| `start_debug_log(path, filter)` | Append noscat's logs at `filter` (a RUST_LOG filter, such as `noscat_core=debug`) to the file at `path`, for diagnosing; phones have no stderr. The first call wins. Call before the client starts to log its start. |
 | `generate_identity()` | New `Identity { npub, secret_hex }`. |
 | `identity_from_secret(secret)` | Restore from hex or nsec. |
 | `mesh_prepare(dir, owner?, relays?)` | This directory's npub, creating `identity.nsec` if missing. `owner` is unused (kept for call compatibility). |

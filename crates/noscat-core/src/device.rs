@@ -231,6 +231,9 @@ struct Inner {
     retry_pending: std::sync::atomic::AtomicBool,
     /// "auth-required" refusals since events last arrived (the backoff).
     auth_retries: std::sync::atomic::AtomicU32,
+    /// A catch-up is processing its events: the sync point is saved once
+    /// at the end.
+    batching: std::sync::atomic::AtomicBool,
     /// This device is publishing the commit that makes the mesh private:
     /// it logs in to the mesh's relays already, since a members-only relay
     /// takes the commit only from a logged-in member.
@@ -366,9 +369,13 @@ impl Device {
     /// Start the device: open its mesh state, bring up the data plane and
     /// streams, connect to relays and catch up.
     pub async fn start(identity: Identity, cfg: DeviceConfig) -> Result<Self, DeviceError> {
+        // Phase timings at debug level, for diagnosing a slow start.
+        let t0 = std::time::Instant::now();
+        let phase = |what: &str| tracing::debug!(ms = t0.elapsed().as_millis() as u64, "device start: {what}");
         let join_relays = union(&cfg.join_relays, &[]);
         std::fs::create_dir_all(&cfg.dir).map_err(|e| DeviceError::Other(e.to_string()))?;
         let group = MeshGroup::open(&cfg.dir, &identity)?;
+        phase("mesh state opened");
         let mut dp_cfg = cfg.dataplane.clone();
         dp_cfg.stun_servers = Some(effective_stun(
             cfg.dataplane.stun_servers.as_deref(),
@@ -377,7 +384,9 @@ impl Device {
             &group.stun(),
         ));
         let dp = Arc::new(Dataplane::start(&identity, dp_cfg).await?);
+        phase("data plane up");
         let streams = Arc::new(Streams::start(dp.clone()).await?);
+        phase("streams up");
         let my_name = cfg.name.clone();
         let sync: SyncState = std::fs::read(cfg.dir.join(SYNC_FILE))
             .ok()
@@ -415,6 +424,7 @@ impl Device {
             join_relays: StdMutex::new(join_relays),
             retry_pending: std::sync::atomic::AtomicBool::new(false),
             auth_retries: std::sync::atomic::AtomicU32::new(0),
+            batching: std::sync::atomic::AtomicBool::new(false),
             going_private: std::sync::atomic::AtomicBool::new(false),
             catching_up: Mutex::new(()),
         });
@@ -424,7 +434,9 @@ impl Device {
         };
         dev.spawn_loop();
         dev.sync_relays(true).await;
+        phase("relays connected and caught up");
         dev.apply_roster().await?;
+        phase("roster applied");
         // In the background: a slow relay must not hold up the start.
         let d = dev.clone();
         let h = tokio::spawn(async move { d.publish_profile().await });
@@ -791,11 +803,14 @@ impl Device {
         if !events.is_empty() {
             tracing::debug!(count = events.len(), "catching up on group events");
         }
+        self.inner.batching.store(true, std::sync::atomic::Ordering::SeqCst);
         for ev in events {
             if let Err(e) = self.on_event(&ev).await {
                 tracing::debug!("catch-up event: {e}");
             }
         }
+        self.inner.batching.store(false, std::sync::atomic::Ordering::SeqCst);
+        save_sync(&self.inner.cfg.dir, &self.inner.sync.lock().unwrap_or_else(|p| p.into_inner()));
         true
     }
 
@@ -859,7 +874,10 @@ impl Device {
         let capped = created_at.min(now());
         if capped > s.since {
             s.since = capped;
-            save_sync(&self.inner.cfg.dir, &s);
+            // A catch-up saves once at its end, not per event.
+            if !self.inner.batching.load(std::sync::atomic::Ordering::SeqCst) {
+                save_sync(&self.inner.cfg.dir, &s);
+            }
         }
     }
 

@@ -16,6 +16,7 @@ noscat-core = { workspace = true }
 noscat-client = { workspace = true }
 uniffi = { version = "0.29", features = ["cli"] }
 thiserror = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "uniffi-bindgen"

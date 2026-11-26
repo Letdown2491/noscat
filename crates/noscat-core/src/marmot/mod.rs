@@ -276,6 +276,11 @@ pub struct MeshGroup {
     group: Option<MlsGroup>,
     /// Snapshot taken before staging an own commit, until it is confirmed.
     pending: Option<(Dump, [u8; 32])>,
+    /// [`MeshGroup::process`] changed something worth saving. A duplicate
+    /// (catching up after a restart replays the last 15 minutes) changes
+    /// nothing, and saving the whole state for each one cost a phone
+    /// about 175 ms an event.
+    dirty: bool,
 }
 
 impl std::fmt::Debug for MeshGroup {
@@ -526,6 +531,7 @@ impl MeshGroup {
             meta,
             group,
             pending: None,
+            dirty: false,
         };
         me.save()?;
         Ok(me)
@@ -1185,8 +1191,11 @@ impl MeshGroup {
         if !self.routing_ids().contains(&h) {
             return Ok(Vec::new());
         }
+        self.dirty = false;
         let changes = self.process_payload(&payload, true)?;
-        self.save()?;
+        if self.dirty {
+            self.save()?;
+        }
         Ok(changes)
     }
 
@@ -1210,7 +1219,11 @@ impl MeshGroup {
             .find_map(|(_, k)| transport::decrypt_group_payload(&k, payload));
         let Some(mls_bytes) = opened else {
             if defer {
-                push_bounded(&mut self.meta.deferred_payloads, B64.encode(payload));
+                let p = B64.encode(payload);
+                if !self.meta.deferred_payloads.contains(&p) {
+                    self.dirty = true;
+                }
+                push_bounded(&mut self.meta.deferred_payloads, p);
             }
             return Ok(Vec::new());
         };
@@ -1234,6 +1247,9 @@ impl MeshGroup {
         if self.meta.seen.contains(&hex::encode(digest)) {
             return Ok(Vec::new());
         }
+        // Everything past here marks the message seen, defers it or
+        // applies it: state to save.
+        self.dirty = true;
         let Ok(msg) = MlsMessageIn::tls_deserialize_exact(mls_bytes) else {
             self.mark_seen(&digest);
             return Ok(Vec::new());
@@ -1461,6 +1477,7 @@ impl MeshGroup {
             },
             group: None,
             pending: None,
+            dirty: false,
         };
         trial.reload()?;
         trial.note_epoch()?;
