@@ -44,12 +44,16 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
       through the reachable member. A device in no mesh uses none either.
 - [x] CLI: `--stun` shown in `--help` and the man page; `noscat mesh stun
       add|remove`.
-- [ ] Apps show the mesh's STUN servers next to its relays (needs
-      `mesh_stun()` in the FFI).
-- [ ] Deployment: Caddy proxies TCP only, so STUN needs UDP 3478 open on
+- [ ] Apps show the mesh's STUN servers (needs `mesh_stun()` in the FFI).
+      Desktop: done, Settings > Network, editable. Android: not yet (its
+      Settings lists no relays either).
+- [x] Deployment: Caddy proxies TCP only, so STUN needs UDP 3478 open on
       the relay's host (on vm-2252, ask before changing it). The VPS's
       noscat is reachable without an address today, so before it runs a
       0.6 build it needs `--reachable <ip:port>` or the mesh's STUN.
+      Done 2026-11-26: noscat-relay with `STUN_ADDR=0.0.0.0:3478` (no host
+      firewall; answers from the internet), the VPS's noscat on
+      `--reachable 185.18.221.60:41641`, mesh STUN `185.18.221.60:3478`.
 
 Changed from the first draft (2026-11-25): FIPS takes its STUN list when
 the data plane binds and has no way to change it at runtime, so a device

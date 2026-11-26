@@ -56,5 +56,21 @@ A member asking the others to remove it. Someone else completes it; the last dev
 A member that the others can reach directly from the internet (a forwarded port, a server, a public IPv6 address). Every mesh needs at least one; members behind NAT reach each other through it when they cannot connect directly.
 _Avoid_: relay (that is a Nostr relay), server, exit node
 
+**Access group**:
+What an incoming stream asks to do to a device, by risk: **send** (files, chat, clipboard), **services** (forwards to its services) and **control** (a terminal, later its screen). Each device decides, per member, a rule for each group: allow, deny, or ask (control only). The rules stay on that device; no other member learns them.
+_Avoid_: permission (too fine-grained), role
+
+**Ask**:
+A control rule: the device's app asks its user on each request (allow once, always allow, deny), refusing after a minute. A device with no app to ask refuses, and offers no terminal.
+_Avoid_: prompt rule, confirm
+
+**Terminal**:
+A member's login shell, run as that member's user on that member's computer, viewed and typed into from another member. The control group decides who may open one. Phones view terminals but host none.
+_Avoid_: SSH, remote shell session
+
+**Mesh STUN servers**:
+The `ip:port` STUN servers a mesh lists in its group state, from which its devices learn their public address. A private mesh without any uses none.
+_Avoid_: STUN relay (STUN never carries traffic)
+
 **Default service**:
 What a member exposes to the rest of the mesh without naming a port, such as a local web server or the far end of a netcat session. Other local ports are reachable only if the member serves them by number.

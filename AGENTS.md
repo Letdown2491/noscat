@@ -63,10 +63,16 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 
 - `crates/noscat-core`: `dataplane` (FIPS), `streams` (QUIC over FIPS),
   `marmot` (the mesh group: `MeshGroup`, Marmot codecs, Nostr transport),
-  `device` (the runtime tying them to relays), `apps` (file, text, forward).
+  `device` (the runtime tying them to relays, adverts, the mesh's STUN
+  servers), `apps` (file, text, forward, terminal: the stream protocols),
+  `access` (who may do what to this device: the send, services and control
+  groups, rules in the device's sealed `access.json`).
 - `crates/noscat-client`: the reusable client: one `Client` per device,
   identity sources, mesh operations, an event stream, and the app operations
-  (`up`/`expose`/`forward`/`send_file`/`send_chat`/stdio).
+  (`up`/`expose`/`forward`/`send_file`/`send_chat`/stdio), access (rules,
+  asks answered by an app, `authorize` on every incoming stream) and
+  terminals (`terminal.rs` hosts the PTY; `start_terminal` runs a viewer's
+  stream for apps).
 - `crates/noscat-ffi`: UniFFI bridge for mobile apps (Kotlin now, Swift later):
   `NoscatClient`, `Event` callback, identity and `mesh_*` functions (which use
   the app's running client for a directory, or run the device for the call).
@@ -74,7 +80,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   checkout (`scripts/build-native.sh local`) or a published version.
 - `crates/noscat`: the CLI: a thin skin over the client. One process runs a
   device (`Client::start` locks the state directory); `control.rs` is the
-  loopback channel every other command on that directory goes through.
+  loopback channel every other command on that directory goes through
+  (unrelated to the control access group); `shell.rs` is `noscat shell`,
+  the raw-mode terminal on a member.
   `tests/cli.rs` drives the real binary. The man page
   (`packaging/noscat.1`) is written by hand: a change to commands, flags or
   defaults updates it, README's CLI section and the `--help` text together.
