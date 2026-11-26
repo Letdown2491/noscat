@@ -54,6 +54,13 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
    separate harnesses with their own `run.sh`; run them after touching the
    Marmot group or the data plane.
 
+## Naming
+
+- The product's name is **Noscat**: in UI text, launcher entries,
+  notifications and prose in docs. `noscat` stays lowercase where it is an
+  identifier: the command (`noscat up`), crates, packages, app ids, data
+  folders, the `noscat:` pairing scheme, and code formatting in docs.
+
 ## Layout
 
 - `API.md`: the app-facing API contract (`noscat-client` + `noscat-ffi`

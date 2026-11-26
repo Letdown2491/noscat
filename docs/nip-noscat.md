@@ -1,14 +1,14 @@
-# NIP-draft: noscat, a private device mesh on Marmot and FIPS
+# NIP-draft: Noscat, a private device mesh on Marmot and FIPS
 
 `draft` `optional`
 
-Version: noscat 0.5.0.
+Version: Noscat 0.5.0.
 
 ---
 
 ## Abstract
 
-noscat joins a person's devices (or a small trusted group's) into a
+Noscat joins a person's devices (or a small trusted group's) into a
 private mesh with no coordinator and no root privileges. Membership is a
 Marmot group (MLS, RFC 9420) carried by Nostr relays. Data travels
 device to device over FIPS, an end-to-end encrypted overlay keyed by
@@ -25,7 +25,7 @@ Mesh VPNs need an account, a coordination server and usually root. Nostr
 already gives every device a keypair and gives everyone relays. Marmot
 turns those into an end-to-end encrypted group whose membership every
 member can verify; FIPS turns the same keys into direct, encrypted paths
-between devices. noscat is the profile that combines them, so that:
+between devices. Noscat is the profile that combines them, so that:
 
 1. the member list is the access list: a device that is not in the group
    cannot reach any member, and removal cuts it off at once;
@@ -40,7 +40,7 @@ between devices. noscat is the profile that combines them, so that:
 - "Device" is one Nostr keypair. Every device has its own npub; a person
   with three devices has three npubs.
 - "Marmot" is the Marmot protocol as specified in the `marmot` repository
-  (`transports/nostr.md`, `app-components/`, `protocol-core/`). noscat
+  (`transports/nostr.md`, `app-components/`, `protocol-core/`). Noscat
   implements the subset this document names and stays compatible with
   MDK clients such as White Noise.
 
@@ -59,7 +59,7 @@ between devices. noscat is the profile that combines them, so that:
 | Layer | What | Where |
 |---|---|---|
 | Identity | Nostr keypair per device | local |
-| Membership | Marmot group with the noscat mesh profile | relays (encrypted) |
+| Membership | Marmot group with the Noscat mesh profile | relays (encrypted) |
 | Presence and endpoints | advert, an app message inside the group | relays (encrypted) |
 | Transport | FIPS sessions between members | direct UDP, or relayed by a member |
 | Streams | QUIC over FIPS service datagrams | inside FIPS |
@@ -68,18 +68,18 @@ between devices. noscat is the profile that combines them, so that:
 ## Meshes
 
 A mesh is a Marmot group. Everything Marmot requires of a group applies;
-this section lists what noscat adds or narrows.
+this section lists what Noscat adds or narrows.
 
 ### Components
 
-A noscat mesh requires (in the `app_components` GroupContext list):
+A Noscat mesh requires (in the `app_components` GroupContext list):
 
-| Id | Component | noscat use |
+| Id | Component | Noscat use |
 |---|---|---|
 | `0x8003` | `marmot.group.admin-policy.v1` | every member is listed |
 | `0x8004` | `marmot.group.nostr-routing.v1` | relays and `h` routing ids |
 | `0x8009` | `marmot.member.account-identity-proof.v2` | binds each leaf to its npub |
-| `0x800c` | `marmot.group.lifecycle.v1` | active; noscat never disbands |
+| `0x800c` | `marmot.group.lifecycle.v1` | active; Noscat never disbands |
 
 and carries, without requiring it:
 
@@ -89,11 +89,11 @@ and carries, without requiring it:
 | `0xf3a1` | `noscat.private.v1` | empty; present means the mesh is private |
 | `0xf3a2` | `noscat.stun.v1` | `opaque servers<V>`: a list of `opaque server<V>` |
 
-`noscat.mesh.v1` marks the group as a noscat mesh and names it. Because
+`noscat.mesh.v1` marks the group as a Noscat mesh and names it. Because
 it is not required, non-noscat Marmot clients can join; they simply
-ignore it. A group without it is a plain Marmot group: noscat devices
+ignore it. A group without it is a plain Marmot group: Noscat devices
 can join it and exchange messages, and still use the data plane with
-its other noscat members.
+its other Noscat members.
 
 `noscat.private.v1` makes the mesh private. Its devices then use only
 the relays in the routing component (`0x8004`), not their own or public
@@ -117,10 +117,10 @@ servers and a private mesh's devices use none: they advertise no NAT
 address and connect through the reachable member, so no third party
 learns their addresses.
 
-A noscat device's leaf and key package advertise support for `0x0001`
+A Noscat device's leaf and key package advertise support for `0x0001`
 and `0x8001`, `0x8003`, `0x8004`, `0x8009`, `0x800b`, `0x800c`,
 `0xf3a0`, `0xf3a1` and `0xf3a2`. `0x800b` (encrypted media v2) is listed because MDK clients
-require it in every new group; noscat never sends media and leaves the
+require it in every new group; Noscat never sends media and leaves the
 policy unchanged. Per Marmot, the key package event's `app_components`
 tag lists exactly the advertised ids from `0x8000` up.
 
@@ -138,14 +138,14 @@ commits. The last member of a mesh forgets it locally.
 
 ### Convergence
 
-With many admins, two members can commit at the same epoch. noscat uses
+With many admins, two members can commit at the same epoch. Noscat uses
 Marmot's branch order (depth with a witness boost, witness score,
 privileged before ordinary, lower committer key, lower commit digest).
 It applies a commit at once and keeps the parent state of the last 5
 commits. When a competing commit for one of those epochs arrives and
 wins, the device rolls back and applies it. A device whose own change
 lost reports it so the change can be retried. After input settles,
-noscat and MDK agree on the winning branch.
+Noscat and MDK agree on the winning branch.
 
 ### Joining
 
@@ -177,7 +177,7 @@ device is added only if a member then commits an Add for its key
 package. Receivers MUST ignore requests from current members and SHOULD
 show at most one prompt per device per 15 minutes, until they answer it.
 
-A joining device SHOULD repeat its request while it waits (noscat every
+A joining device SHOULD repeat its request while it waits (Noscat every
 15 seconds): a single gift wrap can be lost while relay connections come
 up.
 
@@ -338,10 +338,10 @@ noscat:<npub>?relay=<url>&relay=<url>
 
 ## Interoperability
 
-- A noscat mesh can invite a White Noise (or any MDK) account. It
+- A Noscat mesh can invite a White Noise (or any MDK) account. It
   becomes a full member (admin included) and sees the mesh's messages;
   it does not use the data plane.
-- A noscat device can be invited into a White Noise group and exchange
+- A Noscat device can be invited into a White Noise group and exchange
   messages there.
 - `tests/mdk-interop` in the reference implementation checks both
   directions against MDK's `wn` CLI.

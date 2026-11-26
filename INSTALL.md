@@ -1,4 +1,4 @@
-# Installing noscat
+# Installing Noscat
 
 All channels are driven by a single tag push: binaries, packages, the Homebrew
 tap, the pacman repository, the Scoop bucket, and crates.io are all updated
@@ -93,7 +93,7 @@ extra.
 
 ## BSDs (FreeBSD, OpenBSD, NetBSD)
 
-There are no BSD packages yet, and noscat does not build on FreeBSD yet:
+There are no BSD packages yet, and Noscat does not build on FreeBSD yet:
 one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket option,
 and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
 BSD support follows the 0.5.0 release

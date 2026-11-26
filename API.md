@@ -115,7 +115,7 @@ Mesh:
 | `mesh_relays()` / `is_private()` | `Vec<String>` / `bool` | The mesh's relays; whether it is private. |
 | `set_mesh_relays(relays)` | `()` | Replace the mesh's relays (1 to 16 `wss://` URLs). Every member moves to the new list. |
 | `mesh_stun()` / `set_mesh_stun(servers)` | `Vec<String>` / `()` | The mesh's STUN servers (`ip:port`, no hostnames, at most 8; empty removes them). Each device uses them from its next start; config `stun_servers` overrides them. Without any, a shared mesh uses public STUN servers and a private mesh none. The FFI has `meshStun()` and `setMeshStun(servers)` (both blocking). |
-| `set_private(bool)` | `()` | Make the mesh private (every device uses only the mesh's relays, logs in to them with NIP-42, leaves its own and the public ones) or shared again. noscat logs in to no other relay. |
+| `set_private(bool)` | `()` | Make the mesh private (every device uses only the mesh's relays, logs in to them with NIP-42, leaves its own and the public ones) or shared again. Noscat logs in to no other relay. |
 | `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
@@ -210,7 +210,7 @@ Peers are bech32 npubs.
 | `ForwardStopped` | `id, error` | Drop it from the UI list. |
 | `ChatMessage` | `peer, text` | |
 | `ChatDelivered` | `peer` | The member acknowledged the text. |
-| `ChatFailed` | `peer, error` | Keep the optimistic copy, mark undelivered, and offer a manual retry (noscat already tried a fresh connection once). |
+| `ChatFailed` | `peer, error` | Keep the optimistic copy, mark undelivered, and offer a manual retry (Noscat already tried a fresh connection once). |
 | `Clipboard` | `peer, text` | Put `text` on the system clipboard. |
 | `Stopped` | `what, error` | A background operation stopped. |
 | `MeshJoined` | `name` | This device is in a mesh now (created or joined). |
@@ -339,9 +339,9 @@ to be invited: show a prompt, then `invite(peer)`). New in 0.6: `AccessRequest {
   the relay subscription resumes). The identity lives wherever
   `IdentitySource` says; the CLI and apps keep `identity.nsec` next to
   the state.
-- A mesh is a Marmot group (MLS). noscat meshes interoperate with
+- A mesh is a Marmot group (MLS). Noscat meshes interoperate with
   White Noise and other MDK clients: a White Noise account can be invited
-  into a mesh and a noscat device into a White Noise group. Only noscat
+  into a mesh and a Noscat device into a White Noise group. Only Noscat
   devices use the data plane.
 - Every member is an admin. Two members changing membership within
   seconds of each other converge on one result; the loser sees

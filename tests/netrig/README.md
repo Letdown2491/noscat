@@ -1,6 +1,6 @@
 # netrig
 
-A fake internet in network namespaces, for testing how noscat devices find
+A fake internet in network namespaces, for testing how Noscat devices find
 and reach each other through NATs. Rootless: everything runs inside a
 `--privileged` rootless podman container, whose privileges stay inside its
 own user namespace.
@@ -35,7 +35,7 @@ Current scenarios and what they must show (results recorded in
 | cone | cone | yes, 3% loss | 16 MiB over QUIC, after the punch |
 | symmetric | symmetric | yes, 3% loss | a terminal, relayed: 200 keystroke echoes (95th percentile under 1 s), a 4 MiB burst intact, exit status 0 |
 
-The terminal scenario's B is an echo host speaking noscat's terminal
+The terminal scenario's B is an echo host speaking Noscat's terminal
 protocol (`TERM_HOST`), since rig devices run as `nobody` with no shell;
 the real PTY host, and who may open one, are tested in noscat-client.
 

@@ -1,11 +1,11 @@
-# noscat
+# Noscat
 
 A decentralized, trustless Tailscale built on Nostr: a user's devices form a private mesh and reach each other directly, with no account, no coordinator and no root.
 
 ## Language
 
 **Device**:
-One running noscat installation with its own Nostr identity (npub). Every device has a unique npub; identities are never shared between devices.
+One running Noscat installation with its own Nostr identity (npub). Every device has a unique npub; identities are never shared between devices.
 _Avoid_: node (except when talking about FIPS internals), host, client
 
 **Mesh**:

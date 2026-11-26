@@ -1,8 +1,8 @@
-# noscat
+# Noscat
 
 *like netcat, but over your own device mesh: npub-addressed, end-to-end encrypted, no root, no accounts.*
 
-noscat joins your devices into a private mesh. Each device has its own
+Noscat joins your devices into a private mesh. Each device has its own
 self-generated Nostr identity (a keypair: no email, no phone number, no
 account). Membership is a [Marmot](https://github.com/marmot-protocol)
 group (MLS, the IETF group-encryption standard) carried by Nostr relays,
@@ -28,7 +28,7 @@ The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-nos
 
 ## Install
 
-noscat is a single binary, packaged for every major platform (the Linux
+Noscat is a single binary, packaged for every major platform (the Linux
 packages are static, with no dependencies): Linux (x86_64 and aarch64: deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
 bottles), and Windows (Scoop and winget, winget in community review). Nix
@@ -56,7 +56,7 @@ and a man page.
 
 ## Clients
 
-The CLI is not the only way to use noscat: the same protocol crate powers
+The CLI is not the only way to use Noscat: the same protocol crate powers
 native GUI clients:
 
 - **[noscat-android](https://github.com/Letdown2491/noscat-android)**: native
@@ -272,17 +272,17 @@ the internet.
 ### Relays
 
 **Run your own:** [noscat-relay](https://github.com/Letdown2491/noscat-relay)
-is a members-only relay for one mesh. It carries only noscat's events and
+is a members-only relay for one mesh. It carries only Noscat's events and
 serves only your devices, so who is in the mesh, who gets invited and when
 each device is online stay off third-party relays. Put it on the server that
 runs your reachable member, then make the mesh private (below). Without one,
-noscat uses public relays.
+Noscat uses public relays.
 
 Relays carry only the mesh's encrypted control traffic (membership changes,
 invitations, key packages, relay lists and presence adverts); data goes
-device to device. By default noscat uses three relays from different
+device to device. By default Noscat uses three relays from different
 operators: `wss://relay.snort.social`, `wss://relay.ditto.pub` and
-`wss://nostr.mom`, chosen because each accepts every event kind noscat uses
+`wss://nostr.mom`, chosen because each accepts every event kind Noscat uses
 from a brand-new key, completes a join on its own, and is reachable from
 mobile networks. A mesh also remembers the relays it was created with, and
 members use both sets.
@@ -291,7 +291,7 @@ members use both sets.
 relay. Each relay connects in the background and is retried for as long as
 the device runs, so one being down at start, or dropping later, costs
 nothing: a publish goes to all of them and succeeds on the first that
-accepts. noscat sends each event once per relay (again only if that relay
+accepts. Noscat sends each event once per relay (again only if that relay
 was not connected), and republishes the device's relay lists only when they
 change or once a week.
 
@@ -310,7 +310,7 @@ noscat mesh shared                         # devices use their own relays too
 In a private mesh every device uses only the mesh's relays, logs in to
 them with its device key (NIP-42), and drops its own and the public ones.
 That is meant for a members-only relay you run yourself, such as
-noscat-relay. noscat never logs in to any other relay. Add the relay
+noscat-relay. Noscat never logs in to any other relay. Add the relay
 first and check members reach it, then go private. A private mesh's QR
 (`noscat mesh qr`, or the one `up` prints) names its relays
 (`noscat:<npub>?relay=wss%3A%2F%2F...`), so a new device that scans it
