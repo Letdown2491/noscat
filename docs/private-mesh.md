@@ -65,8 +65,8 @@ What this does not hide, so you know where the edges are:
   authority. None of them can read or forge your mesh's messages, but
   whoever controls the domain could redirect it and see which devices
   log in, and when. Running without a domain is covered below.
-- Installing touches a few sites once: GitHub (Noscat and the apps) and
-  go.dev (Go). After that, running the mesh needs none of them.
+- Installing downloads from GitHub once (Noscat, the relay and the apps).
+  After that, running the mesh needs no outside site at all.
 
 ## What you need
 
@@ -139,27 +139,19 @@ noscat name server
 
 ## Step 3: Install the relay
 
-The relay is built from source with Go (1.25 or later). Install Go from
-the official site (this is for x86_64 servers; on ARM use the
-`linux-arm64` file from <https://go.dev/dl/>):
+Download the relay (a single file) and its two configuration files.
+This is for x86_64 servers; on ARM, use `noscat-relay-linux-arm64` in the
+first `curl`:
 
 ```bash
-curl -fsSLO https://go.dev/dl/go1.25.4.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.4.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
-go version
+mkdir -p ~/noscat-relay && cd ~/noscat-relay
+curl -fsSL -o noscat-relay https://github.com/Letdown2491/noscat-relay/releases/latest/download/noscat-relay-linux-amd64
+chmod +x noscat-relay
+curl -fsSLO https://raw.githubusercontent.com/Letdown2491/noscat-relay/main/noscat-relay.service
+curl -fsSL -o .env https://raw.githubusercontent.com/Letdown2491/noscat-relay/main/.env.example
 ```
 
-Download and build the relay:
-
-```bash
-git clone https://github.com/Letdown2491/noscat-relay ~/noscat-relay
-cd ~/noscat-relay
-go build -trimpath -ldflags="-s -w" -o noscat-relay .
-cp .env.example .env
-```
-
-(No `git`? `sudo apt install git`.)
+(Prefer to build it yourself? The relay's README shows how, with Go.)
 
 Open `.env` in an editor (`nano .env`) and set these three lines (the
 other settings can stay as they are):
@@ -359,7 +351,7 @@ two cannot reach each other directly).
   README's "Who may do what".
 - **Updating**: on the server, run the install line from step 2 again
   and `noscat service install` with the same options as in step 5; for
-  the relay, `git pull`, build again, and
+  the relay, run the first three lines of step 3 again, then
   `systemctl --user restart noscat-relay`. The two can restart in either
   order. The apps update like any app.
 - **Backups**: the server's identity and mesh state are in

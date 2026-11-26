@@ -236,6 +236,9 @@ Done 2026-11-25; the rig test 2026-11-26. Choices:
 
 ## Phase 5: release
 
-- [ ] Docs in all three repos (README, API, man page, nip-noscat for the
+- [x] Docs in all three repos (README, API, man page, nip-noscat for the
       wire changes, CONTEXT terms), CI green, netns suite.
-- [ ] Lockstep 0.6.0 per `docs/releasing.md`.
+- [x] Lockstep 0.6.0 per `docs/releasing.md`: released 2026-11-26
+      (noscat on crates.io, GitHub, Homebrew, Scoop and pacman; winget
+      submitted; both apps; noscat-relay 0.2.0 with Linux binaries; the
+      VPS runs the release).

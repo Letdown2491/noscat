@@ -57,8 +57,10 @@ scoop bucket add letdown2491 https://github.com/Letdown2491/scoop-bucket
 scoop install noscat
 ```
 
-Or grab the zip from the release page. A winget manifest is pending merge in
-the community repo ([#486661](https://github.com/microsoft/winget-pkgs/pull/486661));
+Or grab the zip from the release page. winget manifests are pending merge in
+the community repo ([#486661](https://github.com/microsoft/winget-pkgs/pull/486661)
+for the package, [#490013](https://github.com/microsoft/winget-pkgs/pull/490013)
+for 0.6.0);
 after it merges, `winget install Letdown2491.noscat` works and stays updated
 through winget upgrade.
 
