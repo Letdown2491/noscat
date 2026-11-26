@@ -61,7 +61,7 @@ What an incoming stream asks to do to a device, by risk: **send** (files, chat, 
 _Avoid_: permission (too fine-grained), role
 
 **Ask**:
-A control rule: the device's app asks its user on each request (allow once, always allow, deny), refusing after a minute. A device with no app to ask refuses, and offers no terminal.
+A control rule: the device's app asks its user on each request (allow once, always allow, deny), refusing after a minute. A device with no app to ask refuses; it offers a terminal only once some member is allowed outright.
 _Avoid_: prompt rule, confirm
 
 **Terminal**:
