@@ -660,6 +660,13 @@ impl NoscatClient {
         self.client.mesh_stun()
     }
 
+    /// Replace the mesh's STUN servers (`ip:port`, no hostnames, at most
+    /// 8; empty removes them). Members use the new list from their next
+    /// start. Blocking.
+    pub fn set_mesh_stun(&self, servers: Vec<String>) -> Result<(), NoscatError> {
+        self.client.set_mesh_stun(&servers).map_err(NoscatError::fail)
+    }
+
     /// The rules for members without their own.
     pub fn access_defaults(&self) -> AccessRules {
         self.client.access_defaults().into()
