@@ -4,7 +4,7 @@ The public surface the client apps consume: `noscat-client` (Rust, embedded
 directly by noscat-desktop) and `noscat-ffi` (UniFFI, consumed by
 noscat-android and later mobile platforms).
 
-> **Current as of 0.5.0.** If your `Cargo.lock` pins a newer version than
+> **Current as of 0.6.0.** If your `Cargo.lock` pins a newer version than
 > this stamp, distrust this file and read the crate source; if you change
 > the public surface, update this file in the same commit.
 

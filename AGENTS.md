@@ -7,8 +7,8 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). Version 0.5.0; `docs/releasing.md` is the
-release checklist, `docs/plan-0.5.0.md` the plan it came from, and
+library (`crates/noscat-client`). Version 0.6.0; `docs/releasing.md` is the
+release checklist, `docs/plan-0.6.0.md` the plan it came from, and
 `docs/adr/` records why things are the way they are. Build/test in the
 podman container only; the host has no toolchain:
 
@@ -138,8 +138,8 @@ is their contract:
 
 - `~/Documents/noscat-android`: native Kotlin over `noscat-ffi`.
 - `~/Documents/noscat-desktop`: GPUI in Rust, embedding `noscat-client`
-  directly (from this repo's `main` through `[patch.crates-io]` until
-  0.5.0 is published).
+  directly (from crates.io; during a release's development, from a local
+  checkout through `[patch.crates-io]`, removed at release).
 
 - `~/Documents/noscat-relay`: a members-only relay (Go, khatru) for one
   mesh. It reads its member list from `noscat mesh members` output (any

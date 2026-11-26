@@ -20,7 +20,7 @@ Think Tailscale, but:
 - there is no coordinator and no single owner: lose any device and the
   mesh carries on,
 - everything runs in userspace on Linux, macOS, Windows and Android (the
-  BSDs return after 0.5.0, [#19](https://github.com/Letdown2491/noscat/issues/19));
+  BSDs are planned for 0.6.1, [#19](https://github.com/Letdown2491/noscat/issues/19));
   no root, no kernel module,
 - it is written in Rust.
 
@@ -77,7 +77,7 @@ interoperable by construction.
 
 ## Status
 
-Version 0.5.0. The design decisions are in [`docs/adr/`](docs/adr/).
+Version 0.6.0. The design decisions are in [`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them

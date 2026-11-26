@@ -15,14 +15,13 @@ what happens from the tag on, in order.
       step refuses a mismatch). The desktop's `Cargo.toml` and the Android
       app's `versionName` carry the same version; `versionCode` is bumped.
 - [ ] The netns suite passes: `tests/netrig/run.sh`.
-- [ ] No "not released yet" notes are left in noscat's docs (done for
-      0.5.0). The apps' notes about building from noscat's git branch or a
+- [ ] No "not released yet" notes are left in noscat's docs. The apps' notes about building from noscat's git branch or a
       local checkout go in steps 2 and 3, with the build change.
 
 ## 1. noscat
 
 ```
-git tag v0.5.0 && git push origin v0.5.0
+git tag v0.6.0 && git push origin v0.6.0
 ```
 
 The release workflow builds every package, publishes `noscat-core`,
@@ -33,12 +32,12 @@ the Scoop bucket and the pacman repository. Wait for it to finish
 
 Manual, from the release's assets:
 
-- **AUR**: unpack `noscat-aur-v0.5.0.tar.gz`, then push `PKGBUILD` and
+- **AUR**: unpack `noscat-aur-v0.6.0.tar.gz`, then push `PKGBUILD` and
   `.SRCINFO` to `ssh://aur@aur.archlinux.org/noscat.git`.
-- **winget**: unpack `noscat-winget-v0.5.0.tar.gz` into
-  `manifests/l/Letdown2491/noscat/0.5.0/` in a fork of
+- **winget**: unpack `noscat-winget-v0.6.0.tar.gz` into
+  `manifests/l/Letdown2491/noscat/0.6.0/` in a fork of
   `microsoft/winget-pkgs` and open a PR titled
-  "Add: Letdown2491.noscat version 0.5.0".
+  "Add: Letdown2491.noscat version 0.6.0".
 
 ## 2. noscat-desktop
 
@@ -48,20 +47,20 @@ Only once the crates are on crates.io:
 2. `cargo update -p noscat-client -p noscat-core` (in the dev container),
    build, and check `Cargo.lock` now points at crates.io.
 3. Remove the "noscat's main branch" notes from README and AGENTS.
-4. Commit, push, wait for CI, then `git tag v0.5.0 && git push origin
-   v0.5.0`. The release workflow attaches `noscat-desktop` (Wayland) and
+4. Commit, push, wait for CI, then `git tag v0.6.0 && git push origin
+   v0.6.0`. The release workflow attaches `noscat-desktop` (Wayland) and
    `noscat-desktop-x11`.
 
 ## 3. noscat-android
 
-1. `scripts/build-release.sh 0.5.0`: builds the published `noscat-ffi`
+1. `scripts/build-release.sh 0.6.0`: builds the published `noscat-ffi`
    optimized and a signed `app-release.apk` (needs `keystore.properties`).
 2. Remove the "built from a local noscat checkout" notes from README and
    AGENTS.
-3. Commit, push, `git tag v0.5.0 && git push origin v0.5.0`, and attach
-   the APK: `gh release create v0.5.0 app/build/outputs/apk/release/app-release.apk --generate-notes`.
+3. Commit, push, `git tag v0.6.0 && git push origin v0.6.0`, and attach
+   the APK: `gh release create v0.6.0 app/build/outputs/apk/release/app-release.apk --generate-notes`.
 
 ## 4. After
 
 - Redeploy any server running noscat from the release binaries.
-- Close `docs/plan-0.5.0.md`: tick Phase 5.
+- Close `docs/plan-<version>.md`: tick its release phase.

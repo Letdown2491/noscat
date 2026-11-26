@@ -37,8 +37,8 @@ A pacman repository is published per release. Add to `/etc/pacman.conf`:
 ```ini
 [noscat]
 SigLevel = Never
-Server = https://letdown2491.github.io/noscat/x86_64
-# Server = https://letdown2491.github.io/noscat/aarch64
+Server = https://nos.cat/x86_64
+# Server = https://nos.cat/aarch64
 ```
 
 then `pacman -Sy noscat`; normal `pacman -Syu` upgrades pick up new releases.
@@ -70,7 +70,7 @@ nix run github:Letdown2491/noscat
 
 A flake is at the repo root; `nix profile install github:Letdown2491/noscat`
 adds it to a profile. Linux and macOS, x86_64 and aarch64. It builds the
-`main` branch; add `?ref=v0.5.0` for the release.
+`main` branch; add `?ref=v0.6.0` for the release.
 
 ## cargo (any platform with a Rust toolchain)
 
@@ -96,7 +96,7 @@ extra.
 There are no BSD packages yet, and Noscat does not build on FreeBSD yet:
 one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket option,
 and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
-BSD support follows the 0.5.0 release
+BSD binaries are planned for 0.6.1, built with the upstream fix applied
 ([#19](https://github.com/Letdown2491/noscat/issues/19)).
 OpenBSD and NetBSD have not been tried. A FreeBSD port (and then
 pkgsrc-wip) is on the table if there is demand.
