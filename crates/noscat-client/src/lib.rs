@@ -243,6 +243,57 @@ pub enum Event {
     TerminalOpened { id: u64, peer: String },
     /// Host: a session ended (`error` set when the shell could not run).
     TerminalClosed { id: u64, peer: String, secs: u64, error: Option<String> },
+    /// Viewer: output of a session opened with [`Client::start_terminal`]
+    /// (raw terminal bytes; feed them to the emulator in order).
+    TerminalOutput { session: u64, data: Vec<u8> },
+    /// Viewer: the session ended. `code` is the shell's exit status (`-1`:
+    /// ended by the host); `None` with `error` when the connection broke.
+    /// The last event of a session.
+    TerminalExited { session: u64, code: Option<i32>, error: Option<String> },
+}
+
+/// A terminal open on a member, from [`Client::start_terminal`]. Output
+/// and the end arrive as [`Event::TerminalOutput`] and
+/// [`Event::TerminalExited`] carrying [`TerminalHandle::id`]. Dropping it
+/// closes the session.
+#[derive(Debug)]
+pub struct TerminalHandle {
+    id: u64,
+    peer: String,
+    tx: tokio::sync::mpsc::UnboundedSender<TermFrame>,
+}
+
+impl TerminalHandle {
+    /// The id its events carry.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The member it runs on (npub).
+    #[must_use]
+    pub fn peer(&self) -> &str {
+        &self.peer
+    }
+
+    /// Send keystrokes or a paste (raw bytes, as a terminal would).
+    pub fn write(&self, data: &[u8]) {
+        for chunk in data.chunks(apps::MAX_FRAME) {
+            let _ = self.tx.send(TermFrame::Input(chunk.to_vec()));
+        }
+    }
+
+    /// The viewer's window changed size.
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let _ = self.tx.send(TermFrame::Resize { cols, rows });
+    }
+
+    /// End the session (the member's shell is closed). Idempotent; drop
+    /// does the same.
+    pub fn close(&self) {
+        // A non-terminal frame type the writer reads as "finish".
+        let _ = self.tx.send(TermFrame::Exit(0));
+    }
 }
 
 /// A terminal session open on this device.
@@ -487,6 +538,8 @@ struct Inner {
     /// Terminal sessions members have open here.
     terminals: Mutex<HashMap<u64, TerminalEntry>>,
     next_terminal_id: AtomicU64,
+    /// Ids for terminals this device views ([`Client::start_terminal`]).
+    next_viewer_id: AtomicU64,
     /// The state directory (the terminal session log).
     dir: PathBuf,
 }
@@ -1151,6 +1204,7 @@ impl Client {
             prompts: AtomicBool::new(false),
             terminals: Mutex::new(HashMap::new()),
             next_terminal_id: AtomicU64::new(1),
+            next_viewer_id: AtomicU64::new(1),
             dir: dir.clone(),
         });
         inner.rt().block_on(inner.refresh_control_offer());
@@ -1497,6 +1551,48 @@ impl Client {
             .await?;
             Ok(MeshStream { send, recv })
         })
+    }
+
+    /// Open a terminal on a member for an app: like
+    /// [`Client::open_terminal`] (blocks until started, with
+    /// [`Event::TerminalWaiting`] while asked), but the client runs the
+    /// stream: write through the handle, read the events.
+    pub fn start_terminal(&self, target: &str, cols: u16, rows: u16, term: &str) -> Result<TerminalHandle, ClientError> {
+        let stream = self.open_terminal(target, cols, rows, term)?;
+        let pk = parse_target(target)?;
+        let id = self.inner.next_viewer_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TermFrame>();
+        let inner = self.inner.clone();
+        self.inner.rt().spawn(async move {
+            let MeshStream { mut send, mut recv } = stream;
+            let writer = async move {
+                while let Some(f) = rx.recv().await {
+                    if matches!(f, TermFrame::Exit(_)) || send.write_all(&f.encode()).await.is_err() {
+                        break;
+                    }
+                }
+                // Closed or dropped: finishing our side ends the session.
+                let _ = send.finish();
+                std::future::pending::<()>().await;
+            };
+            let reader = async {
+                loop {
+                    match TermFrame::read(&mut recv).await {
+                        Ok(Some(TermFrame::Output(data))) => inner.emit(Event::TerminalOutput { session: id, data }),
+                        Ok(Some(TermFrame::Exit(code))) => return (Some(code), None),
+                        Ok(Some(_)) => {}
+                        Ok(None) => return (None, Some("the session ended without an exit status".to_string())),
+                        Err(e) => return (None, Some(e.to_string())),
+                    }
+                }
+            };
+            let (code, error) = tokio::select! {
+                end = reader => end,
+                () = writer => unreachable!(),
+            };
+            inner.emit(Event::TerminalExited { session: id, code, error });
+        });
+        Ok(TerminalHandle { id, peer: npub_of(&pk), tx })
     }
 
     /// Terminal sessions members have open on this device.

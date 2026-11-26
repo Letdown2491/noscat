@@ -8,6 +8,7 @@
 //! app's running [`NoscatClient`] for that directory when there is one,
 //! and otherwise run the device just for the call.
 
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -71,7 +72,10 @@ pub struct MeshMember {
     pub this_device: bool,
     /// Reachable from the internet, per its latest advert. Every mesh
     /// needs one such member for devices on different networks to meet.
-    pub reachable: bool,    /// Data can flow to it right now (a direct link or a live, possibly
+    pub reachable: bool,
+    /// It offers a terminal: show the Terminal action for it.
+    pub control: bool,
+    /// Data can flow to it right now (a direct link or a live, possibly
     /// relayed, connection). `online` only means its advert arrived.
     pub connected: bool,
 }
@@ -85,8 +89,131 @@ fn member(m: noscat_client::Member) -> MeshMember {
         admin: m.admin,
         this_device: m.this_device,
         reachable: m.reachable,
+        control: m.control,
         connected: m.connected,
     }
+}
+
+/// An access group: what an incoming request asks to do.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessGroup {
+    /// Files, chat, clipboard.
+    Send,
+    /// Forwards.
+    Services,
+    /// Terminal.
+    Control,
+}
+
+impl From<noscat_client::AccessGroup> for AccessGroup {
+    fn from(g: noscat_client::AccessGroup) -> Self {
+        match g {
+            noscat_client::AccessGroup::Send => Self::Send,
+            noscat_client::AccessGroup::Services => Self::Services,
+            noscat_client::AccessGroup::Control => Self::Control,
+        }
+    }
+}
+
+impl From<AccessGroup> for noscat_client::AccessGroup {
+    fn from(g: AccessGroup) -> Self {
+        match g {
+            AccessGroup::Send => Self::Send,
+            AccessGroup::Services => Self::Services,
+            AccessGroup::Control => Self::Control,
+        }
+    }
+}
+
+/// A member's rule for one group. `Ask` is for Control only.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessRule {
+    Allow,
+    Deny,
+    Ask,
+}
+
+impl From<noscat_client::AccessRule> for AccessRule {
+    fn from(r: noscat_client::AccessRule) -> Self {
+        match r {
+            noscat_client::AccessRule::Allow => Self::Allow,
+            noscat_client::AccessRule::Deny => Self::Deny,
+            noscat_client::AccessRule::Ask => Self::Ask,
+        }
+    }
+}
+
+impl From<AccessRule> for noscat_client::AccessRule {
+    fn from(r: AccessRule) -> Self {
+        match r {
+            AccessRule::Allow => Self::Allow,
+            AccessRule::Deny => Self::Deny,
+            AccessRule::Ask => Self::Ask,
+        }
+    }
+}
+
+/// The rule per group for one member (or the defaults).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct AccessRules {
+    pub send: AccessRule,
+    pub services: AccessRule,
+    pub control: AccessRule,
+}
+
+impl From<noscat_client::AccessRules> for AccessRules {
+    fn from(r: noscat_client::AccessRules) -> Self {
+        Self { send: r.send.into(), services: r.services.into(), control: r.control.into() }
+    }
+}
+
+/// How an access request ended, or that it waits.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessOutcome {
+    Waiting,
+    Allowed,
+    Denied,
+    TimedOut,
+    NoOneToAsk,
+}
+
+impl From<noscat_client::AccessOutcome> for AccessOutcome {
+    fn from(o: noscat_client::AccessOutcome) -> Self {
+        use noscat_client::AccessOutcome as O;
+        match o {
+            O::Waiting => Self::Waiting,
+            O::Allowed => Self::Allowed,
+            O::Denied => Self::Denied,
+            O::TimedOut => Self::TimedOut,
+            O::NoOneToAsk => Self::NoOneToAsk,
+        }
+    }
+}
+
+/// The answer to an asked request.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessAnswer {
+    Once,
+    Always,
+    Deny,
+}
+
+/// A refused or asked request, for review.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct AccessRequest {
+    pub id: u64,
+    pub peer: String,
+    pub group: AccessGroup,
+    pub age_secs: u64,
+    pub outcome: AccessOutcome,
+}
+
+/// A terminal session a member has open on this device.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct TerminalSessionInfo {
+    pub id: u64,
+    pub peer: String,
+    pub secs: u64,
 }
 
 /// What the client does on its own, delivered to the listener.
@@ -136,6 +263,22 @@ pub enum Event {
     /// A device that scanned this device's QR asks to be invited; call
     /// `invite(peer)` to add it.
     JoinRequest { peer: String, name: Option<String> },
+    /// A member asks for a group set to ask; answer with
+    /// `answerAccess(id, ..)` within 60 s. Only after
+    /// `setAccessPrompts(true)`.
+    AccessRequest { id: u64, peer: String, group: AccessGroup },
+    /// An asked request ended: close its prompt.
+    AccessResolved { id: u64, peer: String, group: AccessGroup, outcome: AccessOutcome },
+    /// `openTerminal` waits while the member asks its user.
+    TerminalWaiting { peer: String },
+    /// Host: a member's terminal session started here.
+    TerminalOpened { id: u64, peer: String },
+    /// Host: a session ended.
+    TerminalClosed { id: u64, peer: String, secs: u64, error: Option<String> },
+    /// Viewer: output of a terminal this device opened (raw bytes).
+    TerminalOutput { session: u64, data: Vec<u8> },
+    /// Viewer: that terminal ended; the last event of the session.
+    TerminalExited { session: u64, code: Option<i32>, error: Option<String> },
 }
 
 /// The FFI form of a client event; `None` for events the apps do not
@@ -173,13 +316,15 @@ fn event(ev: noscat_client::Event) -> Option<Event> {
         E::MeshChangeUndone => Event::MeshChangeUndone,
         E::MeshLeft => Event::MeshLeft,
         E::JoinRequest { peer, name } => Event::JoinRequest { peer, name },
-        // Access prompts reach the apps in 0.6.0 phase 4; until they call
-        // set_access_prompts(true) none are raised.
-        E::AccessRequest { .. }
-        | E::AccessResolved { .. }
-        | E::TerminalWaiting { .. }
-        | E::TerminalOpened { .. }
-        | E::TerminalClosed { .. } => return None,
+        E::AccessRequest { id, peer, group } => Event::AccessRequest { id, peer, group: group.into() },
+        E::AccessResolved { id, peer, group, outcome } => {
+            Event::AccessResolved { id, peer, group: group.into(), outcome: outcome.into() }
+        }
+        E::TerminalWaiting { peer } => Event::TerminalWaiting { peer },
+        E::TerminalOpened { id, peer } => Event::TerminalOpened { id, peer },
+        E::TerminalClosed { id, peer, secs, error } => Event::TerminalClosed { id, peer, secs, error },
+        E::TerminalOutput { session, data } => Event::TerminalOutput { session, data },
+        E::TerminalExited { session, code, error } => Event::TerminalExited { session, code, error },
     })
 }
 
@@ -509,12 +654,120 @@ impl NoscatClient {
         self.client.send_clipboard(&target_npub, &text);
     }
 
+    /// The mesh's STUN servers (`ip:port`); empty when it lists none.
+    /// Blocking.
+    pub fn mesh_stun(&self) -> Vec<String> {
+        self.client.mesh_stun()
+    }
+
+    /// The rules for members without their own.
+    pub fn access_defaults(&self) -> AccessRules {
+        self.client.access_defaults().into()
+    }
+
+    /// The rules that apply to a member.
+    pub fn access_of(&self, npub: String) -> Result<AccessRules, NoscatError> {
+        self.client.access_of(&npub).map(Into::into).map_err(NoscatError::fail)
+    }
+
+    /// Members with rules of their own (npubs).
+    pub fn access_custom(&self) -> Vec<String> {
+        self.client.access_devices().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// Set a member's rule (None npub: the default; None rule: back to the
+    /// default). Saved at once.
+    pub fn set_access(&self, npub: Option<String>, group: AccessGroup, rule: Option<AccessRule>) -> Result<(), NoscatError> {
+        self.client.set_access(npub.as_deref(), group.into(), rule.map(Into::into)).map_err(NoscatError::fail)
+    }
+
+    /// Drop a member's own rules.
+    pub fn reset_access(&self, npub: String) -> Result<(), NoscatError> {
+        self.client.reset_access(&npub).map_err(NoscatError::fail)
+    }
+
+    /// An app is here to answer access prompts.
+    pub fn set_access_prompts(&self, on: bool) {
+        self.client.set_access_prompts(on);
+    }
+
+    /// Answer an AccessRequest event.
+    pub fn answer_access(&self, id: u64, answer: AccessAnswer) -> Result<(), NoscatError> {
+        let answer = match answer {
+            AccessAnswer::Once => noscat_client::AccessAnswer::Once,
+            AccessAnswer::Always => noscat_client::AccessAnswer::Always,
+            AccessAnswer::Deny => noscat_client::AccessAnswer::Deny,
+        };
+        self.client.answer_access(id, answer).map_err(NoscatError::fail)
+    }
+
+    /// Waiting, then recent refused or asked requests, newest first.
+    pub fn access_requests(&self) -> Vec<AccessRequest> {
+        self.client
+            .access_requests()
+            .into_iter()
+            .map(|r| AccessRequest { id: r.id, peer: r.peer, group: r.group.into(), age_secs: r.age_secs, outcome: r.outcome.into() })
+            .collect()
+    }
+
+    /// Terminal sessions members have open on this device.
+    pub fn terminal_sessions(&self) -> Vec<TerminalSessionInfo> {
+        self.client
+            .terminal_sessions()
+            .into_iter()
+            .map(|t| TerminalSessionInfo { id: t.id, peer: t.peer, secs: t.secs })
+            .collect()
+    }
+
+    /// End a session open on this device.
+    pub fn end_terminal(&self, id: u64) -> bool {
+        self.client.end_terminal(id)
+    }
+
+    /// Open a terminal on a member. Blocks until its shell started (a
+    /// TerminalWaiting event fires while the member asks its user; up to a
+    /// minute); never on the main thread. Output and the end arrive as
+    /// TerminalOutput and TerminalExited events with the handle's id.
+    pub fn open_terminal(&self, target_npub: String, cols: u16, rows: u16) -> Result<Arc<Terminal>, NoscatError> {
+        let h = self.client.start_terminal(&target_npub, cols, rows, "xterm-256color").map_err(NoscatError::fail)?;
+        Ok(Arc::new(Terminal { handle: h }))
+    }
+
     /// Receive files into out_dir and bridge members' default-service
     /// streams to 127.0.0.1:bridge_port when given. Returns the data
     /// plane's UDP port.
     pub fn up(&self, out_dir: String, bridge_port: Option<u16>) -> Result<u16, NoscatError> {
         let bridge_to = bridge_port.map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)));
         self.client.up(PathBuf::from(out_dir), bridge_to).map(|a| a.port()).map_err(NoscatError::fail)
+    }
+}
+
+/// A terminal this device opened on a member.
+#[derive(uniffi::Object)]
+pub struct Terminal {
+    handle: noscat_client::TerminalHandle,
+}
+
+#[uniffi::export]
+impl Terminal {
+    /// The id its events carry.
+    pub fn id(&self) -> u64 {
+        self.handle.id()
+    }
+
+    /// Keystrokes or a paste, as raw terminal bytes.
+    pub fn write(&self, data: Vec<u8>) {
+        self.handle.write(&data);
+    }
+
+    /// The view changed size.
+    pub fn resize(&self, cols: u16, rows: u16) {
+        self.handle.resize(cols, rows);
+    }
+
+    /// End the session.
+    pub fn close(&self) {
+        self.handle.close();
     }
 }
 

@@ -145,6 +145,8 @@ pub fn print_event(ev: &Event, members: &[Member]) {
         Event::AccessResolved { peer, group, outcome, .. } => {
             eprintln!("# 🔐 {} {}: {outcome:?}", label(members, peer), group.name());
         }
+        // Viewer output belongs to the app that opened the session.
+        Event::TerminalOutput { .. } | Event::TerminalExited { .. } => {}
         Event::TerminalWaiting { peer } => eprintln!("# ⏳ waiting for {} to approve", label(members, peer)),
         Event::TerminalOpened { id, peer } => {
             eprintln!("# 🖥️  {} opened a terminal here (session {id}; `noscat sessions` lists, `noscat sessions end {id}` ends it)", label(members, peer));

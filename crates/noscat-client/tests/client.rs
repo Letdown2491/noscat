@@ -575,6 +575,28 @@ fn a_terminal_asks_first_then_runs_a_real_shell() {
     let (_, code) = session_output(&rt, &mut s);
     assert_ne!(code, 0, "an ended shell does not report success");
 
+    // The app-facing handle: output and the end arrive as events.
+    let h = a.start_terminal(&bn, 80, 24, "xterm").unwrap();
+    h.write(b"echo via-$((1+1))\nexit 7\n");
+    let mut out = Vec::new();
+    let code = wait(&ea, "handle exit", |e| match e {
+        Event::TerminalOutput { session, data } if *session == h.id() => {
+            out.extend_from_slice(data);
+            None
+        }
+        Event::TerminalExited { session, code, error } if *session == h.id() => {
+            assert!(error.is_none(), "{error:?}");
+            Some(*code)
+        }
+        _ => None,
+    });
+    assert_eq!(code, Some(7));
+    assert!(String::from_utf8_lossy(&out).contains("via-2"));
+    // Closing ends the host's session.
+    let h = a.start_terminal(&bn, 80, 24, "xterm").unwrap();
+    h.close();
+    wait(&ea, "closed handle exit", |e| matches!(e, Event::TerminalExited { session, .. } if *session == h.id()).then_some(()));
+
     drop(a);
     drop(b);
     drop(relay);

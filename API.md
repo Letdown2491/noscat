@@ -114,7 +114,7 @@ Mesh:
 | `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. Pass the scanned code whole: when it names relays (`?relay=`, a private mesh's), the join goes through them alone, logged in (NIP-42). |
 | `mesh_relays()` / `is_private()` | `Vec<String>` / `bool` | The mesh's relays; whether it is private. |
 | `set_mesh_relays(relays)` | `()` | Replace the mesh's relays (1 to 16 `wss://` URLs). Every member moves to the new list. |
-| `mesh_stun()` / `set_mesh_stun(servers)` | `Vec<String>` / `()` | The mesh's STUN servers (`ip:port`, no hostnames, at most 8; empty removes them). Each device uses them from its next start; config `stun_servers` overrides them. Without any, a shared mesh uses public STUN servers and a private mesh none. Not in the FFI yet. |
+| `mesh_stun()` / `set_mesh_stun(servers)` | `Vec<String>` / `()` | The mesh's STUN servers (`ip:port`, no hostnames, at most 8; empty removes them). Each device uses them from its next start; config `stun_servers` overrides them. Without any, a shared mesh uses public STUN servers and a private mesh none. The FFI has `meshStun()` (blocking). |
 | `set_private(bool)` | `()` | Make the mesh private (every device uses only the mesh's relays, logs in to them with NIP-42, leaves its own and the public ones) or shared again. noscat logs in to no other relay. |
 | `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
@@ -148,7 +148,7 @@ permitted" (chat: `ChatFailed`, files: `TransferFailed`).
 | `allow_once(device, group)` | `()` | Allow the waiting request, or else the member's next one (until the client stops). |
 | `access_requests()` | `Vec<AccessRequest>` | `id, peer, group, age_secs, outcome`: waiting requests, then the last 50 refused or asked ones, newest first. `AccessOutcome`: `Waiting, Allowed, Denied, TimedOut, NoOneToAsk`. A refusal repeating within a minute is one entry. |
 
-None of these are in the FFI yet (0.6.0 phase 4).
+In the FFI as `accessDefaults()`, `accessOf(npub)`, `accessCustom()` (npubs only), `setAccess`, `resetAccess`, `setAccessPrompts`, `answerAccess`, `accessRequests()`.
 
 Terminal (new in 0.6; hosting on computers only, viewing everywhere):
 
@@ -157,6 +157,7 @@ Terminal (new in 0.6; hosting on computers only, viewing everywhere):
 | `open_terminal(target, cols, rows, term)` | `MeshStream` | Blocks until the member's shell started; `TerminalWaiting` fires while it asks its user (it gives up after 60 s). The stream carries `TermFrame`s (`encode()`, `TermFrame::read(&mut stream)`): write `Input(bytes)` and `Resize { cols, rows }`, read `Output(bytes)` until `Exit(status)`. Dropping it ends the session. Refused: `ClientError::Stream` with "not permitted" or "does not offer this". |
 | `terminal_sessions()` | `Vec<TerminalSession>` | `id, peer, secs`: sessions members have open here. |
 | `end_terminal(id)` | `bool` | Kill a session's shell; the viewer gets `Exit(-1)`. Whether it was open. |
+| `start_terminal(target, cols, rows, term)` | `TerminalHandle` | For apps: `open_terminal` with the stream run by the client. `id()`, `peer()`, `write(bytes)`, `resize(cols, rows)`, `close()` (also on drop). Output arrives as `TerminalOutput { session, data }`, the end as `TerminalExited { session, code, error }` (the last event of the session). |
 | `state_dir()` | `&Path` | The state directory. Hosted sessions are logged in its `terminal.log` (who, when, how long, exit status). |
 
 A device offers a terminal (`Member::control`, the advert's `control`
@@ -223,6 +224,8 @@ Peers are bech32 npubs.
 | `TerminalWaiting` | `peer` | Viewer: `open_terminal` waits while `peer` asks its user. |
 | `TerminalOpened` | `id, peer` | Host: a member's session started here. Keep a banner up while any is open, with a way to end it. |
 | `TerminalClosed` | `id, peer, secs, error` | Host: a session ended (`error`: the shell could not start). |
+| `TerminalOutput` | `session, data` | Viewer: bytes from a `start_terminal` session, in order. |
+| `TerminalExited` | `session, code, error` | Viewer: the session ended: `code` the exit status (`-1` ended by the host), or `None` with `error` when the connection broke. |
 
 Inbound streams are always handled by the client, after its access check.
 
@@ -296,6 +299,15 @@ on the same directory fails with `Busy` until then.
 `receiveFile(outDir)`, `sendChat(target, text)`,
 `sendClipboard(target, text)`, `up(outDir, bridgePort?)`.
 
+New in 0.6: `meshStun()` (blocking), the access calls above,
+`terminalSessions()`, `endTerminal(id)`, and `openTerminal(target, cols,
+rows)` (blocking until the member's shell started; `TerminalWaiting`
+fires while it asks) returning a `Terminal` object: `id()`,
+`write(ByteArray)`, `resize(cols, rows)`, `close()`. `MeshMember` gains
+`control` (it offers a terminal), and the access types are UniFFI enums
+and records: `AccessGroup`, `AccessRule`, `AccessRules`, `AccessAnswer`,
+`AccessOutcome`, `AccessRequest`, `TerminalSessionInfo`.
+
 Threading contract (the Android app's rules 5 and 6, restated because they
 are the ones apps keep violating):
 
@@ -312,9 +324,11 @@ without `path`, and `Roster { members: List<MeshMember> }`. New in 0.5:
 `TransferStarted` (with `path: String?`) and an `id` on every transfer
 event, `MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
 `JoinRequest { peer, name? }` (a device that scanned this one's QR asks
-to be invited: show a prompt, then `invite(peer)`). The client's
-access and terminal events are not delivered over the FFI yet; they
-arrive with the access and terminal methods in 0.6.0 phase 4.
+to be invited: show a prompt, then `invite(peer)`). New in 0.6: `AccessRequest { id, peer, group }`,
+`AccessResolved { id, peer, group, outcome }`, `TerminalWaiting { peer }`,
+`TerminalOpened { id, peer }`, `TerminalClosed { id, peer, secs, error? }`,
+`TerminalOutput { session, data: ByteArray }` and
+`TerminalExited { session, code?, error? }`, as in Rust.
 
 ---
 
