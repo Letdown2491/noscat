@@ -1,63 +1,40 @@
-# noscat 0.6.0 plan: Bluetooth and a fully private mesh
+# noscat 0.6.0 plan: access and privacy
 
-0.6.0 lets a device with no working network (no Wi-Fi, no mobile data)
-stay in the mesh through a nearby member over Bluetooth LE. It ships in
-lockstep in noscat (Linux CLI), noscat-desktop (Linux) and
-noscat-android. macOS follows in 0.7.0 (below). Windows is out: it has
-no Bluetooth LE L2CAP channels for apps, and the alternative needs
-upstream FIPS work we are not taking on.
+0.6.0 lets a device decide what each member may do to it, adds a
+terminal into any member that allows it, and makes a private mesh reach
+no third party at all. It ships in lockstep in noscat, noscat-desktop and
+noscat-android.
 
-Decided 2026-11-25:
+Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
+0.7.0, macOS to 0.8.0, screen view and control to 0.9.0):
 
-- **Opt-in**, per device: a toggle in Settings (desktop and Android) and
-  a saved CLI setting (`--bluetooth`). A device with it on advertises,
-  accepts and relays for members nearby.
-- **Every Linux build has it**, glibc and musl alike: one static binary,
-  no new package dependencies. See [ADR 0008](adr/0008-bluetooth-through-the-host-bridge.md).
-- **Relays through the mesh in the same release**: without it, a
-  Bluetooth-only device would miss membership changes, invites and names
-  until it was back online.
-- **STUN from the mesh's own relay** ([#1](https://github.com/Letdown2491/noscat/issues/1)):
-  a private mesh then reaches no third party at all. Its protocol change
-  ships with the relay-proxy one, so the protocol moves once.
-- **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19)):
-  FreeBSD built with our two small patches in its own CI job, not waiting
-  on upstream; OpenBSD and NetBSD tried in the same pass.
+- **Terminal**: a Terminal action on a member opens a shell on it, like
+  SSH but with the mesh identity as the login: no keys, no sshd. Our own
+  app protocol, not SSH carried over a forward.
+- **Each device decides** which members get terminal access, through
+  per-device permissions (moved here from 0.7.0, since the terminal needs
+  them and the screen in 0.9.0 builds on them).
+- **Private meshes, all the way**: the apps' invite codes carry a private
+  mesh's relays ([#20](https://github.com/Letdown2491/noscat/issues/20)),
+  and STUN comes from the mesh's own relay ([#1](https://github.com/Letdown2491/noscat/issues/1)).
+- **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19)).
 
-## How it fits
+## Phase 0: pairing codes in the apps (#20)
 
-FIPS already routes through members: a device whose only link is
-Bluetooth to a laptop reaches every other member through that laptop,
-end to end encrypted (the laptop forwards what it cannot read). FIPS's
-Bluetooth transport uses LE L2CAP connection-oriented channels and a
-small advertised record naming the channel. Its host bridge
-(`host-ble-transport`) hands the platform calls to the application as
-commands (listen, advertise, scan, connect) and events (stream data,
-discoveries); noscat answers them per platform.
+- [ ] `noscat-ffi`: `NoscatClient::pairing_uri()`, a wrapper over
+      `Client::pairing_uri()`; listed in API.md.
+- [ ] noscat-android: cache it at client start (never on the main thread)
+      and use it in Invite a device instead of `Pairing.encode(npub)`.
 
-```
-  noscat-core dataplane ── FIPS node ── UDP transport (as today)
-                               └─────── BLE transport (host bridge)
-                                            │ commands / events
-            ┌───────────────────────────────┼──────────────────────┐
-     Linux: zbus (BlueZ D-Bus)       Android: Kotlin via      macOS (0.7):
-     + kernel L2CAP sockets          noscat-ffi               CoreBluetooth
-     (CLI and desktop app)                                    (CLI and app)
-```
-
-Admission is unchanged: links of any kind are members only (ADR 0005).
-
-## Phase 0: STUN for private meshes (#1)
-
-Independent of Bluetooth; first, while the spike answers its questions.
+## Phase 1: STUN for private meshes ([#1](https://github.com/Letdown2491/noscat/issues/1))
 
 - [ ] noscat-relay serves STUN on UDP (`STUN_PORT`, off by default), with
       pion/stun next to the relay: same box and operator as the relay, so
       no new exposure. Its own release, before noscat 0.6.0.
 - [ ] The mesh carries its STUN servers like its relays: in the group
       state of a private mesh and in the pairing QR
-      (`noscat:<npub>?relay=...&stun=...`), so a joining device uses them
-      from its first moment. Spec change in `docs/nip-noscat.md`.
+      (`noscat:<npub>?relay=...&stun=...`, which phase 0 puts in the
+      apps), so a joining device uses them from its first moment. Spec change in `docs/nip-noscat.md`.
 - [ ] A private mesh never falls back to the public defaults: with no
       STUN of its own, its devices advertise no NAT address and connect
       through the reachable member.
@@ -66,52 +43,76 @@ Independent of Bluetooth; first, while the spike answers its questions.
 - [ ] Deployment note: Caddy proxies TCP only, so STUN needs UDP 3478
       open on the relay's host (on vm-2252, ask before changing it).
 
-## Phase 1: spike (Linux)
+## Phase 2: per-device permissions
 
-- [ ] Linux bridge: BlueZ over zbus (advertising via LEAdvertisingManager1,
-      the bootstrap record via GattManager1, scanning via Adapter1 and
-      ObjectManager signals) plus kernel L2CAP sockets (AF_BLUETOOTH,
-      SOCK_SEQPACKET) through libc. Builds static on musl.
-- [ ] Two Linux machines, one with networking off: chat and a file
-      reach a third member through the other, over Bluetooth.
-- [ ] Measure throughput and latency over one Bluetooth hop; check what
-      a user needs to advertise without root (group or polkit) on Fedora,
-      Debian, Arch and Alpine.
-- [ ] Check whether dropping FIPS's own glibc Bluetooth code (`bluer`)
-      also drops the libdbus build dependency.
+A device decides which members may do what to it: for example, the
+desktop takes files from the VPS but not from the phone. The receiver
+enforces it on each incoming stream, whose opener is authenticated by
+the QUIC handshake, so a sender cannot get around it.
 
-## Phase 2: Linux CLI and desktop app
+- [ ] Actions: files, chat, clipboard, forwards to the default service,
+      forwards to served ports, terminal, and (0.9) screen view and
+      control.
+- [ ] Policy: a per-device default per action (everyone or nobody), plus
+      per-member overrides. Defaults stay "everyone" (terminal and screen:
+      nobody), so existing meshes behave as before. New members get the
+      defaults.
+- [ ] Local and private: kept in the device's own settings, not in the
+      group state. A refused stream gets a clear reason ("does not accept
+      files from this device"): every app protocol's refusal answer gains
+      a "not permitted" code (wire change in `docs/nip-noscat.md`). The
+      apps remember it and grey the action out for that member.
+- [ ] CLI: `noscat allow|deny <device> <action>`, `noscat permissions`.
+      Desktop and Android: the UI is designed with the user before it is
+      built (device rows have no overflow menu, decided for 0.5.1).
+- [ ] Not covered: membership. Every device stays an admin (ADR 0007).
 
-- [ ] `Dataplane` config gains Bluetooth (off by default); the client
-      exposes it (`ClientConfig.bluetooth`, `set_bluetooth`).
-- [ ] CLI: `--bluetooth`, saved like the device name; `noscat status`
-      shows Bluetooth state (off, on, unavailable: no BlueZ, no adapter,
-      not permitted) and Bluetooth links.
-- [ ] Desktop: a Settings toggle with the same states and a hint when
-      advertising is not permitted.
-- [ ] Member list shows which links run over Bluetooth (CLI, desktop).
+## Phase 3: terminal (protocol, host, CLI)
 
-## Phase 3: Android
+```
+  viewer (CLI or app)                      member
+  ───────────────────                      ─────────────────────────
+  terminal emulator <── output ── stream ── PTY <── login shell
+  keys, resizes     ── input  ──> stream ──> PTY
+```
 
-- [ ] noscat-ffi exposes the bridge (commands out, events in).
-- [ ] Kotlin side: L2CAP channels (Android 10+), advertising and
-      scanning, Bluetooth permissions, runs in the existing foreground
-      service.
-- [ ] Settings toggle; the member list marks Bluetooth links.
-- [ ] Test on the Pixel against a Linux desktop: phone in airplane mode
-      with Bluetooth on stays in the mesh through the desktop.
+- [ ] Protocol (`docs/nip-noscat.md`): a Terminal app protocol (tag 4).
+      The opener sends the terminal size and `TERM`; the accepter answers
+      started, not permitted, or unavailable; then framed messages: input
+      and resizes one way, output and the exit status the other.
+- [ ] Host: a PTY through `portable-pty` (Linux, macOS, BSD; ConPTY on
+      Windows) running the user's login shell in their home directory, as
+      the user running noscat (never elevated). A noscat run as a system
+      service runs shells as its service user; the docs say so.
+- [ ] Off unless allowed: terminal is a permission action whose default
+      is nobody. A device that allows anyone says so in its advert, so
+      apps show Terminal only on members that offer it.
+- [ ] On the host: each session logged (who, when, how long), open
+      sessions listed and endable (`noscat sessions`, and in the desktop
+      app), and a notice when one starts.
+- [ ] CLI client: `noscat shell <device>` (raw mode, resizes followed,
+      exit status passed through).
+- [ ] Rig test: a session through the reachable member at 3% loss stays
+      usable; a member without permission gets "not permitted".
 
-## Phase 4: relays through the mesh
+## Phase 4: terminal in the apps
 
-- [ ] A device with no route to its mesh relays reaches them through a
-      member that has one: the member proxies the relay connection over
-      a stream (members only, the relays the mesh lists only).
-- [ ] Private meshes: login (NIP-42) still uses the device's own key,
-      end to end through the proxy.
-- [ ] Invites, removals, names and presence arrive on a Bluetooth-only
-      device; it catches up when its relay route comes back.
+- [ ] `noscat-ffi`: open a session (`openTerminal(target, cols, rows)`)
+      returning a handle with `write`, `resize` and `close`; output and
+      the exit arrive as events (on a background thread: apps hop to
+      their UI thread).
+- [ ] noscat-desktop: an embedded terminal (`alacritty_terminal` for the
+      emulation, drawn in GPUI, as Zed does). Launching a system terminal
+      running the CLI is not an option: the CLI on the same computer is a
+      different device. As host, Settings shows open sessions.
+- [ ] noscat-android (client only; a shell into the app's sandbox is
+      useless): a terminal view with a row of extra keys (Esc, Ctrl, Alt,
+      Tab, arrows). Check the license of any terminal library before
+      using it.
+- [ ] Where the action sits in each app is designed with the user before
+      it is built.
 
-## Phase 4b: BSDs (#19)
+## Phase 5: BSD binaries ([#19](https://github.com/Letdown2491/noscat/issues/19))
 
 Decided 2026-11-25 (option A): ship BSD binaries built with our patches
 instead of waiting for upstream. Independent of everything else.
@@ -132,66 +133,8 @@ instead of waiting for upstream. Independent of everything else.
 - [ ] When upstream ships the fixes, drop the patches; the upstream
       draft stays unposted unless approved.
 
-## Splits and healing
+## Phase 6: release
 
-Decided 2026-11-25: no relay or event sync on each device. Relays carry
-only the control plane (membership, invites, names, presence), and a
-membership change happens only once a relay has accepted it (`commit`
-publishes first and drops the change otherwise). So a group of devices
-cut off from every relay (an island) keeps its data plane (chat, files,
-forwards among its members, over any link including Bluetooth) but
-cannot change membership; when a route to a relay comes back, its
-devices catch up in order. History stays linear: nothing to reconcile.
-
-- [ ] Relays through the mesh work in either direction: whichever member
-      regains a relay route serves the others (phase 4).
-- [ ] An island device that tries to invite or remove gets a clear error
-      (no relay reachable), in the CLI and both apps.
-- [ ] Test in the netns rig: four devices, split into two islands, the
-      online island adds a device and removes one; on heal the offline
-      island converges on the same members.
-- [ ] Document the two edge cases: a removal made during a split takes
-      effect for the other island only once it catches up; two islands
-      that each reach a different relay could both commit, which the
-      convergence rule (ADR 0007) resolves within 5 commits per side.
-
-## Phase 5: release
-
-- [ ] Docs in all three repos (README, API, man page, nip-noscat for any
-      wire addition, CONTEXT terms), CI green, netns suite, a two-machine
-      Bluetooth test written down as a manual check.
+- [ ] Docs in all three repos (README, API, man page, nip-noscat for the
+      wire changes, CONTEXT terms), CI green, netns suite.
 - [ ] Lockstep 0.6.0 per `docs/releasing.md`.
-
-# noscat 0.7.0: macOS and per-device permissions
-
-## Permissions (decided 2026-11-25)
-
-A device decides which members may do what to it: for example, the
-desktop takes files from the VPS but not from the phone. The receiver
-enforces it on each incoming stream, whose opener is authenticated by
-the QUIC handshake, so a sender cannot get around it.
-
-- [ ] Actions: files, chat, clipboard, forwards to the default service,
-      forwards to served ports, and (0.8) screen view and control.
-- [ ] Policy: a per-device default per action (everyone or nobody), plus
-      per-member overrides. Defaults stay "everyone" (screen: nobody), so
-      existing meshes behave as before. New members get the defaults.
-- [ ] Local and private: kept in the device's own settings, not in the
-      group state. A refused stream gets a clear reason ("does not accept
-      files from this device"); the apps remember it and grey the action
-      out for that member.
-- [ ] CLI: `noscat allow|deny <device> <action>`, `noscat permissions`.
-      Desktop and Android: toggles in each device's detail view.
-- [ ] Not covered: membership. Every device stays an admin (ADR 0007).
-
-## macOS
-
-
-- [ ] noscat-desktop on macOS: tray, Keychain for the storage key, an
-      app bundle, signing and notarization (needs an Apple developer
-      account).
-- [ ] Bluetooth on macOS through CoreBluetooth in noscat-core (shared by
-      the CLI and the app). The app asks for Bluetooth permission once.
-      The CLI gets it when run from a terminal that has the permission;
-      a background service (`brew services`) cannot ask, so the docs
-      point background use with Bluetooth at the desktop app.
