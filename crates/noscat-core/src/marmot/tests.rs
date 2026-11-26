@@ -89,7 +89,7 @@ fn create_invite_and_talk() {
     // Every device is an admin.
     assert!(b.g.members().unwrap().iter().all(|m| m.admin));
 
-    let ev = b.g.send_advert(Some(r#"{"x":1}"#), "laptop", true, false).unwrap();
+    let ev = b.g.send_advert(Some(r#"{"x":1}"#), "laptop", true, false, false).unwrap();
     assert_eq!(ev.kind, Kind::Custom(GROUP_KIND));
     let got = a.g.process(&ev).unwrap();
     let got = apps(&got);

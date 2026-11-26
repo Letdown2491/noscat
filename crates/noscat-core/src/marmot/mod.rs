@@ -1553,8 +1553,13 @@ impl MeshGroup {
         name: &str,
         reachable: bool,
         control: bool,
+        hello: bool,
     ) -> Result<Event, MeshError> {
         let mut tags = Vec::new();
+        if hello {
+            // This device just started: members answer with their adverts.
+            tags.push(vec!["hello".to_string(), "1".to_string()]);
+        }
         if !name.is_empty() {
             tags.push(vec!["name".to_string(), name.to_string()]);
         }

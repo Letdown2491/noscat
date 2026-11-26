@@ -358,3 +358,38 @@ async fn catch_up_through_a_capped_relay() {
         let _ = std::fs::remove_dir_all(&n.dir);
     }
 }
+
+/// A member restarted moments after its last advert knows nobody's
+/// endpoints (the adverts it saw are marked seen, so catching up skips
+/// them), and the others still count it as online. Its first advert says
+/// `hello`, so they answer at once instead of at their next tick, two
+/// minutes away.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quick_restart_hears_from_members_at_once() {
+    logs();
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (na, nb) = (node("qa"), node("qb"));
+    let all = [&na, &nb];
+    let a = start(&na, "alpha", &url, &all).await;
+    let b = start(&nb, "bravo", &url, &all).await;
+    a.create("home").await.unwrap();
+    invite_and_join(&a, &b).await;
+    let online = |d: Device, who: PublicKey| async move { d.members().await.iter().any(|m| m.device == who && m.online) };
+    until("a sees b", || online(a.clone(), nb.id.public_key())).await;
+    until("b sees a", || online(b.clone(), na.id.public_key())).await;
+
+    b.shutdown().await;
+    drop(b);
+    let b = start(&nb, "bravo", &url, &all).await;
+    let t = std::time::Instant::now();
+    until("the restarted b hears from a", || online(b.clone(), na.id.public_key())).await;
+    assert!(t.elapsed() < Duration::from_secs(20), "took {:?}", t.elapsed());
+
+    for d in [a, b] {
+        d.shutdown().await;
+    }
+    for n in [&na, &nb] {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}

@@ -208,8 +208,12 @@ struct Inner {
     expected_inviter: StdMutex<Option<PublicKey>>,
     subscribed: StdMutex<Vec<[u8; 32]>>,
     sync: StdMutex<SyncState>,
-    /// When this device last answered a returning member with its advert.
-    last_reply: StdMutex<Option<std::time::Instant>>,
+    /// When this device last answered each returning member with its
+    /// advert.
+    last_reply: StdMutex<HashMap<PublicKey, std::time::Instant>>,
+    /// An advert of this run has reached a relay: later ones no longer
+    /// say `hello`.
+    greeted: std::sync::atomic::AtomicBool,
     /// Newest join request time per device, so relays replaying the inbox
     /// do not repeat a prompt.
     join_requests: StdMutex<HashMap<PublicKey, u64>>,
@@ -397,7 +401,8 @@ impl Device {
             expected_inviter: StdMutex::new(None),
             subscribed: StdMutex::new(Vec::new()),
             sync: StdMutex::new(sync),
-            last_reply: StdMutex::new(None),
+            last_reply: StdMutex::new(HashMap::new()),
+            greeted: std::sync::atomic::AtomicBool::new(false),
             join_requests: StdMutex::new(HashMap::new()),
             login,
             join_relays: StdMutex::new(join_relays),
@@ -1068,22 +1073,29 @@ impl Device {
                 names.insert(device, n.clone());
             }
         }
-        // A member we have not heard from lately (just started, or back
-        // from offline) needs our endpoints too: answer with our advert
-        // instead of making it wait for the next tick. Debounced so a
-        // mesh full of restarts does not echo.
-        let stale = self
-            .inner
-            .presence
-            .age_secs(&device.to_hex())
-            .is_none_or(|age| age > ADVERT_INTERVAL.as_secs() + 30);
+        // A member that just started (its first advert says `hello`), or
+        // that we have not heard from lately (back from offline), needs our
+        // endpoints too: answer with our advert instead of making it wait
+        // for our next tick. A restarted member knows nobody's endpoints:
+        // the adverts it saw before are already marked seen, so catching
+        // up does not bring them back, and the age alone misses a quick
+        // restart.
+        // A `hello` is always answered (replies never carry it, so it
+        // cannot echo); the age-based case is debounced.
+        let hello = ev.tag("hello") == Some("1");
+        let stale = hello
+            || self
+                .inner
+                .presence
+                .age_secs(&device.to_hex())
+                .is_none_or(|age| age > ADVERT_INTERVAL.as_secs() + 30);
         self.inner.presence.note(&device.to_hex());
         if stale && device != self.device() {
             let due = {
                 let mut last = self.inner.last_reply.lock().unwrap_or_else(|p| p.into_inner());
-                let due = last.is_none_or(|t| t.elapsed() > ADVERT_REPLY_DEBOUNCE);
+                let due = hello || last.get(&device).is_none_or(|t| t.elapsed() > ADVERT_REPLY_DEBOUNCE);
                 if due {
-                    *last = Some(std::time::Instant::now());
+                    last.insert(device, std::time::Instant::now());
                 }
                 due
             };
@@ -1176,18 +1188,20 @@ impl Device {
                 None
             }
         };
+        let hello = !self.inner.greeted.load(std::sync::atomic::Ordering::Relaxed);
         let ev = {
             let mut g = self.inner.group.lock().await;
             if !g.in_mesh() {
                 return;
             }
-            g.send_advert(advert.as_deref(), &self.name(), self.is_reachable(), self.control_offered())
+            g.send_advert(advert.as_deref(), &self.name(), self.is_reachable(), self.control_offered(), hello)
         };
         match ev {
             Ok(ev) => {
                 let relays = self.all_relays().await;
-                if let Err(e) = self.publish(&ev, &relays).await {
-                    tracing::warn!("advert not published: {e}");
+                match self.publish(&ev, &relays).await {
+                    Ok(()) => self.inner.greeted.store(true, std::sync::atomic::Ordering::Relaxed),
+                    Err(e) => tracing::warn!("advert not published: {e}"),
                 }
             }
             Err(e) => tracing::warn!("advert: {e}"),

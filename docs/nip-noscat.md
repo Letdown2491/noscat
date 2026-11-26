@@ -194,11 +194,20 @@ application message whose inner event is:
 |---|---|
 | kind | `21195` |
 | content | the device's FIPS overlay advert (a signed kind 37195 event, JSON), or empty while it has none |
-| tags | `["name", "<device name>"]`, optional; `["reachable", "1"]` when the device is reachable from the internet (a fixed public UDP endpoint), so members can tell whether the mesh has one; `["control", "1"]` when the device offers control protocols (a terminal); it says nothing about who may use them |
+| tags | `["name", "<device name>"]`, optional; `["reachable", "1"]` when the device is reachable from the internet (a fixed public UDP endpoint), so members can tell whether the mesh has one; `["control", "1"]` when the device offers control protocols (a terminal); it says nothing about who may use them; `["hello", "1"]` on the first advert a device publishes after it starts |
 
 A member is online while its latest advert is under 10 minutes old.
 Members feed the FIPS advert to their data plane; it is how they learn
 each other's endpoints. Adverts never go to public relays.
+
+A device that starts knows no member's endpoints: the adverts it
+processed before are already marked seen, so catching up on the relays
+does not bring them back. On an advert with `hello`, or from a member not
+heard from for over 2.5 minutes, a member SHOULD answer with its own
+advert at once instead of at its next tick: always for `hello` (answers
+never carry it, so it cannot echo), and for the second case at most once
+per 10 seconds per member. Devices that predate `hello` ignore it, and only answer the
+second case.
 
 ## Data plane
 
