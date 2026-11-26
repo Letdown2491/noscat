@@ -145,6 +145,14 @@ pub fn print_event(ev: &Event, members: &[Member]) {
         Event::AccessResolved { peer, group, outcome, .. } => {
             eprintln!("# 🔐 {} {}: {outcome:?}", label(members, peer), group.name());
         }
+        Event::TerminalWaiting { peer } => eprintln!("# ⏳ waiting for {} to approve", label(members, peer)),
+        Event::TerminalOpened { id, peer } => {
+            eprintln!("# 🖥️  {} opened a terminal here (session {id}; `noscat sessions` lists, `noscat sessions end {id}` ends it)", label(members, peer));
+        }
+        Event::TerminalClosed { id, peer, secs, error } => match error {
+            Some(e) => eprintln!("# ⚠️  terminal for {} could not start: {e}", label(members, peer)),
+            None => eprintln!("# 🖥️  {}'s terminal session {id} ended after {secs} s", label(members, peer)),
+        },
         Event::JoinRequest { peer, name } => {
             let who = name.as_deref().unwrap_or("a device");
             eprintln!(

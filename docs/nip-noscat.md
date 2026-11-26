@@ -194,7 +194,7 @@ application message whose inner event is:
 |---|---|
 | kind | `21195` |
 | content | the device's FIPS overlay advert (a signed kind 37195 event, JSON), or empty while it has none |
-| tags | `["name", "<device name>"]`, optional; `["reachable", "1"]` when the device is reachable from the internet (a fixed public UDP endpoint), so members can tell whether the mesh has one |
+| tags | `["name", "<device name>"]`, optional; `["reachable", "1"]` when the device is reachable from the internet (a fixed public UDP endpoint), so members can tell whether the mesh has one; `["control", "1"]` when the device offers control protocols (a terminal); it says nothing about who may use them |
 
 A member is online while its latest advert is under 10 minutes old.
 Members feed the FIPS advert to their data plane; it is how they learn
@@ -293,6 +293,28 @@ Port `0` is the member's default service, whatever it chose to expose.
 Any other port is `127.0.0.1:<port>` on the member and is refused unless
 the member serves that port. Receivers MUST NOT bridge to ports they did
 not explicitly serve.
+
+### Terminal (tag 4)
+
+```
+opener:   [4][u16 cols][u16 rows][u8 term_len][term]
+accepter: [3]* then [u8 status]   3 = waiting for approval, 0 = started,
+                                  1 = unavailable, 2 = not permitted
+then frames both ways: [u8 type][u32 len][payload]
+  opener:   0 = input (raw bytes), 1 = resize (u16 cols, u16 rows)
+  accepter: 2 = output (raw bytes), 3 = exit (i32 status), last
+```
+
+A control protocol: the accepter runs the user's login shell in a PTY of
+the given size, with `TERM` set from `term` (printable ASCII, at most 64
+bytes; anything else becomes `xterm-256color`), as the user running the
+accepter and never elevated. It MAY send `3` any number of times while it
+asks its user. Frame payloads are at most 65536 bytes; receivers skip
+frame types they do not know. When the shell exits the accepter sends
+the exit status (`-1` when unknown, e.g. the session was ended) and
+finishes the stream. The opener finishing its side ends the session.
+Devices that cannot host a terminal (phones) answer `1`, and do not set
+`["control", "1"]` in their adverts.
 
 ## Pairing QR codes
 

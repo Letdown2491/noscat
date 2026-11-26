@@ -172,9 +172,16 @@ noscat mesh remove <npub>
 noscat mesh leave              # this device leaves
 ```
 
+**A shell on another device.** `noscat shell laptop` opens laptop's login
+shell in your terminal, as laptop's user. Laptop asks first (in its app)
+unless it already allows you; a server with no app refuses until you run
+`noscat allow <you> control` on it. On the host, `noscat sessions` lists
+open sessions and `noscat sessions end <id>` ends one; each is logged in
+`terminal.log` in the state directory.
+
 **Who may do what.** Each device decides what every member may do to it,
 in three groups: `send` (files, chat, clipboard), `services` (forwards)
-and `control` (the terminal, coming in 0.6). Send and services are
+and `control` (the terminal). Send and services are
 allowed, as before; control asks on first use, and a device with no app
 to answer (a server running `noscat up`) refuses it unless you allow it
 ahead of time. The rules stay on the device; other members never see

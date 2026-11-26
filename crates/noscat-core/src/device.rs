@@ -138,6 +138,9 @@ pub struct MemberStatus {
     /// Its latest advert says it is reachable from the internet (run with
     /// `--reachable`); every mesh needs one such member.
     pub reachable: bool,
+    /// Its latest advert offers control (a terminal); whether this device
+    /// may use it is the member's decision.
+    pub control: bool,
 }
 
 /// Something that happened on the mesh.
@@ -197,6 +200,10 @@ struct Inner {
     my_name: StdMutex<String>,
     /// Members whose latest advert says they are reachable.
     reachable: StdMutex<std::collections::HashSet<PublicKey>>,
+    /// Members whose latest advert offers control.
+    controls: StdMutex<std::collections::HashSet<PublicKey>>,
+    /// This device offers control (set by its client).
+    control_offered: std::sync::atomic::AtomicBool,
     /// Accept a Welcome only from this device (set by [`Device::join`]).
     expected_inviter: StdMutex<Option<PublicKey>>,
     subscribed: StdMutex<Vec<[u8; 32]>>,
@@ -385,6 +392,8 @@ impl Device {
             names: StdMutex::new(HashMap::new()),
             my_name: StdMutex::new(my_name),
             reachable: StdMutex::new(std::collections::HashSet::new()),
+            controls: StdMutex::new(std::collections::HashSet::new()),
+            control_offered: std::sync::atomic::AtomicBool::new(false),
             expected_inviter: StdMutex::new(None),
             subscribed: StdMutex::new(Vec::new()),
             sync: StdMutex::new(sync),
@@ -449,6 +458,7 @@ impl Device {
         let infos = self.inner.group.lock().await.members().unwrap_or_default();
         let names = self.inner.names.lock().map(|n| n.clone()).unwrap_or_default();
         let reachable = self.inner.reachable.lock().map(|r| r.clone()).unwrap_or_default();
+        let controls = self.inner.controls.lock().map(|r| r.clone()).unwrap_or_default();
         infos
             .into_iter()
             .map(|m| {
@@ -466,6 +476,7 @@ impl Device {
                     online: m.this_device || self.inner.presence.is_online(&hex),
                     last_seen_secs: if m.this_device { Some(0) } else { self.inner.presence.age_secs(&hex) },
                     reachable: if m.this_device { self.is_reachable() } else { reachable.contains(&m.device) },
+                    control: if m.this_device { self.control_offered() } else { controls.contains(&m.device) },
                 }
             })
             .collect()
@@ -1045,6 +1056,13 @@ impl Device {
                 r.remove(&device);
             }
         }
+        if let Ok(mut r) = self.inner.controls.lock() {
+            if ev.tag("control") == Some("1") {
+                r.insert(device);
+            } else {
+                r.remove(&device);
+            }
+        }
         if let Some(n) = &name {
             if let Ok(mut names) = self.inner.names.lock() {
                 names.insert(device, n.clone());
@@ -1108,6 +1126,20 @@ impl Device {
         Ok(())
     }
 
+    /// Whether this device offers control (a terminal).
+    #[must_use]
+    pub fn control_offered(&self) -> bool {
+        self.inner.control_offered.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Offer control or stop: members learn it from the next advert, sent
+    /// now when it changed.
+    pub async fn set_control_offered(&self, on: bool) {
+        if self.inner.control_offered.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+            self.send_advert().await;
+        }
+    }
+
     /// Whether this device runs reachable from the internet.
     fn is_reachable(&self) -> bool {
         matches!(self.inner.cfg.dataplane.reachability, crate::dataplane::Reachability::Public { .. })
@@ -1149,7 +1181,7 @@ impl Device {
             if !g.in_mesh() {
                 return;
             }
-            g.send_advert(advert.as_deref(), &self.name(), self.is_reachable())
+            g.send_advert(advert.as_deref(), &self.name(), self.is_reachable(), self.control_offered())
         };
         match ev {
             Ok(ev) => {

@@ -118,6 +118,20 @@ run, and a running device tells the members right away.
 .B \-\-name
 overrides it for one run.
 .TP
+.B shell \fImember\fR
+Open a shell on a member in this terminal (raw mode, window size
+followed). The member runs its user's login shell as that user. Unless
+it already allows this device
+.BR control ,
+it asks its user first and this waits up to a minute; a member with no
+app to answer refuses. Exits with the remote shell's status.
+.TP
+.B sessions \fR[\fBend\fR \fIid\fR]
+List the terminal sessions members have open on this device, or end one
+(its shell is killed). Each session is logged in
+.IR terminal.log
+in the state directory.
+.TP
 .B access \fR[\fBreset\fR \fImember\fR]
 Show who may do what to this device: the rules for everyone, members'
 own rules, and recent refused or asked requests. Incoming requests fall

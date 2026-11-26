@@ -43,7 +43,10 @@ use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use noscat_core::{pairing_uri, parse_pairing_relays, parse_pairing_target};
+mod terminal;
+
 pub use noscat_core::access::{Group as AccessGroup, Rule as AccessRule};
+pub use noscat_core::apps::TermFrame;
 pub use noscat_core::relay::{DEFAULT_RELAYS, default_relays};
 
 /// How long a dial waits for a member to become reachable.
@@ -162,6 +165,10 @@ pub struct Member {
     /// Reachable from the internet, per its latest advert (this device:
     /// per its own config). Every mesh needs one.
     pub reachable: bool,
+    /// It offers a terminal (per its latest advert; this device: its own
+    /// offer). Show the terminal action only for these; the member still
+    /// decides per request.
+    pub control: bool,
     /// Data can flow to it right now: a direct link, or a live connection
     /// (possibly relayed through another member). `online` only says its
     /// advert arrived over the relays; a member can be online and still
@@ -228,6 +235,28 @@ pub enum Event {
     /// An asked request ended (answered, or timed out as denied). Close
     /// its prompt.
     AccessResolved { id: u64, peer: String, group: AccessGroup, outcome: AccessOutcome },
+    /// Viewer: [`Client::open_terminal`] waits while the member asks its
+    /// user. Show "waiting for <member> to approve".
+    TerminalWaiting { peer: String },
+    /// Host: a member's terminal session started here. Show it (the apps
+    /// keep a banner up while any session is open).
+    TerminalOpened { id: u64, peer: String },
+    /// Host: a session ended (`error` set when the shell could not run).
+    TerminalClosed { id: u64, peer: String, secs: u64, error: Option<String> },
+}
+
+/// A terminal session open on this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSession {
+    pub id: u64,
+    pub peer: String,
+    pub secs: u64,
+}
+
+struct TerminalEntry {
+    peer: PublicKey,
+    started: Instant,
+    end: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// How an access request ended, or that it still waits.
@@ -455,6 +484,11 @@ struct Inner {
     asks: Mutex<Asks>,
     /// An app answers access prompts; without one, asking means denying.
     prompts: AtomicBool,
+    /// Terminal sessions members have open here.
+    terminals: Mutex<HashMap<u64, TerminalEntry>>,
+    next_terminal_id: AtomicU64,
+    /// The state directory (the terminal session log).
+    dir: PathBuf,
 }
 
 /// What only [`Client`] handles hold: the runtime, the directory lock and
@@ -512,6 +546,23 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Weak<Owner>>> {
 
 fn canonical(dir: &Path) -> PathBuf {
     std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// Now as `YYYY-MM-DDTHH:MM:SSZ` (for the terminal log).
+fn utc_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days.cast_signed() + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 fn npub_of(pk: &PublicKey) -> String {
@@ -619,6 +670,7 @@ impl Inner {
                 online: m.online,
                 last_seen_secs: m.last_seen_secs,
                 reachable: m.reachable,
+                control: m.control,
                 connected: !m.this_device && (direct.contains(&m.device) || live.contains(&m.device)),
             })
             .collect();
@@ -727,7 +779,21 @@ impl Inner {
     async fn handle(self: Arc<Self>, pk: PublicKey, peer: String, incoming: Incoming) {
         // The opener is the QUIC peer, authenticated by the handshake: it
         // cannot claim to be another member.
-        if !self.authorize(pk, incoming.group(), std::future::ready(())).await {
+        let mut incoming = incoming;
+        if let Incoming::Terminal(_) = incoming {
+            if !terminal::SUPPORTED {
+                if let Incoming::Terminal(t) = incoming {
+                    t.refuse().await;
+                }
+                return;
+            }
+        }
+        let group = incoming.group();
+        let allowed = match &mut incoming {
+            Incoming::Terminal(t) => self.authorize(pk, group, t.waiting()).await,
+            _ => self.authorize(pk, group, std::future::ready(())).await,
+        };
+        if !allowed {
             incoming.not_permitted().await;
             return;
         }
@@ -776,6 +842,7 @@ impl Inner {
                     Err(e) => self.emit(Event::TransferFailed { id, peer, path: None, error: e.to_string() }),
                 }
             }
+            Incoming::Terminal(t) => self.host_terminal(pk, peer, t).await,
             Incoming::Forward(fw) => {
                 let (stdio, to) = {
                     let Ok(mut s) = self.serving.lock() else { return };
@@ -803,6 +870,52 @@ impl Inner {
                 }
             }
         }
+    }
+
+    async fn host_terminal(self: &Arc<Self>, pk: PublicKey, peer: String, t: apps::IncomingTerminal) {
+        let id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed);
+        let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut m) = self.terminals.lock() {
+            m.insert(id, TerminalEntry { peer: pk, started: Instant::now(), end: Some(end_tx) });
+        }
+        self.log_terminal(&format!("{peer} opened session {id}"));
+        self.emit(Event::TerminalOpened { id, peer: peer.clone() });
+        let res = terminal::host(t, end_rx).await;
+        let secs = self.terminals.lock().ok().and_then(|mut m| m.remove(&id)).map_or(0, |e| e.started.elapsed().as_secs());
+        match &res {
+            Ok(code) => self.log_terminal(&format!("{peer} session {id} ended after {secs} s, exit {code}")),
+            Err(e) => self.log_terminal(&format!("{peer} session {id} failed: {e}")),
+        }
+        self.emit(Event::TerminalClosed { id, peer, secs, error: res.err() });
+    }
+
+    /// Append to `<dir>/terminal.log`: who opened a session, when, and for
+    /// how long.
+    fn log_terminal(&self, what: &str) {
+        use std::io::Write as _;
+        tracing::info!("terminal: {what}");
+        let line = format!("{} {what}\n", utc_now());
+        let path = self.dir.join("terminal.log");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        if let Ok(mut f) = opts.open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+
+    /// Offer control in adverts when some member could get in: a member or
+    /// the default allows it, or asks and an app is here to answer.
+    async fn refresh_control_offer(&self) {
+        let prompts = self.prompts.load(Ordering::Relaxed);
+        let opens = |r: AccessRule| r == AccessRule::Allow || (r == AccessRule::Ask && prompts);
+        let offered = terminal::SUPPORTED
+            && self.access.lock().is_ok_and(|a| {
+                opens(a.default_rule(AccessGroup::Control))
+                    || a.devices().iter().any(|d| a.own_rule(d, AccessGroup::Control).is_some_and(opens))
+            });
+        self.device.set_control_offered(offered).await;
     }
 
     /// Whether `peer` may do what `group` covers. Allow and deny rules
@@ -1036,7 +1149,11 @@ impl Client {
             access: Mutex::new(access),
             asks: Mutex::new(Asks::default()),
             prompts: AtomicBool::new(false),
+            terminals: Mutex::new(HashMap::new()),
+            next_terminal_id: AtomicU64::new(1),
+            dir: dir.clone(),
         });
+        inner.rt().block_on(inner.refresh_control_offer());
         inner.pump();
         let owner = Arc::new(Owner { rt: Some(rt), inner: inner.clone(), dir, temp_dir, _lock: lock });
         if let Ok(mut r) = registry().lock() {
@@ -1057,6 +1174,12 @@ impl Client {
     #[must_use]
     pub fn npub(&self) -> &str {
         &self.inner.npub
+    }
+
+    /// The state directory (identity, mesh, access rules, terminal log).
+    #[must_use]
+    pub fn state_dir(&self) -> &Path {
+        &self.inner.dir
     }
 
     /// Take the event stream (once per client). Events arrive on a
@@ -1255,16 +1378,16 @@ impl Client {
     /// Control only. Saved at once.
     pub fn set_access(&self, device: Option<&str>, group: AccessGroup, rule: Option<AccessRule>) -> Result<(), ClientError> {
         let pk = device.map(parse_target).transpose()?;
-        let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
-        a.set(pk.as_ref(), group, rule)?;
+        self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?.set(pk.as_ref(), group, rule)?;
+        self.inner.rt().block_on(self.inner.refresh_control_offer());
         Ok(())
     }
 
     /// Drop all of `device`'s own rules: the defaults apply to it again.
     pub fn reset_access(&self, device: &str) -> Result<(), ClientError> {
         let pk = parse_target(device)?;
-        let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
-        a.reset(&pk)?;
+        self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?.reset(&pk)?;
+        self.inner.rt().block_on(self.inner.refresh_control_offer());
         Ok(())
     }
 
@@ -1272,6 +1395,7 @@ impl Client {
     /// default, a headless host), a group set to ask refuses at once.
     pub fn set_access_prompts(&self, on: bool) {
         self.inner.prompts.store(on, Ordering::Relaxed);
+        self.inner.rt().block_on(self.inner.refresh_control_offer());
     }
 
     /// Answer an asked request. Errors if it is no longer waiting.
@@ -1284,8 +1408,11 @@ impl Client {
             .and_then(|mut a| a.pending.remove(&id))
             .ok_or_else(|| ClientError::Mesh("that request is no longer waiting".into()))?;
         if answer == AccessAnswer::Always {
-            let mut a = self.inner.access.lock().map_err(|_| ClientError::Mesh("access settings unavailable".into()))?;
-            a.set(Some(&pending.peer), pending.group, Some(AccessRule::Allow))?;
+            self.inner
+                .access
+                .lock()
+                .map_err(|_| ClientError::Mesh("access settings unavailable".into()))?
+                .set(Some(&pending.peer), pending.group, Some(AccessRule::Allow))?;
         }
         let _ = pending.answer.send(answer != AccessAnswer::Deny);
         Ok(())
@@ -1346,6 +1473,48 @@ impl Client {
             outcome: r.outcome,
         }));
         out
+    }
+
+    // ---- terminal --------------------------------------------------------
+
+    /// Open a terminal on a member (`cols` x `rows`, the viewer's `TERM`).
+    /// Blocks until its shell started; while the member asks its user,
+    /// [`Event::TerminalWaiting`] fires and this keeps waiting (up to
+    /// [`ACCESS_ASK_TIMEOUT`] on the member's side). The stream then
+    /// carries [`TermFrame`]s: write `Input` and `Resize`, read `Output`
+    /// until `Exit`. Refusals are `ClientError::Stream` ("not permitted",
+    /// or "does not offer this").
+    pub fn open_terminal(&self, target: &str, cols: u16, rows: u16, term: &str) -> Result<MeshStream, ClientError> {
+        let pk = parse_target(target)?;
+        let inner = self.inner.clone();
+        let term = term.to_string();
+        self.inner.rt().block_on(async move {
+            let c = inner.conn(pk).await?;
+            let peer = npub_of(&pk);
+            let (send, recv) = apps::open_terminal(&c, cols, rows, &term, || {
+                inner.emit(Event::TerminalWaiting { peer: peer.clone() });
+            })
+            .await?;
+            Ok(MeshStream { send, recv })
+        })
+    }
+
+    /// Terminal sessions members have open on this device.
+    #[must_use]
+    pub fn terminal_sessions(&self) -> Vec<TerminalSession> {
+        let Ok(m) = self.inner.terminals.lock() else { return Vec::new() };
+        let mut v: Vec<TerminalSession> = m
+            .iter()
+            .map(|(id, e)| TerminalSession { id: *id, peer: npub_of(&e.peer), secs: e.started.elapsed().as_secs() })
+            .collect();
+        v.sort_by_key(|t| t.id);
+        v
+    }
+
+    /// End a session open on this device (its shell is killed). Whether it
+    /// was open.
+    pub fn end_terminal(&self, id: u64) -> bool {
+        self.inner.terminals.lock().ok().and_then(|mut m| m.get_mut(&id).and_then(|e| e.end.take())).is_some_and(|tx| tx.send(()).is_ok())
     }
 
     // ---- receiving -------------------------------------------------------
@@ -1637,8 +1806,16 @@ mod tests {
             online,
             last_seen_secs: None,
             reachable: false,
+            control: false,
             connected: online,
         }
+    }
+
+    #[test]
+    fn utc_now_is_a_plausible_timestamp() {
+        let t = super::utc_now();
+        assert_eq!(t.len(), 20, "{t}");
+        assert!(t.starts_with("20") && t.ends_with('Z') && &t[10..11] == "T", "{t}");
     }
 
     #[test]

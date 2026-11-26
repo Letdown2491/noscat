@@ -441,3 +441,141 @@ fn join_requests_are_listed_until_invited() {
     assert!(a.join_requests().is_empty(), "a member is no longer a request");
     drop(relay);
 }
+
+/// Two clients in one mesh, `b` receiving.
+fn mesh_pair(url: &str) -> (Client, Client, Receiver<Event>, Receiver<Event>) {
+    let (ida, idb) = (noscat_core::Identity::generate(), noscat_core::Identity::generate());
+    let (pa, pb) = (free_udp(), free_udp());
+    let peers = vec![(ida.npub(), pa), (idb.npub(), pb)];
+    let cfg = |id: &noscat_core::Identity, listen, name: &str| ClientConfig {
+        identity: IdentitySource::Secret(id.secret_hex()),
+        relays: Some(vec![url.to_string()]),
+        listen: Some(listen),
+        mesh_dir: Some(tmp(name)),
+        device_name: Some(name.into()),
+        lan_discovery: false,
+        static_peers: peers.clone(),
+        stun_servers: Some(vec!["stun:127.0.0.1:9".into()]),
+        ..ClientConfig::default()
+    };
+    let mut a = Client::start(cfg(&ida, pa, "viewer")).unwrap();
+    let mut b = Client::start(cfg(&idb, pb, "host")).unwrap();
+    let (ea, eb) = (a.events().unwrap(), b.events().unwrap());
+    a.create_mesh("home").unwrap();
+    let joiner = {
+        let b = b.clone();
+        let inviter = a.npub().to_string();
+        std::thread::spawn(move || b.join(&inviter, T))
+    };
+    asked(&a, b.npub());
+    a.invite(b.npub()).unwrap();
+    joiner.join().unwrap().unwrap();
+    b.up(tmp("inbox"), None).unwrap();
+    (a, b, ea, eb)
+}
+
+/// Read terminal output until the exit status.
+fn session_output(rt: &tokio::runtime::Runtime, s: &mut noscat_client::MeshStream) -> (String, i32) {
+    use noscat_client::TermFrame;
+    rt.block_on(async {
+        let mut out = Vec::new();
+        loop {
+            match tokio::time::timeout(T, TermFrame::read(s)).await.expect("terminal output timed out").unwrap() {
+                Some(TermFrame::Output(b)) => out.extend(b),
+                Some(TermFrame::Exit(code)) => return (String::from_utf8_lossy(&out).into_owned(), code),
+                Some(_) => {}
+                None => panic!("session ended without an exit status: {}", String::from_utf8_lossy(&out)),
+            }
+        }
+    })
+}
+
+fn type_in(rt: &tokio::runtime::Runtime, s: &mut noscat_client::MeshStream, text: &str) {
+    use tokio::io::AsyncWriteExt as _;
+    rt.block_on(s.write_all(&noscat_client::TermFrame::Input(text.as_bytes().to_vec()).encode())).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn a_terminal_asks_first_then_runs_a_real_shell() {
+    use noscat_client::{AccessAnswer, AccessGroup, AccessOutcome};
+    watchdog("a_terminal_asks_first_then_runs_a_real_shell", 240);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let url = rt.block_on(relay.url()).to_string();
+    let (a, b, ea, eb) = mesh_pair(&url);
+    let (an, bn) = (a.npub().to_string(), b.npub().to_string());
+
+    // Control asks by default, and a host with no app to ask refuses. It
+    // offers no terminal in its adverts, since nobody could get in.
+    let err = a.open_terminal(&bn, 80, 24, "xterm").err().expect("opened without approval");
+    assert!(err.to_string().contains("not permitted"), "{err}");
+    assert_eq!(b.access_requests()[0].outcome, AccessOutcome::NoOneToAsk);
+    assert!(!b.members().iter().any(|m| m.this_device && m.control));
+
+    // With an app attached it asks; the viewer hears it waits; allow once.
+    b.set_access_prompts(true);
+    assert!(b.members().iter().any(|m| m.this_device && m.control), "now offered");
+    let opener = {
+        let (a, bn) = (a.clone(), bn.clone());
+        std::thread::spawn(move || a.open_terminal(&bn, 100, 30, "xterm-256color"))
+    };
+    let id = wait(&eb, "access request", |e| match e {
+        Event::AccessRequest { id, peer, group: AccessGroup::Control } if *peer == an => Some(*id),
+        _ => None,
+    });
+    wait(&ea, "waiting", |e| matches!(e, Event::TerminalWaiting { peer } if *peer == bn).then_some(()));
+    b.answer_access(id, AccessAnswer::Once).unwrap();
+    let mut s = opener.join().unwrap().unwrap();
+    wait(&eb, "session opened", |e| matches!(e, Event::TerminalOpened { peer, .. } if *peer == an).then_some(()));
+    assert_eq!(b.terminal_sessions().len(), 1);
+    type_in(&rt, &mut s, "echo hi-$((40+2)) $(stty size)\nexit 3\n");
+    let (out, code) = session_output(&rt, &mut s);
+    assert!(out.contains("hi-42 30 100"), "the shell ran at the requested size: {out}");
+    assert_eq!(code, 3, "the exit status comes through");
+    wait(&eb, "session closed", |e| matches!(e, Event::TerminalClosed { error: None, .. }).then_some(()));
+    assert!(b.terminal_sessions().is_empty());
+    let log = std::fs::read_to_string(b.state_dir().join("terminal.log")).unwrap();
+    assert!(log.contains("opened session") && log.contains("exit 3"), "{log}");
+
+    // Once means once: the next request asks again. Deny it.
+    let opener = {
+        let (a, bn) = (a.clone(), bn.clone());
+        std::thread::spawn(move || a.open_terminal(&bn, 80, 24, "xterm"))
+    };
+    let id = wait(&eb, "second request", |e| match e {
+        Event::AccessRequest { id, .. } => Some(*id),
+        _ => None,
+    });
+    b.answer_access(id, AccessAnswer::Deny).unwrap();
+    let err = opener.join().unwrap().err().expect("a denied terminal opened");
+    assert!(err.to_string().contains("not permitted"), "{err}");
+
+    // Always: saved as an allow rule. The host ends the session; the
+    // viewer gets an exit status, not a hang.
+    let opener = {
+        let (a, bn) = (a.clone(), bn.clone());
+        std::thread::spawn(move || a.open_terminal(&bn, 80, 24, "xterm"))
+    };
+    let id = wait(&eb, "third request", |e| match e {
+        Event::AccessRequest { id, .. } => Some(*id),
+        _ => None,
+    });
+    b.answer_access(id, AccessAnswer::Always).unwrap();
+    assert_eq!(b.access_of(&an).unwrap().control, noscat_client::AccessRule::Allow, "always is saved");
+    let mut s = opener.join().unwrap().unwrap();
+    let sid = wait(&eb, "session opened", |e| match e {
+        Event::TerminalOpened { id, .. } => Some(*id),
+        _ => None,
+    });
+    // Wait for the prompt before ending, so the shell is up.
+    type_in(&rt, &mut s, "echo ready\n");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(b.end_terminal(sid));
+    let (_, code) = session_output(&rt, &mut s);
+    assert_ne!(code, 0, "an ended shell does not report success");
+
+    drop(a);
+    drop(b);
+    drop(relay);
+}

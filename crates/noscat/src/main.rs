@@ -7,6 +7,7 @@
 mod clipboard;
 mod control;
 mod service;
+mod shell;
 mod ui;
 
 use std::net::{IpAddr, SocketAddr};
@@ -141,6 +142,19 @@ enum Command {
         /// A port the member serves (`up --serve-port`) [default: its default service].
         #[arg(long, default_value_t = 0)]
         remote_port: u16,
+    },
+    /// Open a shell on a member, in this terminal. The member asks its user
+    /// first unless it already allows this device `control`; exits with
+    /// the remote shell's status.
+    Shell {
+        /// A member's name or npub.
+        target: String,
+    },
+    /// List the terminal sessions members have open on this device, or
+    /// end one.
+    Sessions {
+        #[command(subcommand)]
+        cmd: Option<SessionsCommand>,
     },
     /// Show who may do what to this device: the defaults, members' own
     /// rules, and recent refused or asked requests. Kept on this device
@@ -348,6 +362,12 @@ enum RelaysCommand {
         #[arg(required = true)]
         urls: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum SessionsCommand {
+    /// End a session (its shell is killed).
+    End { id: u64 },
 }
 
 #[derive(Subcommand)]
@@ -635,6 +655,14 @@ fn run_op(dir: &Path, d: &DeviceArgs, op: Op) -> Result<()> {
     };
     let res = if let Op::Pipe { target } = &op {
         ctx.client.pipe_stdio(target).map_err(anyhow::Error::from)
+    } else if let Op::Shell { target, cols, rows, term } = op {
+        let code = rt.block_on(async {
+            let stream = control::open_shell(&ctx, target, cols, rows, term, |r| show(r)).await.map_err(|e| anyhow::anyhow!(e))?;
+            shell::run(stream).await
+        });
+        control::remove(dir);
+        drop(ctx);
+        std::process::exit(code?);
     } else {
         rt.block_on(async {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -846,6 +874,11 @@ fn main() -> Result<()> {
                 run_op(&dir, d, Op::Rename { name: name.to_string() })?;
             }
         }
+        Command::Shell { target } => {
+            let (cols, rows, term) = shell::local_terminal();
+            run_op(&dir, d, Op::Shell { target, cols, rows, term })?;
+        }
+        Command::Sessions { cmd } => run_op(&dir, d, Op::Sessions { end: cmd.map(|SessionsCommand::End { id }| id) })?,
         Command::Access { cmd } => match cmd {
             None => run_op(&dir, d, Op::Access)?,
             Some(AccessCommand::Reset { who }) => run_op(&dir, d, Op::ResetAccess { who })?,

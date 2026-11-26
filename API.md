@@ -119,7 +119,7 @@ Mesh:
 | `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
-| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, connected`. `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. Sorted for display: this device first, then by name (case-insensitive), then unnamed devices, ties by npub; presence never reorders it, and `Roster` events carry the same order. |
+| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, control, connected`. `control`: it offers a terminal (see Terminal). `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. Sorted for display: this device first, then by name (case-insensitive), then unnamed devices, ties by npub; presence never reorders it, and `Roster` events carry the same order. |
 | `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
 | `join_requests()` | `Vec<JoinRequest>` | `npub, name, age_secs`: devices that asked to join in the last 15 minutes and are not members yet, oldest first. Read from the relays, so a process started after the request (a CLI next to a service) sees it too; the `JoinRequest` event is the live signal. Invite one with `invite(npub)`. Not in the FFI (the apps use the event). |
 | `network_changed()` | `()` | Re-check paths after a network switch. Apps call it when the platform reports a new default network (Wi-Fi to cellular and back): without it, paths through the old address take minutes to time out. |
@@ -149,6 +149,20 @@ permitted" (chat: `ChatFailed`, files: `TransferFailed`).
 | `access_requests()` | `Vec<AccessRequest>` | `id, peer, group, age_secs, outcome`: waiting requests, then the last 50 refused or asked ones, newest first. `AccessOutcome`: `Waiting, Allowed, Denied, TimedOut, NoOneToAsk`. A refusal repeating within a minute is one entry. |
 
 None of these are in the FFI yet (0.6.0 phase 4).
+
+Terminal (new in 0.6; hosting on computers only, viewing everywhere):
+
+| Method | Returns | Contract |
+|---|---|---|
+| `open_terminal(target, cols, rows, term)` | `MeshStream` | Blocks until the member's shell started; `TerminalWaiting` fires while it asks its user (it gives up after 60 s). The stream carries `TermFrame`s (`encode()`, `TermFrame::read(&mut stream)`): write `Input(bytes)` and `Resize { cols, rows }`, read `Output(bytes)` until `Exit(status)`. Dropping it ends the session. Refused: `ClientError::Stream` with "not permitted" or "does not offer this". |
+| `terminal_sessions()` | `Vec<TerminalSession>` | `id, peer, secs`: sessions members have open here. |
+| `end_terminal(id)` | `bool` | Kill a session's shell; the viewer gets `Exit(-1)`. Whether it was open. |
+| `state_dir()` | `&Path` | The state directory. Hosted sessions are logged in its `terminal.log` (who, when, how long, exit status). |
+
+A device offers a terminal (`Member::control`, the advert's `control`
+tag) when it can host one and some member could get in: an allow rule,
+or ask with an app attached (`set_access_prompts(true)`). Show the
+terminal action only for members with `control`.
 
 Receiving:
 
@@ -206,6 +220,9 @@ Peers are bech32 npubs.
 | `JoinRequest` | `peer, name` | A device that scanned this device's QR (or otherwise knows its npub) asks to be invited: prompt, then `invite(peer)`. Only while in a mesh; at most once per request. |
 | `AccessRequest` | `id, peer, group` | A member asks for a group set to ask: prompt (allow once, always allow, deny), then `answer_access(id, ..)` within `ACCESS_ASK_TIMEOUT` (60 s). Only after `set_access_prompts(true)`. |
 | `AccessResolved` | `id, peer, group, outcome` | An asked request ended (answered here, by the CLI, or timed out): close its prompt. |
+| `TerminalWaiting` | `peer` | Viewer: `open_terminal` waits while `peer` asks its user. |
+| `TerminalOpened` | `id, peer` | Host: a member's session started here. Keep a banner up while any is open, with a way to end it. |
+| `TerminalClosed` | `id, peer, secs, error` | Host: a session ended (`error`: the shell could not start). |
 
 Inbound streams are always handled by the client, after its access check.
 
@@ -296,8 +313,8 @@ without `path`, and `Roster { members: List<MeshMember> }`. New in 0.5:
 event, `MeshJoined`, `Roster`, `MemberSeen`, `MeshChangeUndone`, `MeshLeft`,
 `JoinRequest { peer, name? }` (a device that scanned this one's QR asks
 to be invited: show a prompt, then `invite(peer)`). The client's
-`AccessRequest` and `AccessResolved` are not delivered over the FFI yet;
-they arrive with the access methods in 0.6.0 phase 4.
+access and terminal events are not delivered over the FFI yet; they
+arrive with the access and terminal methods in 0.6.0 phase 4.
 
 ---
 

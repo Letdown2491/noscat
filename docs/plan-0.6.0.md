@@ -117,25 +117,38 @@ Done 2026-11-25, with these choices:
   keys, resizes     ── input  ──> stream ──> PTY
 ```
 
-- [ ] Protocol (`docs/nip-noscat.md`): a Terminal app protocol (tag 4).
+- [x] Protocol (`docs/nip-noscat.md`): a Terminal app protocol (tag 4).
       The opener sends the terminal size and `TERM`; the accepter answers
       waiting for approval (optional), then started, not permitted, or
       unavailable; then framed messages: input and resizes one way, output
       and the exit status the other.
-- [ ] Host: a PTY through `portable-pty` (Linux, macOS, BSD; ConPTY on
+- [x] Host: a PTY through `portable-pty` (Linux, macOS, BSD; ConPTY on
       Windows) running the user's login shell in their home directory, as
       the user running noscat (never elevated). A noscat run as a system
       service runs shells as its service user; the docs say so.
-- [ ] Gated by the Control group (phase 2): asked on first use, never on
+- [x] Gated by the Control group (phase 2): asked on first use, never on
       by default.
-- [ ] On the host: each session logged (who, when, how long), open
+- [x] On the host: each session logged (who, when, how long), open
       sessions listed and endable (`noscat sessions`).
-- [ ] CLI client: `noscat shell <device>` (raw mode, resizes followed,
+- [x] CLI client: `noscat shell <device>` (raw mode, resizes followed,
       exit status passed through; prints "waiting for <device> to
       approve" while asked).
 - [ ] Rig test: a session through the reachable member at 3% loss stays
       usable; a denied member gets "not permitted"; an unanswered request
       times out.
+
+Done 2026-11-25, except the rig test (still open below). Choices:
+
+- The shell scrubs `NOSCAT_IDENTITY`, `NOSCAT_DIR` and `RUST_LOG` from
+  its environment; it runs in the home directory.
+- A device advertises control only when someone could get in (an allow
+  rule, or ask with an app attached), so a headless server with the
+  defaults offers nothing.
+- Piped input to `noscat shell` ends with Ctrl-D, so `echo cmd | noscat
+  shell host` runs and returns.
+- Covered end to end in `noscat-client/tests/client.rs` (real shell:
+  refused headless, asked, once, deny, always, host ends a session).
+- [ ] Rig test (3% loss through the reachable member) not written yet.
 
 ## Phase 4: access and terminal in the apps
 

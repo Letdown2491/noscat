@@ -1547,13 +1547,22 @@ impl MeshGroup {
     }
 
     /// This device's advert as an app event (see [`ADVERT_KIND`]).
-    pub fn send_advert(&mut self, fips_advert_json: Option<&str>, name: &str, reachable: bool) -> Result<Event, MeshError> {
+    pub fn send_advert(
+        &mut self,
+        fips_advert_json: Option<&str>,
+        name: &str,
+        reachable: bool,
+        control: bool,
+    ) -> Result<Event, MeshError> {
         let mut tags = Vec::new();
         if !name.is_empty() {
             tags.push(vec!["name".to_string(), name.to_string()]);
         }
         if reachable {
             tags.push(vec!["reachable".to_string(), "1".to_string()]);
+        }
+        if control {
+            tags.push(vec!["control".to_string(), "1".to_string()]);
         }
         self.send_app(ADVERT_KIND, tags, fips_advert_json.unwrap_or_default().to_string())
     }

@@ -28,11 +28,14 @@ use crate::streams::Connection;
 const TAG_FILE: u8 = 1;
 const TAG_TEXT: u8 = 2;
 const TAG_FORWARD: u8 = 3;
+const TAG_TERMINAL: u8 = 4;
 const OK: u8 = 0;
 const FAIL: u8 = 1;
 /// The receiver's access rules do not let this sender do this (text and
 /// forward answers; older senders read it as a plain refusal).
 const NOT_PERMITTED: u8 = 2;
+/// Control protocols: the host is asking its user; the answer follows.
+const WAITING: u8 = 3;
 const REFUSED_OFFSET: u64 = u64::MAX;
 /// The file answer for "not permitted".
 const NOT_PERMITTED_OFFSET: u64 = u64::MAX ^ 1;
@@ -57,6 +60,9 @@ pub enum AppError {
     /// The receiver's access settings do not allow this from this device.
     #[error("not permitted: the member does not allow this from this device")]
     NotPermitted,
+    /// The member does not offer this (a terminal on a phone).
+    #[error("the member does not offer this")]
+    Unavailable,
     #[error("the received file did not match its sha256")]
     Mismatch,
 }
@@ -221,6 +227,112 @@ pub async fn open_forward(conn: &Connection, port: u16) -> Result<(SendStream, R
     }
 }
 
+/// Open a terminal on the member: `cols` x `rows`, the viewer's `TERM`.
+/// `waiting` is called when the member asks its user first (Control
+/// group); the call returns once the shell started. Then the pair carries
+/// [`TermFrame`]s: [`TermFrame::Input`] and [`TermFrame::Resize`] out,
+/// [`TermFrame::Output`] and a final [`TermFrame::Exit`] back.
+pub async fn open_terminal(
+    conn: &Connection,
+    cols: u16,
+    rows: u16,
+    term: &str,
+    mut waiting: impl FnMut() + Send,
+) -> Result<(SendStream, RecvStream), AppError> {
+    let term = safe_term(term);
+    let (mut s, mut r) = conn.inner.open_bi().await.map_err(stream_err)?;
+    let mut head = vec![TAG_TERMINAL];
+    head.extend_from_slice(&cols.to_be_bytes());
+    head.extend_from_slice(&rows.to_be_bytes());
+    head.push(u8::try_from(term.len()).unwrap_or(0));
+    head.extend_from_slice(term.as_bytes());
+    write(&mut s, &head).await?;
+    loop {
+        match read_u8(&mut r).await? {
+            OK => return Ok((s, r)),
+            WAITING => waiting(),
+            NOT_PERMITTED => return Err(AppError::NotPermitted),
+            _ => return Err(AppError::Unavailable),
+        }
+    }
+}
+
+/// A `TERM` value safe to put in a shell's environment: short, printable
+/// ASCII without spaces, else `xterm-256color`.
+fn safe_term(term: &str) -> String {
+    let t = term.trim();
+    if !t.is_empty() && t.len() <= 64 && t.bytes().all(|b| b.is_ascii_graphic()) {
+        t.to_string()
+    } else {
+        "xterm-256color".to_string()
+    }
+}
+
+/// The largest terminal frame payload.
+pub const MAX_FRAME: usize = 64 * 1024;
+
+/// One message of a terminal session: `[u8 type][u32 len][payload]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TermFrame {
+    /// Viewer to host: keystrokes and pastes, raw bytes.
+    Input(Vec<u8>),
+    /// Viewer to host: the window size changed.
+    Resize { cols: u16, rows: u16 },
+    /// Host to viewer: what the shell wrote, raw bytes.
+    Output(Vec<u8>),
+    /// Host to viewer, last: the shell's exit status (-1 if unknown, e.g.
+    /// killed or ended by the host).
+    Exit(i32),
+}
+
+impl TermFrame {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let (ty, body): (u8, Vec<u8>) = match self {
+            TermFrame::Input(b) => (0, b.clone()),
+            TermFrame::Resize { cols, rows } => (1, [cols.to_be_bytes(), rows.to_be_bytes()].concat()),
+            TermFrame::Output(b) => (2, b.clone()),
+            TermFrame::Exit(code) => (3, code.to_be_bytes().to_vec()),
+        };
+        let mut out = Vec::with_capacity(5 + body.len());
+        out.push(ty);
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Read one frame; `Ok(None)` at a clean end between frames. Unknown
+    /// types are skipped, so a later version can add some.
+    pub async fn read<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Result<Option<TermFrame>, AppError> {
+        loop {
+            let mut head = [0u8; 5];
+            match r.read_exact(&mut head[..1]).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+            r.read_exact(&mut head[1..]).await?;
+            let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+            if len > MAX_FRAME {
+                return Err(AppError::Protocol("terminal frame too long"));
+            }
+            let mut body = vec![0u8; len];
+            r.read_exact(&mut body).await?;
+            return Ok(Some(match head[0] {
+                0 => TermFrame::Input(body),
+                1 if len == 4 => TermFrame::Resize {
+                    cols: u16::from_be_bytes([body[0], body[1]]),
+                    rows: u16::from_be_bytes([body[2], body[3]]),
+                },
+                2 => TermFrame::Output(body),
+                3 if len == 4 => TermFrame::Exit(i32::from_be_bytes([body[0], body[1], body[2], body[3]])),
+                0..=3 => return Err(AppError::Protocol("terminal frame length")),
+                _ => continue,
+            }));
+        }
+    }
+}
+
 /// Copy between a TCP connection and a forwarded stream until both sides
 /// close.
 pub async fn bridge(tcp: tokio::net::TcpStream, mut s: SendStream, mut r: RecvStream) -> Result<(), AppError> {
@@ -249,6 +361,38 @@ pub enum Incoming {
     File(IncomingFile),
     Text(IncomingText),
     Forward(IncomingForward),
+    Terminal(IncomingTerminal),
+}
+
+/// A terminal request. Call [`IncomingTerminal::waiting`] while asking the
+/// user, then [`IncomingTerminal::accept`] or [`IncomingTerminal::refuse`].
+#[derive(Debug)]
+pub struct IncomingTerminal {
+    pub cols: u16,
+    pub rows: u16,
+    /// The viewer's `TERM`, already made safe.
+    pub term: String,
+    s: SendStream,
+    r: RecvStream,
+}
+
+impl IncomingTerminal {
+    /// Tell the viewer the host is asking its user.
+    pub async fn waiting(&mut self) {
+        let _ = write(&mut self.s, &[WAITING]).await;
+    }
+
+    /// The shell started: take the stream pair for [`TermFrame`]s.
+    pub async fn accept(mut self) -> Result<(SendStream, RecvStream), AppError> {
+        write(&mut self.s, &[OK]).await?;
+        Ok((self.s, self.r))
+    }
+
+    /// This device offers no terminal.
+    pub async fn refuse(mut self) {
+        let _ = write(&mut self.s, &[FAIL]).await;
+        let _ = self.s.finish();
+    }
 }
 
 impl Incoming {
@@ -258,6 +402,7 @@ impl Incoming {
         match self {
             Incoming::File(_) | Incoming::Text(_) => crate::access::Group::Send,
             Incoming::Forward(_) => crate::access::Group::Services,
+            Incoming::Terminal(_) => crate::access::Group::Control,
         }
     }
 
@@ -267,6 +412,7 @@ impl Incoming {
             Incoming::File(f) => (f.s, NOT_PERMITTED_OFFSET.to_be_bytes().to_vec()),
             Incoming::Text(t) => (t.s, vec![NOT_PERMITTED]),
             Incoming::Forward(f) => (f.s, vec![NOT_PERMITTED]),
+            Incoming::Terminal(t) => (t.s, vec![NOT_PERMITTED]),
         };
         let _ = write(&mut s, &answer).await;
         let _ = s.finish();
@@ -355,6 +501,14 @@ pub async fn accept(conn: &Connection) -> Result<Option<Incoming>, AppError> {
         TAG_FORWARD => {
             let port = read_u16(&mut r).await?;
             Ok(Some(Incoming::Forward(IncomingForward { port, s, r })))
+        }
+        TAG_TERMINAL => {
+            let cols = read_u16(&mut r).await?;
+            let rows = read_u16(&mut r).await?;
+            let mut term = vec![0u8; usize::from(read_u8(&mut r).await?)];
+            r.read_exact(&mut term).await.map_err(stream_err)?;
+            let term = safe_term(&String::from_utf8_lossy(&term));
+            Ok(Some(Incoming::Terminal(IncomingTerminal { cols, rows, term, s, r })))
         }
         _ => Err(AppError::Protocol("unknown service")),
     }

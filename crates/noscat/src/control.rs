@@ -41,6 +41,11 @@ pub enum Op {
     Text { target: String, text: String, clipboard: bool },
     Forward { target: String, local: SocketAddr, remote_port: u16 },
     Pipe { target: String },
+    /// Open a terminal on a member; the connection then carries terminal
+    /// frames (like `Pipe`, after `done`).
+    Shell { target: String, cols: u16, rows: u16, term: String },
+    /// Terminal sessions open here, or end one.
+    Sessions { end: Option<u64> },
     Rename { name: String },
     /// List the mesh's relays, or add and remove some.
     Relays { add: Vec<String>, remove: Vec<String> },
@@ -442,7 +447,23 @@ pub async fn exec(
             .await?;
             line(out, format!("this device is now {name:?}"));
         }
-        Op::Pipe { .. } => return Err("pipe is not an exec op".into()),
+        Op::Pipe { .. } | Op::Shell { .. } => return Err("pipe and shell are not exec ops".into()),
+        Op::Sessions { end } => {
+            let (sessions, members) = ctx.blocking(|c| Ok((c.terminal_sessions(), c.members()))).await?;
+            if let Some(id) = end {
+                if !ctx.blocking(move |c| Ok(c.end_terminal(id))).await? {
+                    return Err(format!("no session {id} is open"));
+                }
+                line(out, format!("ended session {id}"));
+                return Ok(());
+            }
+            if sessions.is_empty() {
+                line(out, "no terminal sessions are open here");
+            }
+            for s in sessions {
+                line(out, format!("  {}  {}  open {}", s.id, crate::ui::label(&members, &s.peer), crate::ui::age(s.secs)));
+            }
+        }
     }
     Ok(())
 }
@@ -493,6 +514,31 @@ async fn handle(ctx: Ctx, conn: TcpStream, token: &str) -> Result<()> {
         send(&mut w, &Reply::Error { error: "bad token".into() }).await?;
         return Ok(());
     }
+    if let Op::Shell { target, cols, rows, term } = req.op {
+        let (lines_tx, mut lines_rx) = mpsc::unbounded_channel();
+        let opening = open_shell(&ctx, target, cols, rows, term, move |r| {
+            let _ = lines_tx.send(r);
+        });
+        tokio::pin!(opening);
+        let res = loop {
+            tokio::select! {
+                res = &mut opening => break res,
+                Some(r) = lines_rx.recv() => { send(&mut w, &r).await?; }
+            }
+        };
+        while let Ok(r) = lines_rx.try_recv() {
+            send(&mut w, &r).await?;
+        }
+        match res {
+            Ok(mut stream) => {
+                send(&mut w, &Reply::Done).await?;
+                let mut conn = r.into_inner().reunite(w)?;
+                let _ = tokio::io::copy_bidirectional(&mut conn, &mut stream).await;
+            }
+            Err(error) => send(&mut w, &Reply::Error { error }).await?,
+        }
+        return Ok(());
+    }
     if let Op::Pipe { target } = req.op {
         let c = ctx.client.clone();
         let stream = tokio::task::spawn_blocking(move || c.connect(&target)).await?;
@@ -531,6 +577,40 @@ async fn handle(ctx: Ctx, conn: TcpStream, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Open a terminal on `target` (a member's name or npub), narrating the
+/// wait for its approval through `show`.
+pub async fn open_shell(
+    ctx: &Ctx,
+    target: String,
+    cols: u16,
+    rows: u16,
+    term: String,
+    mut show: impl FnMut(Reply) + Send,
+) -> Result<noscat_client::MeshStream, String> {
+    let members = ctx.blocking(|c| Ok(c.members())).await?;
+    let npub = crate::ui::resolve(&members, &target)?;
+    let name = crate::ui::label(&members, &npub);
+    if !members.iter().any(|m| m.npub == npub && m.control) {
+        show(Reply::Line { text: format!("{name} does not say it offers a terminal; trying anyway") });
+    }
+    let mut events = ctx.events.subscribe();
+    let n = npub.clone();
+    let opening = ctx.blocking(move |c| c.open_terminal(&n, cols, rows, &term));
+    tokio::pin!(opening);
+    loop {
+        tokio::select! {
+            res = &mut opening => return res,
+            ev = events.recv() => {
+                if let Ok(Event::TerminalWaiting { peer }) = ev {
+                    if peer == npub {
+                        show(Reply::Line { text: format!("waiting for {name} to approve (up to a minute)") });
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- asking side ------------------------------------------------------------
 
 /// A connection to the running device for `dir`, if one answers.
@@ -552,6 +632,7 @@ pub async fn ask(
     mut show: impl FnMut(Reply),
 ) -> Result<()> {
     let pipe = matches!(op, Op::Pipe { .. });
+    let shell = matches!(op, Op::Shell { .. });
     let (r, mut w) = conn.into_split();
     let mut req = serde_json::to_vec(&Request { token, op })?;
     req.push(b'\n');
@@ -568,6 +649,12 @@ pub async fn ask(
             Reply::Error { error } => bail!("{error}"),
             other => show(other),
         }
+    }
+    if shell {
+        // The connection now carries the session's terminal frames.
+        let conn = r.into_inner().reunite(w)?;
+        let code = crate::shell::run(conn).await?;
+        std::process::exit(code);
     }
     if pipe {
         // The connection is now the byte stream to the member.

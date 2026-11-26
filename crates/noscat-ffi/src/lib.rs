@@ -175,7 +175,11 @@ fn event(ev: noscat_client::Event) -> Option<Event> {
         E::JoinRequest { peer, name } => Event::JoinRequest { peer, name },
         // Access prompts reach the apps in 0.6.0 phase 4; until they call
         // set_access_prompts(true) none are raised.
-        E::AccessRequest { .. } | E::AccessResolved { .. } => return None,
+        E::AccessRequest { .. }
+        | E::AccessResolved { .. }
+        | E::TerminalWaiting { .. }
+        | E::TerminalOpened { .. }
+        | E::TerminalClosed { .. } => return None,
     })
 }
 
