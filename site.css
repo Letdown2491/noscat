@@ -68,7 +68,7 @@ nav .wrap { display: flex; align-items: center; justify-content: space-between; 
 .hero h1 { font-size: var(--step-3); font-weight: 800; letter-spacing: -0.025em; }
 .hero h1 .nc { color: var(--accent); }
 .hero .lede { font-size: 1.12rem; }
-.facts { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; font: 400 0.85rem/1.4 var(--font-mono); color: var(--muted); }
+.facts { display: flex; flex-wrap: wrap; gap: 0.5rem 0.8rem; font: 400 0.85rem/1.4 var(--font-mono); color: var(--muted); }
 .facts span::before { content: "▸ "; color: var(--accent-2); }
 
 /* terminal */
