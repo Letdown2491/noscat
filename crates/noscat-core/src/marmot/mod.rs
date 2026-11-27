@@ -63,6 +63,10 @@ pub const ADVERT_KIND: u16 = 21195;
 pub const MAX_REWIND: u64 = 5;
 /// Key package lifetime (30 days; OpenMLS adds an hour of skew margin).
 const KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+/// A key package is published again (same package, newer event) while it
+/// has at least this long to live: the longest a Welcome built on it may
+/// keep coming ([`WELCOME_DEADLINE_SECS`]), plus a day.
+const KEY_PACKAGE_REUSE_MARGIN_SECS: u64 = WELCOME_DEADLINE_SECS + 24 * 60 * 60;
 /// Longest key package lifetime range a receiver accepts (84 days + 1 h).
 const MAX_KEY_PACKAGE_RANGE_SECS: u64 = 7_261_200;
 /// Exporter label and context for the kind 445 outer key.
@@ -261,7 +265,27 @@ struct Applied {
 struct OwnKeyPackage {
     event_id: String,
     key_package_ref: String,
+    /// The package as an MLSMessage (base64), to publish it again; empty in
+    /// state written before 0.7.0 (such a package is not reused).
+    #[serde(default)]
+    message: String,
+    /// End of its lifetime (Unix seconds); 0 when unknown.
+    #[serde(default)]
+    not_after: u64,
+    /// Earlier events that carried the same package (republished): a
+    /// Welcome names the event its inviter fetched.
+    #[serde(default)]
+    earlier_events: Vec<String>,
 }
+
+impl OwnKeyPackage {
+    fn has_event(&self, id: &str) -> bool {
+        self.event_id == id || self.earlier_events.iter().any(|e| e == id)
+    }
+}
+
+/// How many earlier event ids of a republished key package are kept.
+const EARLIER_KEY_PACKAGE_EVENTS: usize = 64;
 
 /// A Welcome this device owes: it committed the Add, and the new member
 /// has not been seen yet.
@@ -897,21 +921,39 @@ impl MeshGroup {
         self.save()
     }
 
-    /// A fresh signed kind 30443 key package event for this device's slot.
-    /// The private key stays in local state until a Welcome consumes it or
-    /// it is replaced.
+    /// A signed kind 30443 key package event for this device's slot, newer
+    /// than the last one. It carries the current package again while that
+    /// has [`KEY_PACKAGE_REUSE_MARGIN_SECS`] to live, else a fresh one. A
+    /// device publishes at every start and again in `join`; minting each
+    /// time would push out (with only two kept) the very package an inviter
+    /// used while it was stopped, whose Welcome is still being resent. The
+    /// private key stays in local state until this device joins a mesh or
+    /// the package is replaced.
     pub fn key_package_event(&mut self) -> Result<Event, MeshError> {
-        let bundle = KeyPackage::builder()
-            .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_SECS))
-            .leaf_node_capabilities(capabilities())
-            .leaf_node_extensions(self.leaf_extensions()?)
-            .mark_as_last_resort()
-            .build(CIPHERSUITE, &self.provider, &self.signer, self.credential())
-            .map_err(mls("key package"))?;
-        let kp = bundle.key_package().clone();
-        let kp_ref = kp.hash_ref(&self.provider.crypto).map_err(mls("key package ref"))?;
-        let msg: MlsMessageOut = kp.into();
-        let bytes = msg.tls_serialize_detached().map_err(mls("serialize key package"))?;
+        let reuse = self
+            .meta
+            .key_packages
+            .last()
+            .filter(|k| !k.message.is_empty() && k.not_after > now_secs().saturating_add(KEY_PACKAGE_REUSE_MARGIN_SECS))
+            .and_then(|k| Some((B64.decode(&k.message).ok()?, hex::decode(&k.key_package_ref).ok()?)));
+        let (bytes, kp_ref, fresh) = match reuse {
+            Some((bytes, r)) => (bytes, r, None),
+            None => {
+                let bundle = KeyPackage::builder()
+                    .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_SECS))
+                    .leaf_node_capabilities(capabilities())
+                    .leaf_node_extensions(self.leaf_extensions()?)
+                    .mark_as_last_resort()
+                    .build(CIPHERSUITE, &self.provider, &self.signer, self.credential())
+                    .map_err(mls("key package"))?;
+                let kp = bundle.key_package().clone();
+                let not_after = kp.life_time().not_after();
+                let kp_ref = kp.hash_ref(&self.provider.crypto).map_err(mls("key package ref"))?;
+                let msg: MlsMessageOut = kp.into();
+                let bytes = msg.tls_serialize_detached().map_err(mls("serialize key package"))?;
+                (bytes, kp_ref.as_slice().to_vec(), Some(not_after))
+            }
+        };
         let mut slot = [0u8; 32];
         hex::decode_to_slice(&self.meta.slot, &mut slot).map_err(|_| MeshError::State("bad slot".into()))?;
         let mut components: Vec<u16> = codec::SUPPORTED_COMPONENTS
@@ -926,7 +968,7 @@ impl MeshGroup {
             &bytes,
             &KeyPackageTags {
                 slot: &slot,
-                key_package_ref: kp_ref.as_slice(),
+                key_package_ref: &kp_ref,
                 ciphersuite: cs_id(),
                 extensions: &[u16::from(ExtensionType::AppDataDictionary)],
                 proposals: &[u16::from(ProposalType::AppDataUpdate), u16::from(ProposalType::SelfRemove)],
@@ -934,10 +976,24 @@ impl MeshGroup {
             },
             Timestamp::from_secs(at),
         )?;
+        let Some(not_after) = fresh else {
+            if let Some(k) = self.meta.key_packages.last_mut() {
+                let old = std::mem::replace(&mut k.event_id, ev.id.to_hex());
+                k.earlier_events.push(old);
+                if k.earlier_events.len() > EARLIER_KEY_PACKAGE_EVENTS {
+                    k.earlier_events.remove(0);
+                }
+            }
+            self.save()?;
+            return Ok(ev);
+        };
         // Keep the newest two: an inviter may still hold the previous one.
         self.meta.key_packages.push(OwnKeyPackage {
             event_id: ev.id.to_hex(),
-            key_package_ref: hex::encode(kp_ref.as_slice()),
+            key_package_ref: hex::encode(&kp_ref),
+            message: B64.encode(&bytes),
+            not_after,
+            earlier_events: Vec::new(),
         });
         while self.meta.key_packages.len() > 2 {
             let old = self.meta.key_packages.remove(0);
@@ -1345,7 +1401,7 @@ impl MeshGroup {
         let Some(env) = transport::unwrap_welcome(&self.keys, gift_wrap)? else {
             return Ok(None);
         };
-        if !self.meta.key_packages.iter().any(|k| k.event_id == env.key_package_event_id.to_hex()) {
+        if !self.meta.key_packages.iter().any(|k| k.has_event(&env.key_package_event_id.to_hex())) {
             return Ok(None);
         }
         if inviter.is_some_and(|i| i != env.sender) {

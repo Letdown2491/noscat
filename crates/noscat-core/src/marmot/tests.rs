@@ -452,3 +452,27 @@ fn an_owed_welcome_ends_at_its_deadline() {
     assert!(a.g.due_welcomes().is_empty());
     assert!(a.g.meta.owed_welcomes.is_empty());
 }
+
+/// A device publishes a key package at every start and again in `join`.
+/// An inviter that used an early one (the device was stopped) keeps
+/// resending that Welcome, so later publishes must carry the same package
+/// (in newer events) instead of minting new ones that push it out.
+#[test]
+fn later_publishes_keep_an_earlier_key_package_usable() {
+    let mut a = Dev::new("reuse-a");
+    let mut b = Dev::new("reuse-b");
+    a.g.create("home", &[RELAY.into()]).unwrap();
+    let early = b.g.key_package_event().unwrap();
+    let out = a.g.add(&[early.clone()]).unwrap();
+    a.g.confirm().unwrap();
+    let gw = a.g.wrap_welcome(&out.welcomes[0]).unwrap();
+    // Restarted twice, joining each time: four more publishes.
+    for _ in 0..2 {
+        b.reopen();
+        let start = b.g.key_package_event().unwrap();
+        let join = b.g.key_package_event().unwrap();
+        assert!(join.created_at > start.created_at && start.created_at > early.created_at);
+        assert_eq!(join.content, early.content, "the same package, republished");
+    }
+    assert!(b.g.join(&gw, Some(a.pk())).unwrap().is_some(), "the early Welcome still opens");
+}

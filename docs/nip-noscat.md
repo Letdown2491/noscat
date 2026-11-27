@@ -184,7 +184,12 @@ A joining device SHOULD repeat its request while it waits (Noscat every
 15 seconds): a single gift wrap can be lost while relay connections come
 up.
 
-A device keeps at most its two newest key packages. After a successful
+A device keeps at most its two newest key packages. While it is in no
+mesh it SHOULD publish the same package again (in a newer event) rather
+than a new one, until fewer than 8 days of its lifetime remain: an
+inviter may have used it while the device was stopped and keep resending
+that Welcome for up to 7 days, and a device that minted a package at
+every start would soon push that one out. After a successful
 join it MUST delete the private keys of its key packages (it accepts no
 further Welcome while in a mesh), and SHOULD ask its relays to delete
 the published package: a NIP-09 kind 5 event, signed by the device, with

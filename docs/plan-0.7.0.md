@@ -80,6 +80,11 @@ Key packages:
       must run `noscat join` to publish a fresh one. (A device knows only
       the Adds it applied, so one that joined later cannot refuse a
       package consumed before it arrived.)
+- [x] A device outside a mesh publishes the same key package again (in
+      a newer event) instead of minting one at every start and `join`;
+      with two kept, a device invited while stopped pushed out the very
+      package its waiting Welcome needed (found by the Windows CI run of
+      the lost invitation test).
 - [x] noscat-relay accepts the deletion: kind 5 for the author's own
       key packages, by coordinate only, never served back.
 - [x] Tests: a joined device has no key package material left and its
