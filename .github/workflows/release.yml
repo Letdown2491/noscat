@@ -9,6 +9,8 @@
 # - macOS (aarch64 + x86_64): unsigned tarballs; the publish job generates
 #   the Homebrew formula (noscat.rb) with real sha256s for the tap.
 # - Windows (x86_64): zip for Scoop and the winget manifests.
+# - FreeBSD (x86_64): a tarball built in a FreeBSD VM, with the FIPS crates
+#   patched (packaging/bsd/patch-crates.sh) until upstream builds there.
 # - The publish job also fills the AUR and winget templates
 #   (packaging/PKGBUILD, .SRCINFO, packaging/winget/) and attaches them.
 name: release
@@ -172,9 +174,43 @@ jobs:
         # crate by default.
         uses: obi1kenobi/cargo-semver-checks-action@v2
 
+  freebsd:
+    name: freebsd x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # No --locked: the patched nvpn-mdns-sd moves socket-pktinfo to 0.4.
+      - name: Build and stage in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          envs: GITHUB_REF_NAME
+          prepare: |
+            pkg install -y curl
+            curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
+            mkdir -p staging/completions dist
+            cp target/release/noscat staging/noscat
+            cp packaging/noscat.1 staging/
+            ./staging/noscat --version
+            ./staging/noscat completions bash > staging/completions/noscat.bash
+            ./staging/noscat completions zsh  > staging/completions/noscat.zsh
+            ./staging/noscat completions fish > staging/completions/noscat.fish
+            tar -czf dist/noscat-$GITHUB_REF_NAME-x86_64-unknown-freebsd.tar.gz \
+                -C staging noscat noscat.1 completions
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-x86_64
+          path: dist/*
+          retention-days: 1
+
   release:
     name: publish release
-    needs: [linux, macos, windows, api-compat]
+    needs: [linux, macos, windows, freebsd, api-compat]
     # needs holds the publish for the whole build matrix: a failed arch
     # publishes nothing, which is the right shape for a release.
     runs-on: ubuntu-24.04

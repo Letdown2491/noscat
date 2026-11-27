@@ -16,19 +16,27 @@ need no certificate at all.
 Decided 2026-11-25 (option A): ship BSD binaries built with our patches
 instead of waiting for upstream. Independent of everything else.
 
-- [ ] The two patches from `docs/upstream/01-freebsd-build.md` live in the
+- [x] The two patches from `docs/upstream/01-freebsd-build.md` live in the
       repo (`packaging/bsd/patches/`): `nvpn-mdns-sd` on `socket-pktinfo`
       0.4, and the `bind_socket_to_interface` fallback in
-      `nvpn-fips-core`. Only the BSD CI job adds the `[patch]` section, so
-      every other platform keeps building pure crates.io code.
-- [ ] CI: FreeBSD build and tests (a FreeBSD VM action, or cross with a
-      sysroot as in the spike); the release attaches
-      `noscat-<tag>-x86_64-unknown-freebsd.tar.gz`.
-- [ ] OpenBSD and NetBSD: try the same; ship binaries for those that
-      build and pass, and record what fails for the others.
-- [ ] Docs: INSTALL's BSD section points at the binaries (`cargo install
-      noscat` keeps failing on the BSDs until upstream fixes it). A
-      FreeBSD port (with the patches) and pkgsrc-wip later, on demand.
+      `nvpn-fips-core`. `packaging/bsd/patch-crates.sh` fetches and patches
+      the crates and prints `--config patch...` options, so Cargo.toml
+      stays untouched and every other platform keeps building pure
+      crates.io code. A cross build for FreeBSD 14.5 (clang, lld and the
+      base sysroot in the dev container) compiles and links with it.
+- [ ] CI: FreeBSD build and tests in a VM (`vmactions/freebsd-vm`, jobs
+      written; first run pending); the release attaches
+      `noscat-<tag>-x86_64-unknown-freebsd.tar.gz` (job written) and the
+      shell installer picks it (done; the installer also asked for
+      tarball names no release had, so it failed everywhere: fixed).
+- [ ] OpenBSD and NetBSD: CI tries the same (jobs written, failures not
+      fatal); ship binaries for those that build and pass, and record
+      what fails for the others.
+- [x] Docs: INSTALL's BSD section points at the binaries (`cargo install
+      noscat` keeps failing on the BSDs until upstream fixes it). README
+      and the site follow in the release commit (the site deploys from
+      main). A FreeBSD port (with the patches) and pkgsrc-wip later, on
+      demand.
 - [ ] When upstream ships the fixes, drop the patches; the upstream
       draft stays unposted unless approved.
 
@@ -103,11 +111,12 @@ Member state:
 
 MDK interop:
 
-- [ ] Move `tests/mdk-interop` from `08f3ebf` to current MDK main (the
+- [x] Move `tests/mdk-interop` from `08f3ebf` to current MDK main (the
       Welcome fanout, #3687, and delivery deadline, #3708, landed after
       it) and add a scenario: `wn` invites a noscat device that is not
       running, which joins later and finds the same Welcome on several
-      relays.
+      relays. Passes against MDK `9384348`, with scenario 2 also checking
+      that a White Noise member counts as active once it talks.
 
 ## Phase 3: release
 

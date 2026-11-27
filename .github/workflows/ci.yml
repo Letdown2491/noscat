@@ -7,6 +7,10 @@
 #   release workflow does.
 # - macOS (aarch64 and x86_64) and Windows (x86_64): tests and a release
 #   build.
+# - FreeBSD (x86_64): tests and a release build in a VM, with the FIPS
+#   crates patched (packaging/bsd/patch-crates.sh; they do not build on
+#   the BSDs from crates.io yet). OpenBSD and NetBSD are tried the same
+#   way; their failures are reported, not fatal.
 # - Publish check: `cargo publish --workspace --dry-run` packages every
 #   crate and builds it from the package, as crates.io will.
 #
@@ -23,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Run just this job: linux-test, linux-musl, macos, windows or publish-check (empty: all)"
+        description: "Run just this job: linux-test, linux-musl, macos, windows, bsd or publish-check (empty: all)"
         required: false
         default: ""
 
@@ -128,6 +132,63 @@ jobs:
           & target/release/noscat.exe --version
           $size = [math]::Round((Get-Item target/release/noscat.exe).Length / 1MB, 1)
           "### windows x86_64: $size MB" >> $env:GITHUB_STEP_SUMMARY
+
+  # No --locked on the BSDs: the patched nvpn-mdns-sd moves socket-pktinfo
+  # to 0.4, so the lockfile changes in the VM (and only there).
+  freebsd:
+    name: freebsd x86_64
+    if: ${{ !inputs.only || inputs.only == 'bsd' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test and build in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          envs: NOSCAT_TEST_LOG
+          prepare: |
+            pkg install -y curl
+            curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            patches=$(packaging/bsd/patch-crates.sh)
+            cargo test --workspace $patches
+            cargo build --release -p noscat $patches
+            target/release/noscat --version
+            ls -l target/release/noscat
+
+  openbsd:
+    name: openbsd x86_64 (trial)
+    if: ${{ !inputs.only || inputs.only == 'bsd' }}
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in an OpenBSD VM (rust from packages; rustup has no OpenBSD host)
+        uses: vmactions/openbsd-vm@v1
+        with:
+          prepare: pkg_add rust curl
+          run: |
+            cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
+            target/release/noscat --version
+
+  netbsd:
+    name: netbsd x86_64 (trial)
+    if: ${{ !inputs.only || inputs.only == 'bsd' }}
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in a NetBSD VM
+        uses: vmactions/netbsd-vm@v1
+        with:
+          prepare: /usr/sbin/pkg_add rust curl
+          run: |
+            cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
+            target/release/noscat --version
 
   publish-check:
     name: crates.io dry run

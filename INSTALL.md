@@ -8,7 +8,7 @@ automatically per release. Latest release page:
 > The from-git methods (`cargo install --git`, `nix run`) build `main`,
 > which may be ahead of the latest release.
 
-## Quick install (Linux and macOS)
+## Quick install (Linux, macOS and FreeBSD)
 
 Shell installer, into `~/.local/bin`:
 
@@ -95,13 +95,25 @@ extra.
 
 ## BSDs (FreeBSD, OpenBSD, NetBSD)
 
-There are no BSD packages yet, and Noscat does not build on FreeBSD yet:
-one of the FIPS crates (`nvpn-mdns-sd`) uses a Linux-only socket option,
-and the fix is waiting upstream (`docs/upstream/01-freebsd-build.md`).
-BSD binaries are planned for 0.6.1, built with the upstream fix applied
-([#19](https://github.com/Letdown2491/noscat/issues/19)).
-OpenBSD and NetBSD have not been tried. A FreeBSD port (and then
-pkgsrc-wip) is on the table if there is demand.
+From 0.6.1, every release attaches a FreeBSD binary
+(`noscat-<tag>-x86_64-unknown-freebsd.tar.gz`, built on FreeBSD 14), and
+the shell installer above picks it on FreeBSD.
+
+`cargo install noscat` still fails on the BSDs: two of the FIPS crates
+need small fixes that are waiting upstream
+(`docs/upstream/01-freebsd-build.md`). The release builds with those
+fixes applied; to build from a checkout the same way:
+
+```
+cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
+```
+
+The script fetches the two crates, applies `packaging/bsd/patches/` and
+prints the cargo options that use the patched copies (it needs `patch`,
+which FreeBSD's base system has). OpenBSD and NetBSD are tried in CI the
+same way, with Rust from their packages; there are no binaries for them
+yet. A FreeBSD port (and then pkgsrc-wip) is on the table if there is
+demand.
 
 ## Every package ships
 
