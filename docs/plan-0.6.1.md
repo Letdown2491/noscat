@@ -43,21 +43,25 @@ for as long as it stays in the mesh.
 
 Key packages:
 
-- [ ] After a successful join, delete this device's key package private
+- [x] After a successful join, delete this device's key package private
       keys (`init_key`) from the mesh state and publish a NIP-09 deletion
       for the consumed kind 30443 event. A device in a mesh refuses
       Welcomes, so it needs neither; Marmot (`foundation/key-packages.md`)
       requires the deletion within 24 hours of a replacement or at
       `not_after`. Otherwise anyone who later gets the state file can open
       the original Welcome, still on the relays.
-- [ ] Remember the key package refs of every Add the mesh commits
+- [x] Remember the key package refs of every Add the mesh commits
       (bounded, in mesh state) and refuse them in `MeshGroup::add`.
       Without it, re-inviting a device that was removed while offline
       picks its old, consumed package from a relay, and the commit adds a
       member that can never open its Welcome (its storage was wiped on
       removal). `invite` then tries the next package, or says the device
-      must run `noscat join` to publish a fresh one.
-- [ ] Tests: a joined device has no key package material left and its
+      must run `noscat join` to publish a fresh one. (A device knows only
+      the Adds it applied, so one that joined later cannot refuse a
+      package consumed before it arrived.)
+- [x] noscat-relay accepts the deletion: kind 5 for the author's own
+      key packages, by coordinate only, never served back.
+- [x] Tests: a joined device has no key package material left and its
       event is deleted on the mock relay; re-inviting a removed device
       that has only its consumed package is refused, and works once it
       publishes a fresh one.
@@ -66,33 +70,36 @@ Welcome delivery (`publish` already sends to every inbox relay at once and
 lets the slower ones finish, as MDK and Haven now do; what is missing is
 what happens when none of them takes it):
 
-- [ ] Owed Welcomes are kept in mesh state with a deadline: 7 days after
+- [x] Owed Welcomes are kept in mesh state with a deadline: 7 days after
       the commit or the key package's `not_after`, whichever comes first
       (as MDK's #3708). The inviter retries each with backoff (30 s,
       doubling to 1 h) while it runs, until the new member is seen or the
-      deadline passes.
-- [ ] Each retry wraps the Welcome again. NIP-59 backdates a gift wrap by
+      deadline passes; once a relay has accepted it, only every hour,
+      doubling to a day (a relay may still never serve it back).
+- [x] Each retry wraps the Welcome again. NIP-59 backdates a gift wrap by
       up to 2 days and a joiner looks back only 3
       (`GIFT_WRAP_LOOKBACK_SECS`), so republishing the first wrap would
       soon fall out of its window.
-- [ ] A join request from a member that has never been seen means its
+- [x] A join request from a member that has never been seen means its
       Welcome went missing: resend the owed Welcome at once instead of
       dropping the request (`on_join_request` drops it today).
-- [ ] Delivered means the new member's first advert arrived, not a
+- [x] Delivered means the new member's first advert arrived, not a
       relay's OK: a relay can accept a gift wrap it never serves back (MDK
       found relay.damus.io doing so for about 10% of recipients).
-- [ ] `invite` reports "added; invitation not delivered yet" when no relay
+- [x] `invite` reports "added; invitation not delivered yet" when no relay
       took the Welcome, instead of a plain success (CLI and the client's
       result).
 
 Member state:
 
-- [ ] The member list (`MemberStatus` and the client's) marks a member
+- [x] The member list (`MemberStatus` and the client's) marks a member
       that was added but never seen as pending, and one past its Welcome
       deadline as never joined; the fix for now is to remove it and invite
       it again (automatic re-admission comes in 0.7.0, ADR 0009).
       `noscat mesh members` shows the state and keeps the npubs that
-      noscat-relay reads; API.md, the man page and both apps follow.
+      noscat-relay reads; API.md and the man page follow.
+- [ ] Both apps show the states (joining, never joined) and the invite
+      result.
 
 MDK interop:
 

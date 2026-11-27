@@ -311,3 +311,144 @@ fn relays_and_private_mode_reach_members() {
     assert!(matches!(a.g.set_relays(&[own]), Err(MeshError::NotAllowed(_))));
     assert!(a.g.set_relays(&["https://not-a-relay".into()]).is_err());
 }
+
+fn state_of(d: &Dev, who: &Dev) -> MemberState {
+    d.g.members().unwrap().into_iter().find(|m| m.device == who.pk()).expect("member").state
+}
+
+#[test]
+fn a_joined_device_keeps_no_key_package() {
+    let mut a = Dev::new("a");
+    let mut b = Dev::new("b");
+    a.g.create("home", &[RELAY.into()]).unwrap();
+    let kp = b.g.key_package_event().unwrap();
+    let out = a.g.add(&[kp]).unwrap();
+    a.g.confirm().unwrap();
+    let gw = a.g.wrap_welcome(&out.welcomes[0]).unwrap();
+    let r = b.g.meta.key_packages[0].key_package_ref.clone();
+    b.g.join(&gw, Some(a.pk())).unwrap().unwrap();
+    assert!(b.g.meta.key_packages.is_empty());
+    let stored: Option<KeyPackageBundle> = b.g.provider.storage.key_package(&key_package_ref(&r).unwrap()).unwrap();
+    assert!(stored.is_none(), "the private key of the used key package is gone");
+    // And it stays gone across a restart.
+    b.reopen();
+    assert!(b.g.meta.key_packages.is_empty());
+    // A second copy of the same Welcome finds nothing to open.
+    assert!(matches!(b.g.join(&gw, Some(a.pk())), Err(MeshError::AlreadyInMesh)));
+}
+
+#[test]
+fn a_used_key_package_is_refused() {
+    let (mut a, mut b) = mesh_of_two();
+    let mut c = Dev::new("c");
+    let kp = c.g.key_package_event().unwrap();
+    let out = a.g.add(std::slice::from_ref(&kp)).unwrap();
+    a.g.confirm().unwrap();
+    b.g.process(&out.commit).unwrap();
+    let gw = a.g.wrap_welcome(&out.welcomes[0]).unwrap();
+    c.g.join(&gw, Some(a.pk())).unwrap().unwrap();
+    // C is removed (while offline, say), and its used key package is still
+    // on a relay. Neither the member that added it nor one that only saw
+    // the Add may use it again: C could never open that Welcome.
+    let out = b.g.remove(&[c.pk()]).unwrap();
+    b.g.confirm().unwrap();
+    a.g.process(&out.commit).unwrap();
+    for d in [&mut a, &mut b] {
+        match d.g.add(std::slice::from_ref(&kp)) {
+            Err(MeshError::KeyPackage(e)) => assert!(e.contains("already used"), "{e}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    // The used refs survive a restart.
+    a.reopen();
+    assert!(matches!(a.g.add(std::slice::from_ref(&kp)), Err(MeshError::KeyPackage(_))));
+    // A fresh key package works.
+    c.g.forget().unwrap();
+    let fresh = c.g.key_package_event().unwrap();
+    a.g.add(&[fresh]).unwrap();
+    a.g.confirm().unwrap();
+}
+
+#[test]
+fn a_new_member_is_pending_until_it_speaks() {
+    let (mut a, mut b) = mesh_of_two();
+    // Members from before a device joined count as seen.
+    assert_eq!(state_of(&b, &a), MemberState::Active);
+    assert_eq!(state_of(&a, &a), MemberState::Active);
+    // Pending on the member that added it.
+    assert_eq!(state_of(&a, &b), MemberState::Pending);
+    let mut c = Dev::new("c");
+    let commit = invite(&mut a, &mut c);
+    b.g.process(&commit).unwrap();
+    // And on a member that only saw the Add.
+    assert_eq!(state_of(&b, &c), MemberState::Pending);
+    // Its first message makes it active.
+    let ev = c.g.send_advert(None, "phone", false, false, false).unwrap();
+    a.g.process(&ev).unwrap();
+    b.g.process(&ev).unwrap();
+    assert_eq!(state_of(&a, &c), MemberState::Active);
+    assert_eq!(state_of(&b, &c), MemberState::Active);
+    // B never spoke; once the deadline has passed it shows as never joined.
+    *a.g.meta.unseen.get_mut(&b.pk().to_hex()).unwrap() -= WELCOME_DEADLINE_SECS + 1;
+    assert_eq!(state_of(&a, &b), MemberState::NeverJoined);
+    // A member that leaves drops out of the bookkeeping.
+    a.g.remove(&[b.pk()]).unwrap();
+    a.g.confirm().unwrap();
+    assert!(!a.g.meta.unseen.contains_key(&b.pk().to_hex()));
+}
+
+#[test]
+fn owed_welcomes_back_off_and_end_when_the_member_shows_up() {
+    let mut a = Dev::new("a");
+    let mut b = Dev::new("b");
+    a.g.create("home", &[RELAY.into()]).unwrap();
+    let kp = b.g.key_package_event().unwrap();
+    let out = a.g.add(&[kp]).unwrap();
+    a.g.confirm().unwrap();
+    let w = &out.welcomes[0];
+    assert!(w.deliver_until > now_secs() && w.deliver_until <= now_secs() + WELCOME_DEADLINE_SECS);
+    a.g.owe_welcomes(&out.welcomes).unwrap();
+    // Due at once.
+    let due = a.g.due_welcomes();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].invitee, b.pk());
+    // No relay took it: retried after 30 s, not now.
+    a.g.welcome_attempted(&b.pk(), false).unwrap();
+    assert!(a.g.due_welcomes().is_empty());
+    let o = &a.g.meta.owed_welcomes[0];
+    assert_eq!(o.backoff, WELCOME_RETRY_MIN_SECS);
+    // Accepted: the slower schedule.
+    a.g.welcome_attempted(&b.pk(), true).unwrap();
+    assert_eq!(a.g.meta.owed_welcomes[0].backoff, WELCOME_RESEND_MIN_SECS);
+    // The member asks to join again: due now.
+    assert!(a.g.welcome_wanted(&b.pk()));
+    assert!(!a.g.welcome_wanted(&a.pk()));
+    // Kept across a restart.
+    a.reopen();
+    let due = a.g.due_welcomes();
+    assert_eq!(due.len(), 1);
+    // Each resend is a fresh wrap that B can open.
+    let gw1 = a.g.wrap_welcome(&due[0]).unwrap();
+    let gw2 = a.g.wrap_welcome(&due[0]).unwrap();
+    assert_ne!(gw1.id, gw2.id);
+    b.g.join(&gw2, Some(a.pk())).unwrap().unwrap();
+    // B speaks: nothing is owed any more.
+    let ev = b.g.send_advert(None, "laptop", false, false, false).unwrap();
+    a.g.process(&ev).unwrap();
+    assert!(a.g.due_welcomes().is_empty());
+    assert!(a.g.meta.owed_welcomes.is_empty());
+}
+
+#[test]
+fn an_owed_welcome_ends_at_its_deadline() {
+    let mut a = Dev::new("a");
+    let mut b = Dev::new("b");
+    a.g.create("home", &[RELAY.into()]).unwrap();
+    let kp = b.g.key_package_event().unwrap();
+    let out = a.g.add(&[kp]).unwrap();
+    a.g.confirm().unwrap();
+    a.g.owe_welcomes(&out.welcomes).unwrap();
+    a.g.meta.owed_welcomes[0].deliver_until = now_secs() - 1;
+    assert!(a.g.due_welcomes().is_empty());
+    assert!(a.g.meta.owed_welcomes.is_empty());
+}

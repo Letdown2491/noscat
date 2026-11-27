@@ -36,8 +36,8 @@ use crate::dataplane::{Dataplane, DataplaneConfig, DataplaneError, Member, PeerL
 use crate::identity::Identity;
 use crate::marmot::transport::AppEvent;
 use crate::marmot::{
-    self, ADVERT_KIND, Change, GROUP_KIND, INBOX_RELAYS_KIND, KEY_PACKAGE_KIND, MeshError, MeshGroup,
-    Outgoing, RELAY_LIST_KIND,
+    self, ADVERT_KIND, Change, GROUP_KIND, INBOX_RELAYS_KIND, KEY_PACKAGE_KIND, MemberState, MeshError,
+    MeshGroup, Outgoing, RELAY_LIST_KIND,
 };
 use crate::relay::{self, Presence};
 use crate::streams::{Streams, StreamsError};
@@ -64,6 +64,9 @@ const JOIN_REQUEST_REPEAT: Duration = Duration::from_secs(15);
 /// Least time between adverts sent in answer to a returning member.
 const ADVERT_REPLY_DEBOUNCE: Duration = Duration::from_secs(10);
 const RESUME_OVERLAP_SECS: u64 = 15 * 60;
+/// How often owed Welcomes are checked for a resend (each has its own
+/// backoff; this is only the check).
+const WELCOME_TICK: Duration = Duration::from_secs(15);
 const SYNC_FILE: &str = "relay-sync.json";
 const SUB_GROUP: &str = "noscat-group";
 const SUB_INBOX: &str = "noscat-inbox";
@@ -146,6 +149,19 @@ pub struct MemberStatus {
     /// Its latest advert offers control (a terminal); whether this device
     /// may use it is the member's decision.
     pub control: bool,
+    /// Whether it has shown up since it was added.
+    pub state: MemberState,
+}
+
+/// What [`Device::invite`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Invited {
+    /// A relay accepted the invitation (the Welcome). `false`: the device
+    /// is added but its invitation is not delivered yet; it is resent in
+    /// the background until the device shows up or
+    /// [`marmot::WELCOME_DEADLINE_SECS`] pass. Either way, the member
+    /// list's state says when it has joined.
+    pub welcome_accepted: bool,
 }
 
 /// Something that happened on the mesh.
@@ -442,6 +458,7 @@ impl Device {
         let h = tokio::spawn(async move { d.publish_profile().await });
         dev.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
         dev.spawn_advert_ticker();
+        dev.spawn_welcome_resender();
         Ok(dev)
     }
 
@@ -502,6 +519,7 @@ impl Device {
                     last_seen_secs: if m.this_device { Some(0) } else { self.inner.presence.age_secs(&hex) },
                     reachable: if m.this_device { self.is_reachable() } else { reachable.contains(&m.device) },
                     control: if m.this_device { self.control_offered() } else { controls.contains(&m.device) },
+                    state: m.state,
                 }
             })
             .collect()
@@ -706,6 +724,25 @@ impl Device {
             if let Err(e) = self.publish_key_package().await {
                 tracing::warn!("key package not published: {e}");
             }
+        }
+    }
+
+    /// Ask the relays to drop this device's published key package (NIP-09,
+    /// by its slot): after a join it is used up, and a copy left on a relay
+    /// would let a member re-invite this device with a package it can no
+    /// longer open. Best effort; members refuse a used package anyway.
+    async fn delete_key_package(&self) {
+        let slot = self.inner.group.lock().await.key_package_slot().to_string();
+        let ev = match marmot::transport::key_package_deletion(self.inner.identity.keys(), &slot) {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!("key package deletion: {e}");
+                return;
+            }
+        };
+        let relays = union(&self.profile_relays().await, &self.all_relays().await);
+        if let Err(e) = self.publish(&ev, &relays).await {
+            tracing::info!("used key package not deleted from the relays: {e}");
         }
     }
 
@@ -936,6 +973,49 @@ impl Device {
         self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
     }
 
+    fn spawn_welcome_resender(&self) {
+        let dev = self.clone();
+        let h = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(WELCOME_TICK);
+            loop {
+                tick.tick().await;
+                dev.resend_welcomes().await;
+            }
+        });
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(h);
+    }
+
+    /// Send every owed Welcome that is due (see [`MeshGroup::due_welcomes`]).
+    async fn resend_welcomes(&self) {
+        let due = self.inner.group.lock().await.due_welcomes();
+        for w in due {
+            let accepted = self.deliver_welcome(&w).await;
+            if let Err(e) = self.inner.group.lock().await.welcome_attempted(&w.invitee, accepted) {
+                tracing::warn!("recording an invitation attempt: {e}");
+            }
+        }
+    }
+
+    /// Wrap one Welcome afresh and publish it to the invitee's inbox
+    /// relays; `true` when a relay accepted it.
+    async fn deliver_welcome(&self, w: &marmot::PendingWelcome) -> bool {
+        let inbox = self.inbox_relays(&w.invitee).await;
+        let gw = match self.inner.group.lock().await.wrap_welcome(w) {
+            Ok(gw) => gw,
+            Err(e) => {
+                tracing::warn!("invitation: {e}");
+                return false;
+            }
+        };
+        match self.publish(&gw, &inbox).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(device = %w.invitee.to_hex(), "invitation not delivered yet: {e}");
+                false
+            }
+        }
+    }
+
     fn spawn_advert_ticker(&self) {
         let dev = self.clone();
         let h = tokio::spawn(async move {
@@ -981,6 +1061,8 @@ impl Device {
                 *self.inner.expected_inviter.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 self.note_synced(now().saturating_sub(RESUME_OVERLAP_SECS));
                 let _ = self.inner.events.send(DeviceEvent::Joined);
+                let dev = self.clone();
+                tokio::spawn(async move { dev.delete_key_package().await });
                 self.handle(changes).await;
             }
         }
@@ -1012,6 +1094,12 @@ impl Device {
             .iter()
             .any(|m| m.device == req.sender);
         if member {
+            // A member that asks to join never got its Welcome (it waits in
+            // `join`): resend it now if this device owes it.
+            if self.inner.group.lock().await.welcome_wanted(&req.sender) {
+                let dev = self.clone();
+                tokio::spawn(async move { dev.resend_welcomes().await });
+            }
             return;
         }
         {
@@ -1253,31 +1341,33 @@ impl Device {
     // ---- membership ----------------------------------------------------
 
     /// Publish a staged commit, then apply it (or drop it on failure), then
-    /// deliver its Welcomes.
-    async fn commit(&self, out: Outgoing) -> Result<(), DeviceError> {
+    /// deliver its Welcomes. Returns whether a relay accepted every
+    /// Welcome; the ones not accepted (and the others, until their device
+    /// shows up) are resent in the background.
+    async fn commit(&self, out: Outgoing) -> Result<bool, DeviceError> {
         let relays = self.all_relays().await;
         if let Err(e) = self.publish(&out.commit, &relays).await {
             self.inner.group.lock().await.abandon()?;
             return Err(e);
         }
         let changes = self.inner.group.lock().await.confirm()?;
+        self.inner.group.lock().await.owe_welcomes(&out.welcomes)?;
         self.handle(changes).await;
+        let mut all = true;
         for w in &out.welcomes {
-            let inbox = self.inbox_relays(&w.invitee).await;
-            let gw = self.inner.group.lock().await.wrap_welcome(w)?;
-            if let Err(e) = self.publish(&gw, &inbox).await {
-                tracing::warn!(device = %w.invitee.to_hex(), "invitation not delivered: {e}");
-            }
+            let accepted = self.deliver_welcome(w).await;
+            self.inner.group.lock().await.welcome_attempted(&w.invitee, accepted)?;
+            all &= accepted;
         }
-        Ok(())
+        Ok(all)
     }
 
     async fn commit_pending(&self) -> Result<(), DeviceError> {
         let out = self.inner.group.lock().await.commit_pending()?;
-        match out {
-            Some(out) => self.commit(out).await,
-            None => Ok(()),
+        if let Some(out) = out {
+            self.commit(out).await?;
         }
+        Ok(())
     }
 
     /// A device's inbox relays (kind 10050), or ours when it has none.
@@ -1353,7 +1443,7 @@ impl Device {
 
     /// Add a device to the mesh by its key. Its newest key package is
     /// fetched from this device's relays and the ones it lists.
-    pub async fn invite(&self, device: PublicKey) -> Result<(), DeviceError> {
+    pub async fn invite(&self, device: PublicKey) -> Result<Invited, DeviceError> {
         // Answered: a later request from this device (after a removal,
         // say) is reported again.
         self.inner.join_requests.lock().unwrap_or_else(|p| p.into_inner()).remove(&device);
@@ -1382,7 +1472,10 @@ impl Device {
         for kp in kps {
             let staged = self.inner.group.lock().await.add(std::slice::from_ref(&kp));
             match staged {
-                Ok(out) => return self.commit(out).await,
+                Ok(out) => {
+                    let welcome_accepted = self.commit(out).await?;
+                    return Ok(Invited { welcome_accepted });
+                }
                 Err(MeshError::KeyPackage(e)) => last = Some(e),
                 Err(e) => return Err(e.into()),
             }
@@ -1409,7 +1502,7 @@ impl Device {
     /// moves to the new list.
     pub async fn set_mesh_relays(&self, relays: &[String]) -> Result<(), DeviceError> {
         let out = self.inner.group.lock().await.set_relays(relays)?;
-        self.commit(out).await
+        self.commit(out).await.map(|_| ())
     }
 
     /// The mesh's STUN servers (`ip:port`); empty when it lists none.
@@ -1421,7 +1514,7 @@ impl Device {
     /// member uses the new list from its next start.
     pub async fn set_mesh_stun(&self, servers: &[String]) -> Result<(), DeviceError> {
         let out = self.inner.group.lock().await.set_stun(servers)?;
-        self.commit(out).await
+        self.commit(out).await.map(|_| ())
     }
 
     /// Make the mesh private (its devices use only its relays, log in to
@@ -1429,13 +1522,13 @@ impl Device {
     pub async fn set_private(&self, private: bool) -> Result<(), DeviceError> {
         if !private {
             let out = self.inner.group.lock().await.set_private(false)?;
-            return self.commit(out).await;
+            return self.commit(out).await.map(|_| ());
         }
         self.inner.going_private.store(true, std::sync::atomic::Ordering::SeqCst);
         self.sync_relays(false).await;
         let r = async {
             let out = self.inner.group.lock().await.set_private(true)?;
-            self.commit(out).await
+            self.commit(out).await.map(|_| ())
         }
         .await;
         self.inner.going_private.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1446,7 +1539,7 @@ impl Device {
     /// Remove devices from the mesh.
     pub async fn remove(&self, devices: &[PublicKey]) -> Result<(), DeviceError> {
         let out = self.inner.group.lock().await.remove(devices)?;
-        self.commit(out).await
+        self.commit(out).await.map(|_| ())
     }
 
     /// Wait for an invitation from `inviter` and join its mesh. The key

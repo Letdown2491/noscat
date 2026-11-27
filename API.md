@@ -110,7 +110,7 @@ Mesh:
 | `device_name()` | `String` | This device's name, as members see it. |
 | `set_device_name(name)` | `()` | Rename; blocks until the advert carrying it is published, so members see it within seconds. Blank is ignored. The caller saves the name for the next start (config `device_name`). |
 | `create_mesh(name)` | `()` | New mesh with this device as the only member. |
-| `invite(target)` | `()` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. |
+| `invite(target)` | `Invited` | Add a device (npub or `noscat:` URI). The device must be running or waiting in `join`. Once this returns the device is a member. `Invited { welcome_accepted }`: whether a relay also took its invitation (the Welcome). When `false`, say "added, invitation not delivered yet": the Welcome is resent in the background (wrapped afresh each time) while a client runs for this directory, until the device shows up or a week passes, and `Member::state` is `Pending` meanwhile. A relay accepting it is not proof of delivery either, so it is resent (more slowly) until the device is seen. A used key package (one an earlier Add consumed) is refused; with nothing else to use, the error says the device must publish a fresh one (`noscat join`). (New in 0.6.1; was `()`.) |
 | `join(inviter, timeout)` | `()` | Wait for the inviter's invitation and join. The scanned QR (the inviter) is the trust anchor: invitations from anyone else are ignored. Pass the scanned code whole: when it names relays (`?relay=`, a private mesh's), the join goes through them alone, logged in (NIP-42). |
 | `mesh_relays()` / `is_private()` | `Vec<String>` / `bool` | The mesh's relays; whether it is private. |
 | `set_mesh_relays(relays)` | `()` | Replace the mesh's relays (1 to 16 `wss://` URLs). Every member moves to the new list. |
@@ -119,7 +119,7 @@ Mesh:
 | `pairing_uri()` | `String` | What the pairing QR shows: `noscat:<npub>`, plus `?relay=` for each of a private mesh's relays. |
 | `remove(target)` | `()` | Remove a member. Every member is an admin and may do this. |
 | `leave(timeout)` | `()` | Leave; waits for another member to commit it. With none in time it forgets the mesh locally anyway: the request stays on the relays and the next member to come online completes it. The last member just forgets the mesh. When there is nothing to leave, the error message contains "this device is not in a mesh". |
-| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, control, connected`. `control`: it offers a terminal (see Terminal). `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. Sorted for display: this device first, then by name (case-insensitive), then unnamed devices, ties by npub; presence never reorders it, and `Roster` events carry the same order. |
+| `members()` | `Vec<Member>` | `npub, name, admin, this_device, online, last_seen_secs, reachable, control, connected, state`. `state` (`MemberState`, new in 0.6.1): `Active` once it has sent anything (or it was a member before this device joined), `Pending` while a member added since this device joined has not been heard from (show it as joining), `NeverJoined` once a week has passed without a word from it (it most likely never got its invitation: offer to remove it and invite it again). Persistent: unlike presence, it survives restarts. `control`: it offers a terminal (see Terminal). `online`: its advert arrived over the relays recently, which says nothing about whether data can reach it. `connected`: data can flow to it now (a direct link or a live connection, possibly relayed). While `up` or `expose` runs, the client keeps a connection to every online member (dialing every 30 s), so online but not connected means seen but unreachable. `reachable`: its latest advert says it is reachable from the internet. A `Roster` event follows every connection change. Sorted for display: this device first, then by name (case-insensitive), then unnamed devices, ties by npub; presence never reorders it, and `Roster` events carry the same order. |
 | `member_age_secs(npub)` / `member_online(npub)` | `Option<u64>` / `bool` | Presence from adverts (sent every 2 minutes, fresh for 10). |
 | `join_requests()` | `Vec<JoinRequest>` | `npub, name, age_secs`: devices that asked to join in the last 15 minutes and are not members yet, oldest first. Read from the relays, so a process started after the request (a CLI next to a service) sees it too; the `JoinRequest` event is the live signal. Invite one with `invite(npub)`. Not in the FFI (the apps use the event). |
 | `network_changed()` | `()` | Re-check paths after a network switch. Apps call it when the platform reports a new default network (Wi-Fi to cellular and back): without it, paths through the old address take minutes to time out. |
@@ -265,7 +265,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 | `mesh_members(dir, relays?)` | The members. Presence (`online`, `last_seen_secs`) is only known while a client runs for `dir`. |
 | `mesh_sync(dir, wait_secs, relays?)` | The members after catching up: immediate when a client runs for `dir`, else after running the device for `wait_secs`. |
 | `mesh_create(dir, name, relays?)` | New mesh with this device as the only member. |
-| `mesh_invite(dir, npub, relays?)` | Add a device; it must be running or in `mesh_join`. |
+| `mesh_invite(dir, npub, relays?)` | Add a device; it must be running or in `mesh_join`. Returns `Boolean` (new in 0.6.1): whether a relay accepted its invitation; `false` = added, invitation not delivered yet (see `invite` above; resent while a client runs for `dir`). |
 | `mesh_remove(dir, npub, relays?)` | Remove a member. |
 | `mesh_leave(dir, timeout_secs, relays?)` | Leave; waits for another member to complete it (see `leave` above for the timeout case). Deleting `dir` afterwards, once no client runs on it, makes the next join a new device. |
 
@@ -275,8 +275,9 @@ same `mesh_dir`), and otherwise run the device just for the call.
   dir's `identity.nsec`; apps should do that rather than read the file,
   which is sealed under a storage key.
   `listen_port` None = any free port.
-- `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device, reachable, connected }` (see `members()`).
-  Every device is an admin.
+- `MeshMember { npub, name?, last_seen_secs?, online, admin, this_device, reachable, connected, control, state }` (see `members()`).
+  Every device is an admin. `state` is the UniFFI enum `MemberState`
+  (`Active`, `Pending`, `NeverJoined`), new in 0.6.1.
 - `ForwardInfo { id, target, local }` (`local` as a string, e.g.
   `"127.0.0.1:8080"`).
 - `Identity { npub, secret_hex }`.
@@ -308,6 +309,10 @@ fires while it asks) returning a `Terminal` object: `id()`,
 `control` (it offers a terminal), and the access types are UniFFI enums
 and records: `AccessGroup`, `AccessRule`, `AccessRules`, `AccessAnswer`,
 `AccessOutcome`, `AccessRequest`, `TerminalSessionInfo`.
+
+New in 0.6.1: `invite(npub)` returns `Boolean` (a relay accepted the
+invitation; `false` = added, invitation not delivered yet, resent in the
+background), and `MeshMember` gains `state: MemberState`.
 
 Threading contract (the Android app's rules 5 and 6, restated because they
 are the ones apps keep violating):
@@ -348,6 +353,10 @@ to be invited: show a prompt, then `invite(peer)`). New in 0.6: `AccessRequest {
   seconds of each other converge on one result; the loser sees
   `MeshChangeUndone` (ADR 0007).
 - `join` accepts only an invitation from the named inviter.
+- After joining, a device drops its key package's private keys and asks
+  the relays to delete the published package (NIP-09); members refuse a
+  key package an earlier Add consumed. Invitations are resent until the
+  new member is seen (see `invite`).
 - Adverts (name, presence) travel inside the group, so relays see neither.
 
 ## Versioning

@@ -78,6 +78,31 @@ pub struct MeshMember {
     /// Data can flow to it right now (a direct link or a live, possibly
     /// relayed, connection). `online` only means its advert arrived.
     pub connected: bool,
+    /// Whether it has shown up since it was added.
+    pub state: MemberState,
+}
+
+/// Whether a member has shown up since it was added.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberState {
+    /// It has sent something, or was a member before this device joined.
+    Active,
+    /// Added recently and not heard from yet: its invitation may still be
+    /// on its way. Show it as "joining".
+    Pending,
+    /// Not heard from a week after it was added: it most likely never got
+    /// its invitation. Offer to remove it and invite it again.
+    NeverJoined,
+}
+
+impl From<noscat_client::MemberState> for MemberState {
+    fn from(s: noscat_client::MemberState) -> Self {
+        match s {
+            noscat_client::MemberState::Active => Self::Active,
+            noscat_client::MemberState::Pending => Self::Pending,
+            noscat_client::MemberState::NeverJoined => Self::NeverJoined,
+        }
+    }
 }
 
 fn member(m: noscat_client::Member) -> MeshMember {
@@ -91,6 +116,7 @@ fn member(m: noscat_client::Member) -> MeshMember {
         reachable: m.reachable,
         control: m.control,
         connected: m.connected,
+        state: m.state.into(),
     }
 }
 
@@ -506,9 +532,12 @@ pub fn mesh_create(dir: String, name: String, relays: Option<Vec<String>>) -> Re
 }
 
 /// Add a device (npub or `noscat:` URI); it must be running or joining.
+/// Returns whether a relay accepted its invitation: `false` means it is
+/// added but the invitation is not delivered yet (it is resent while a
+/// device for this directory runs; the member shows as pending meanwhile).
 #[uniffi::export]
-pub fn mesh_invite(dir: String, npub: String, relays: Option<Vec<String>>) -> Result<(), NoscatError> {
-    with_device(&dir, relays, |c| c.invite(&npub).map_err(NoscatError::fail))
+pub fn mesh_invite(dir: String, npub: String, relays: Option<Vec<String>>) -> Result<bool, NoscatError> {
+    with_device(&dir, relays, |c| c.invite(&npub).map(|i| i.welcome_accepted).map_err(NoscatError::fail))
 }
 
 /// Remove a member.
@@ -600,8 +629,11 @@ impl NoscatClient {
     }
 
     /// Add a device (npub or `noscat:` URI), e.g. after a `JoinRequest`.
-    pub fn invite(&self, npub: String) -> Result<(), NoscatError> {
-        self.client.invite(&npub).map_err(NoscatError::fail)
+    /// Returns whether a relay accepted its invitation: `false` means it is
+    /// added but the invitation is not delivered yet; it is resent in the
+    /// background, and the member shows as pending meanwhile.
+    pub fn invite(&self, npub: String) -> Result<bool, NoscatError> {
+        self.client.invite(&npub).map(|i| i.welcome_accepted).map_err(NoscatError::fail)
     }
 
     /// Remove a member.

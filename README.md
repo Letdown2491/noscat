@@ -176,7 +176,7 @@ so leave the flag off once your devices are in.
 Every member can invite and remove:
 
 ```
-noscat mesh members            # who is in, names and presence
+noscat mesh members            # who is in, names, presence, who is still joining
 noscat mesh remove <npub>
 noscat mesh leave              # this device leaves
 ```

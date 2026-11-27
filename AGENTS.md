@@ -147,8 +147,8 @@ is their contract:
 - `~/Documents/noscat-relay`: a members-only relay (Go, khatru) for one
   mesh. It reads its member list from `noscat mesh members` output (any
   npubs in it count), so keep npubs in that output; it serves only the
-  event kinds noscat uses (445, 1059, 30443, 10050, 10002), so a new kind
-  needs a relay change too.
+  event kinds noscat uses (445, 1059, 30443, 10050, 10002, and 5 for
+  deleting a used key package), so a new kind needs a relay change too.
 
 All four repos work on their default branch (`main`; `master` for
 noscat-android) and release in lockstep.

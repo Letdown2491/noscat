@@ -4,7 +4,7 @@
 use noscat_client::{Client, Event, Member};
 
 use crate::clipboard;
-use crate::control::Row;
+use crate::control::{Row, RowState};
 
 /// The pairing QR (`noscat:<npub>`, or a full pairing URI as given) for
 /// terminals, colors inverted so it scans on the usual dark background.
@@ -42,6 +42,18 @@ pub fn age(secs: u64) -> String {
     }
 }
 
+/// What an invite reports: added, and whether a relay took the invitation.
+pub fn invited_line(target: &str, welcome_accepted: bool) -> String {
+    if welcome_accepted {
+        format!("invited {target}")
+    } else {
+        format!(
+            "added {target}, but its invitation is not delivered yet (no relay accepted it); \
+             it is resent while this device runs, and `noscat mesh members` shows it joining until it arrives"
+        )
+    }
+}
+
 pub fn print_members(mesh: Option<&str>, rows: &[Row]) {
     match mesh {
         Some(name) => println!("mesh {name:?}, {} member(s)", rows.len()),
@@ -53,6 +65,10 @@ pub fn print_members(mesh: Option<&str>, rows: &[Row]) {
     for r in rows {
         let presence = if r.this_device {
             "this device".to_string()
+        } else if r.state == RowState::Pending {
+            "joining (invited, not seen yet)".to_string()
+        } else if r.state == RowState::NeverJoined {
+            "never joined (remove it and invite it again)".to_string()
         } else {
             match (r.online, r.last_seen_secs) {
                 (true, Some(s)) => format!("online, seen {} ago", age(s)),
@@ -220,7 +236,8 @@ pub fn spawn_chat_repl(client: Client, name_file: std::path::PathBuf) {
             }
             if let Some(who) = line.strip_prefix("invite ") {
                 match client.invite(who.trim()) {
-                    Ok(()) => eprintln!("# ✅ invited {}", who.trim()),
+                    Ok(i) if i.welcome_accepted => eprintln!("# ✅ invited {}", who.trim()),
+                    Ok(_) => eprintln!("# ⚠️  {}", invited_line(who.trim(), false)),
                     Err(e) => eprintln!("# ⚠️  invite failed: {e}"),
                 }
                 continue;

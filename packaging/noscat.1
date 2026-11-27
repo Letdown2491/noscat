@@ -220,7 +220,14 @@ A running
 .B up
 prints each join request with the
 .B invite
-line to type.
+line to type. When no relay accepts the invitation, the device is still
+added and the output says its invitation is not delivered yet; it is
+resent while this device runs, for up to a week, and
+.B mesh members
+shows the device as joining until it arrives. A key package that an
+earlier invitation used up is refused: the device must publish a fresh
+one by running
+.BR "mesh join" .
 .TP
 .BI "mesh remove " target
 Remove a member. Each member cuts it off as soon as it processes the
@@ -242,7 +249,10 @@ List the members, their names, presence, which are connected (data can
 flow to them now; only known while
 .B up
 runs) and which are reachable, with a note when none is. A member can be
-online (its advert arrived over the relays) without being connected.
+online (its advert arrived over the relays) without being connected. A
+member added since this device joined shows as joining until it is heard
+from, and as never joined after a week without a word (remove it and
+invite it again).
 .TP
 .B mesh qr
 Print this device's pairing QR. In a private mesh it also names the

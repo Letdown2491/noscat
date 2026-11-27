@@ -238,6 +238,18 @@ pub fn wrap_welcome(
         .map_err(|e| TransportError(e.to_string()))
 }
 
+/// A NIP-09 deletion request for every key package this account published
+/// in `slot` (the `d` tag) up to now: kind 5 with the `a` coordinate
+/// `30443:<pubkey>:<slot>` and a `k` tag.
+pub fn key_package_deletion(keys: &Keys, slot: &str) -> Result<Event, TransportError> {
+    let coordinate = format!("{KEY_PACKAGE_KIND}:{}:{slot}", keys.public_key().to_hex());
+    EventBuilder::new(Kind::EventDeletion, "")
+        .tag(Tag::parse(["a", &coordinate]).map_err(|e| TransportError(e.to_string()))?)
+        .tag(Tag::parse(["k", &KEY_PACKAGE_KIND.to_string()]).map_err(|e| TransportError(e.to_string()))?)
+        .finalize(keys)
+        .map_err(|e| TransportError(e.to_string()))
+}
+
 /// An unwrapped Welcome, not yet processed by MLS.
 #[derive(Debug, Clone)]
 pub struct WelcomeEnvelope {

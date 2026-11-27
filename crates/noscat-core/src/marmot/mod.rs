@@ -75,6 +75,22 @@ const DEFERRED_KEEP: usize = 512;
 /// Domain separation for the leaf signing key (same scheme as 0.4).
 const MLS_DERIVE_INFO: &[u8] = b"noscat/mls-ed25519-v1";
 /// State file inside the device directory.
+/// How long an inviter keeps resending a Welcome, unless the key package
+/// it answers expires sooner: after about a week the invitee has replaced
+/// that package anyway (Marmot `foundation/key-packages.md`; MDK #3708).
+/// Members not seen by then show as never joined.
+pub const WELCOME_DEADLINE_SECS: u64 = 7 * 24 * 60 * 60;
+/// Resend backoff while no relay has accepted a Welcome: from 30 s,
+/// doubling to an hour.
+const WELCOME_RETRY_MIN_SECS: u64 = 30;
+const WELCOME_RETRY_MAX_SECS: u64 = 60 * 60;
+/// Once a relay has accepted one, resends only cover a relay that took it
+/// and never serves it back: from an hour, doubling to a day.
+const WELCOME_RESEND_MIN_SECS: u64 = 60 * 60;
+const WELCOME_RESEND_MAX_SECS: u64 = 24 * 60 * 60;
+/// Key package refs remembered from applied Adds, so a consumed package
+/// found on a relay is never used again.
+const USED_KEY_PACKAGES_KEEP: usize = 1024;
 const STATE_FILE: &str = "mesh-state.json";
 const STATE_VERSION: u32 = 1;
 
@@ -147,6 +163,23 @@ pub struct PendingWelcome {
     pub key_package_event: EventId,
     pub welcome: Vec<u8>,
     pub relays: Vec<String>,
+    /// Unix seconds after which the Welcome is not resent: the earlier of
+    /// [`WELCOME_DEADLINE_SECS`] from now and the key package's expiry.
+    pub deliver_until: u64,
+}
+
+/// Whether a member has shown up since it was added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberState {
+    /// It has sent something (an advert, a commit), or it was already a
+    /// member when this device joined.
+    Active,
+    /// Added while this device was in the mesh and not heard from yet: its
+    /// invitation may still be on its way.
+    Pending,
+    /// Not heard from [`WELCOME_DEADLINE_SECS`] after it was added: it most
+    /// likely never got its invitation. Remove it and invite it again.
+    NeverJoined,
 }
 
 /// A member as the roster shows it.
@@ -155,6 +188,7 @@ pub struct MemberInfo {
     pub device: PublicKey,
     pub admin: bool,
     pub this_device: bool,
+    pub state: MemberState,
 }
 
 // ---- provider ----------------------------------------------------------
@@ -228,6 +262,22 @@ struct OwnKeyPackage {
     key_package_ref: String,
 }
 
+/// A Welcome this device owes: it committed the Add, and the new member
+/// has not been seen yet.
+#[derive(Serialize, Deserialize, Clone)]
+struct OwedWelcome {
+    invitee: String,
+    key_package_event: String,
+    /// The Welcome's MLSMessage bytes, base64.
+    welcome: String,
+    relays: Vec<String>,
+    deliver_until: u64,
+    next_attempt: u64,
+    backoff: u64,
+    /// A relay accepted it at least once.
+    accepted: bool,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Meta {
     /// The device's key package publication slot, random, kept for life.
@@ -255,6 +305,19 @@ struct Meta {
     /// package per slot and reject a replacement that is not newer.
     #[serde(default)]
     last_key_package_at: u64,
+    /// Key package refs (hex) consumed by Adds this device applied, oldest
+    /// first: a package found on a relay after its Add is refused.
+    #[serde(default)]
+    used_key_packages: VecDeque<String>,
+    /// Members added while this device was in the mesh that have sent
+    /// nothing yet, with when this device first had them in its roster.
+    /// Members from before this device joined (or before this field
+    /// existed) count as seen.
+    #[serde(default)]
+    unseen: BTreeMap<String, u64>,
+    /// Welcomes this device committed and keeps resending.
+    #[serde(default)]
+    owed_welcomes: Vec<OwedWelcome>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -476,6 +539,18 @@ fn check_app_data_update(update: &AppDataUpdateProposal, required: &BTreeSet<u16
 
 /// Classify a commit: `Ok(false)` ordinary (a pure self-update, or only
 /// SelfRemove proposals), `Ok(true)` privileged (needs an admin).
+/// The key packages a commit adds: (ref, Marmot identity) for each.
+fn added_by(staged: &StagedCommit, crypto: &RustCrypto) -> Vec<([u8; 32], Option<[u8; 32]>)> {
+    staged
+        .add_proposals()
+        .filter_map(|q| {
+            let kp = q.add_proposal().key_package();
+            let r: [u8; 32] = kp.hash_ref(crypto).ok()?.as_slice().try_into().ok()?;
+            Some((r, identity_of(kp.leaf_node().credential())))
+        })
+        .collect()
+}
+
 fn is_privileged(staged: &StagedCommit) -> bool {
     let mut any = false;
     for p in staged.queued_proposals() {
@@ -685,9 +760,18 @@ impl MeshGroup {
                 device,
                 admin: st.admins.contains(&id),
                 this_device: id == me,
+                state: self.member_state(&id),
             });
         }
         Ok(out)
+    }
+
+    fn member_state(&self, id: &[u8; 32]) -> MemberState {
+        match self.meta.unseen.get(&hex::encode(id)) {
+            None => MemberState::Active,
+            Some(at) if now_secs() > at.saturating_add(WELCOME_DEADLINE_SECS) => MemberState::NeverJoined,
+            Some(_) => MemberState::Pending,
+        }
     }
 
     fn roster(&self) -> Vec<PublicKey> {
@@ -736,6 +820,10 @@ impl MeshGroup {
             let keep = self.meta.routing_ids.len().saturating_sub(4);
             self.meta.routing_ids.drain(..keep);
         }
+        let roster: BTreeSet<String> = self.roster().iter().map(|d| d.to_hex()).collect();
+        self.meta.unseen.retain(|d, _| roster.contains(d));
+        let unseen = &self.meta.unseen;
+        self.meta.owed_welcomes.retain(|w| unseen.contains_key(&w.invitee));
         let floor = epoch.saturating_sub(MAX_REWIND);
         self.meta.witnesses.retain(|e, _| *e >= floor);
         self.meta.history.retain(|a| a.parent_epoch + MAX_REWIND >= epoch);
@@ -919,8 +1007,15 @@ impl MeshGroup {
             if self.roster().contains(&device) {
                 return Err(MeshError::NotAllowed(format!("{} is already a member", device.to_hex())));
             }
+            let r = kp.hash_ref(&self.provider.crypto).map_err(mls("key package ref"))?;
+            if self.meta.used_key_packages.contains(&hex::encode(r.as_slice())) {
+                return Err(MeshError::KeyPackage(
+                    "already used to join this mesh; the device must publish a fresh one (noscat join)".into(),
+                ));
+            }
+            let until = now_secs().saturating_add(WELCOME_DEADLINE_SECS).min(kp.life_time().not_after());
             admins.insert(xonly(&device));
-            added.push((device, ev.id));
+            added.push((device, ev.id, until));
             kps.push(kp);
         }
         if kps.is_empty() {
@@ -937,11 +1032,12 @@ impl MeshGroup {
             commit,
             welcomes: added
                 .into_iter()
-                .map(|(invitee, kp_event)| PendingWelcome {
+                .map(|(invitee, kp_event, deliver_until)| PendingWelcome {
                     invitee,
                     key_package_event: kp_event,
                     welcome: wbytes.clone(),
                     relays: st.routing.relays.clone(),
+                    deliver_until,
                 })
                 .collect(),
         })
@@ -1091,7 +1187,9 @@ impl MeshGroup {
         };
         let parent_epoch = self.epoch().ok_or(MeshError::NoMesh)?;
         let g = self.group.as_mut().ok_or(MeshError::NoMesh)?;
+        let adds = g.pending_commit().map(|c| added_by(c, &self.provider.crypto)).unwrap_or_default();
         g.merge_pending_commit(&self.provider).map_err(mls("merge own commit"))?;
+        self.note_adds(&adds);
         self.meta.history.push(Applied {
             parent_epoch,
             snapshot,
@@ -1119,8 +1217,120 @@ impl MeshGroup {
     }
 
     /// Gift-wrap one Welcome for delivery to the invitee's inbox relays.
+    /// Each call makes a fresh wrap: NIP-59 backdates a wrap by up to two
+    /// days, so resending the first one would soon fall out of the time
+    /// window a joiner looks back over.
     pub fn wrap_welcome(&self, w: &PendingWelcome) -> Result<Event, MeshError> {
         Ok(transport::wrap_welcome(&self.keys, &w.invitee, &w.welcome, &w.key_package_event, &w.relays)?)
+    }
+
+    /// Record an applied commit's Adds: their key packages are used up, and
+    /// the new members are unseen until they send something.
+    fn note_adds(&mut self, adds: &[([u8; 32], Option<[u8; 32]>)]) {
+        let me = xonly(&self.device());
+        let now = now_secs();
+        for (r, id) in adds {
+            let h = hex::encode(r);
+            if !self.meta.used_key_packages.contains(&h) {
+                self.meta.used_key_packages.push_back(h);
+            }
+            if let Some(id) = id.filter(|id| *id != me) {
+                self.meta.unseen.entry(hex::encode(id)).or_insert(now);
+            }
+        }
+        while self.meta.used_key_packages.len() > USED_KEY_PACKAGES_KEEP {
+            self.meta.used_key_packages.pop_front();
+        }
+    }
+
+    /// Keep resending these Welcomes (their commit is applied) until each
+    /// new member is seen or its deadline passes. The first attempt is due
+    /// at once.
+    pub fn owe_welcomes(&mut self, welcomes: &[PendingWelcome]) -> Result<(), MeshError> {
+        for w in welcomes {
+            let invitee = w.invitee.to_hex();
+            if !self.meta.unseen.contains_key(&invitee) {
+                continue;
+            }
+            self.meta.owed_welcomes.retain(|o| o.invitee != invitee);
+            self.meta.owed_welcomes.push(OwedWelcome {
+                invitee,
+                key_package_event: w.key_package_event.to_hex(),
+                welcome: B64.encode(&w.welcome),
+                relays: w.relays.clone(),
+                deliver_until: w.deliver_until,
+                next_attempt: 0,
+                backoff: 0,
+                accepted: false,
+            });
+        }
+        self.save()
+    }
+
+    /// Owed Welcomes due for an attempt now. Ones past their deadline, or
+    /// whose member has shown up or left, are dropped.
+    pub fn due_welcomes(&mut self) -> Vec<PendingWelcome> {
+        let now = now_secs();
+        let before = self.meta.owed_welcomes.len();
+        let unseen = &self.meta.unseen;
+        self.meta.owed_welcomes.retain(|w| now <= w.deliver_until && unseen.contains_key(&w.invitee));
+        if self.meta.owed_welcomes.len() != before {
+            let _ = self.save();
+        }
+        self.meta
+            .owed_welcomes
+            .iter()
+            .filter(|w| w.next_attempt <= now)
+            .filter_map(|w| {
+                Some(PendingWelcome {
+                    invitee: PublicKey::from_hex(&w.invitee).ok()?,
+                    key_package_event: EventId::from_hex(&w.key_package_event).ok()?,
+                    welcome: B64.decode(&w.welcome).ok()?,
+                    relays: w.relays.clone(),
+                    deliver_until: w.deliver_until,
+                })
+            })
+            .collect()
+    }
+
+    /// One delivery attempt finished; `accepted` when a relay took it.
+    /// Schedules the next one.
+    pub fn welcome_attempted(&mut self, invitee: &PublicKey, accepted: bool) -> Result<(), MeshError> {
+        let h = invitee.to_hex();
+        let Some(w) = self.meta.owed_welcomes.iter_mut().find(|w| w.invitee == h) else {
+            return Ok(());
+        };
+        w.accepted |= accepted;
+        let (min, max) = if w.accepted {
+            (WELCOME_RESEND_MIN_SECS, WELCOME_RESEND_MAX_SECS)
+        } else {
+            (WELCOME_RETRY_MIN_SECS, WELCOME_RETRY_MAX_SECS)
+        };
+        w.backoff = w.backoff.saturating_mul(2).clamp(min, max);
+        w.next_attempt = now_secs().saturating_add(w.backoff);
+        self.save()
+    }
+
+    /// The member asks to join although it is in the roster: its Welcome
+    /// went missing. Makes an owed Welcome due now; `false` when this
+    /// device owes it none.
+    pub fn welcome_wanted(&mut self, invitee: &PublicKey) -> bool {
+        let h = invitee.to_hex();
+        let Some(w) = self.meta.owed_welcomes.iter_mut().find(|w| w.invitee == h) else {
+            return false;
+        };
+        w.next_attempt = 0;
+        if let Err(e) = self.save() {
+            tracing::warn!("saving an owed invitation: {e}");
+        }
+        true
+    }
+
+    /// This device's key package slot (the `d` tag of its kind 30443
+    /// events), for deleting the published package after a join.
+    #[must_use]
+    pub fn key_package_slot(&self) -> &str {
+        &self.meta.slot
     }
 
     /// Join a mesh from a Welcome gift wrap. With `inviter`, only that
@@ -1170,6 +1380,16 @@ impl MeshGroup {
             return Err(MeshError::Welcome("the inviter is not an admin of the mesh".into()));
         }
         self.provider = trial;
+        // In a mesh this device takes no Welcome, so its key packages have
+        // no use left: drop their private keys now (Marmot requires it
+        // within a day of a replacement), so a later copy of this state
+        // cannot open the Welcome still sitting on the relays. The caller
+        // deletes the published event ([`Self::key_package_slot`]).
+        for k in std::mem::take(&mut self.meta.key_packages) {
+            if let Some(r) = key_package_ref(&k.key_package_ref) {
+                let _ = self.provider.storage.delete_key_package(&r);
+            }
+        }
         self.meta.group_id = Some(hex::encode(group.group_id().as_slice()));
         self.group = Some(group);
         self.note_epoch()?;
@@ -1324,6 +1544,7 @@ impl MeshGroup {
                     return Ok(Vec::new());
                 }
                 self.meta.witnesses.entry(msg_epoch).or_default().insert(hex::encode(sender));
+                self.meta.unseen.remove(&hex::encode(sender));
                 Ok(vec![Change::App(ev)])
             }
             ProcessedMessageContent::ProposalMessage(qp) => {
@@ -1349,6 +1570,7 @@ impl MeshGroup {
                     return Ok(Vec::new());
                 }
                 let removed_me = staged.self_removed();
+                let adds = added_by(&staged, &self.provider.crypto);
                 if g.merge_staged_commit(&self.provider, *staged).is_err() {
                     self.rollback(snapshot)?;
                     return Ok(Vec::new());
@@ -1368,6 +1590,8 @@ impl MeshGroup {
                     privileged,
                     own: false,
                 });
+                self.note_adds(&adds);
+                self.meta.unseen.remove(&hex::encode(committer));
                 self.note_epoch()?;
                 let mut changes = vec![Change::Roster(self.roster())];
                 changes.extend(self.retry_deferred()?);

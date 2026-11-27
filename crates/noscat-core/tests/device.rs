@@ -393,3 +393,81 @@ async fn a_quick_restart_hears_from_members_at_once() {
         let _ = std::fs::remove_dir_all(&n.dir);
     }
 }
+
+/// A relay that refuses gift wraps while the flag is set: it loses
+/// invitations (and join requests) until it recovers.
+#[derive(Debug)]
+struct RefuseGiftWraps(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl nostr_relay_builder::prelude::WritePolicy for RefuseGiftWraps {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a nostr_relay_builder::prelude::Event,
+        _addr: &'a SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+        use nostr_relay_builder::prelude::{Kind, PolicyResult};
+        Box::pin(async move {
+            if event.kind == Kind::GiftWrap && self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                PolicyResult::Reject("blocked: no gift wraps right now".into())
+            } else {
+                PolicyResult::Accept
+            }
+        })
+    }
+}
+
+/// An invitation no relay accepts: the invite says so, the member shows as
+/// joining, and the Welcome is resent (here prompted by the joiner asking
+/// again) once the relay takes gift wraps. After the join, the joiner's
+/// used key package is deleted from the relay.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_invitation_is_resent_and_the_used_key_package_deleted() {
+    logs();
+    use noscat_core::marmot::MemberState;
+    let refuse = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let relay = LocalRelay::new(RelayBuilder::default().write_policy(RefuseGiftWraps(refuse.clone())));
+    relay.run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (na, nb) = (node("a"), node("b"));
+    let all = [&na, &nb];
+    let a = start(&na, "alpha", &url, &all).await;
+    let b = start(&nb, "bravo", &url, &all).await;
+    a.create("home").await.unwrap();
+    b.publish_key_package().await.unwrap();
+
+    refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    let invited = a.invite(b.device()).await.unwrap();
+    assert!(!invited.welcome_accepted, "the relay refused the Welcome");
+    let state = |d: &Device, who: PublicKey| {
+        let d = d.clone();
+        async move { d.members().await.into_iter().find(|m| m.device == who).map(|m| m.state) }
+    };
+    assert_eq!(state(&a, b.device()).await, Some(MemberState::Pending));
+
+    let j = b.clone();
+    let inviter = a.device();
+    let waiting = tokio::spawn(async move { j.join(inviter, &[], T).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    waiting.await.unwrap().expect("the resent Welcome arrives");
+    until("a sees bravo active", || async { state(&a, b.device()).await == Some(MemberState::Active) }).await;
+
+    let probe = nostr_sdk::prelude::Client::default();
+    probe.add_relay(url.as_str()).await.unwrap();
+    probe.connect().await;
+    until("b's used key package is gone from the relay", || async {
+        probe
+            .fetch_events(nostr::prelude::Filter::new().author(b.device()).kind(nostr::prelude::Kind::Custom(30443)))
+            .timeout(Duration::from_secs(5))
+            .await
+            .is_ok_and(|evs| evs.is_empty())
+    })
+    .await;
+
+    for d in [a, b] {
+        d.shutdown().await;
+    }
+    for n in all {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+}

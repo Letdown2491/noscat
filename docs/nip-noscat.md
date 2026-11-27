@@ -174,15 +174,36 @@ rumor is
 A member that receives one from a non-member, with a rumor no older than
 15 minutes, MAY show it to its user. A join request grants nothing: the
 device is added only if a member then commits an Add for its key
-package. Receivers MUST ignore requests from current members and SHOULD
-show at most one prompt per device per 15 minutes, until they answer it.
+package. Receivers MUST NOT prompt for requests from current members and
+SHOULD show at most one prompt per device per 15 minutes, until they
+answer it. A request from a current member that has not been heard from
+since its Add means its Welcome went missing: the member that committed
+the Add SHOULD resend the Welcome at once (below).
 
 A joining device SHOULD repeat its request while it waits (Noscat every
 15 seconds): a single gift wrap can be lost while relay connections come
 up.
 
-A device keeps at most its two newest key packages and deletes consumed
-ones after joining.
+A device keeps at most its two newest key packages. After a successful
+join it MUST delete the private keys of its key packages (it accepts no
+further Welcome while in a mesh), and SHOULD ask its relays to delete
+the published package: a NIP-09 kind 5 event, signed by the device, with
+an `a` tag `30443:<pubkey hex>:<slot>` and a `k` tag `30443`.
+
+A member MUST NOT add a key package that an Add it has applied already
+consumed (compare the KeyPackageRef): the device behind it, removed
+since or not, can no longer open a Welcome built on it.
+
+The member that commits an Add keeps resending the Welcome until the new
+member has sent anything in the group (an advert, a commit) or the
+deadline passes: 7 days after the commit, or the key package's
+`not_after` if sooner. A relay accepting the gift wrap is not proof of
+delivery (some relays accept gift wraps they never serve back), so
+Noscat resends after 30 seconds, doubling to an hour, while no relay has
+accepted it, and after an hour, doubling to a day, once one has. Each
+resend is a fresh gift wrap: NIP-59 backdates a wrap's `created_at` by
+up to two days, and joiners look back three, so an old wrap would fall
+out of view.
 
 ## Adverts
 

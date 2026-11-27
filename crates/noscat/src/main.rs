@@ -296,7 +296,8 @@ enum MeshCommand {
         /// The mesh's name, shown to its members.
         name: String,
     },
-    /// Add a device. It must be running, or waiting in `mesh join`.
+    /// Add a device. It must be running, or waiting in `mesh join`. An
+    /// invitation no relay accepts is resent while this device runs.
     Invite {
         /// The device (npub or noscat: URI).
         target: String,
@@ -321,7 +322,7 @@ enum MeshCommand {
         #[arg(long, default_value_t = 120)]
         timeout: u64,
     },
-    /// List the members and their presence.
+    /// List the members, their presence, and which are still joining.
     Members,
     /// Devices that asked to join (scanned this device's QR) in the last
     /// 15 minutes. In a terminal, asks y/n for each and invites on y.
@@ -752,7 +753,8 @@ fn auto_invite(client: &Client, peer: String, name: Option<String>) {
     std::thread::spawn(move || {
         let who = name.unwrap_or_else(|| "the device".into());
         match client.invite(&peer) {
-            Ok(()) => eprintln!("# ✅ invited {who} ({peer})"),
+            Ok(i) if i.welcome_accepted => eprintln!("# ✅ invited {who} ({peer})"),
+            Ok(_) => eprintln!("# ⚠️  {}", ui::invited_line(&format!("{who} ({peer})"), false)),
             Err(e) => eprintln!("# ❌ could not invite {who} ({peer}): {e}"),
         }
     });

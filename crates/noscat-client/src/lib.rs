@@ -47,6 +47,8 @@ mod terminal;
 
 pub use noscat_core::access::{Group as AccessGroup, Rule as AccessRule};
 pub use noscat_core::apps::TermFrame;
+pub use noscat_core::device::Invited;
+pub use noscat_core::marmot::MemberState;
 pub use noscat_core::relay::{DEFAULT_RELAYS, default_relays};
 
 /// How long a dial waits for a member to become reachable.
@@ -174,6 +176,10 @@ pub struct Member {
     /// advert arrived over the relays; a member can be online and still
     /// unreachable (different network, no reachable member).
     pub connected: bool,
+    /// Whether it has shown up since it was added: `Pending` while its
+    /// invitation may still be on its way, `NeverJoined` once a week has
+    /// passed without a word from it (remove it and invite it again).
+    pub state: MemberState,
 }
 
 /// What the client does on its own, surfaced for UIs. Peers are bech32
@@ -725,6 +731,7 @@ impl Inner {
                 reachable: m.reachable,
                 control: m.control,
                 connected: !m.this_device && (direct.contains(&m.device) || live.contains(&m.device)),
+                state: m.state,
             })
             .collect();
         sort_members(&mut members);
@@ -1276,11 +1283,14 @@ impl Client {
     }
 
     /// Add a device (npub or `noscat:` URI) to the mesh. It must be
-    /// running, or waiting in [`Client::join`].
-    pub fn invite(&self, target: &str) -> Result<(), ClientError> {
+    /// running, or waiting in [`Client::join`]. Once the commit is
+    /// published the device is a member; [`Invited::welcome_accepted`]
+    /// says whether a relay also took its invitation. Unaccepted (and
+    /// unanswered) invitations are resent in the background until the
+    /// device shows up; [`Member::state`] follows it.
+    pub fn invite(&self, target: &str) -> Result<Invited, ClientError> {
         let pk = parse_target(target)?;
-        self.inner.rt().block_on(self.inner.device.invite(pk))?;
-        Ok(())
+        Ok(self.inner.rt().block_on(self.inner.device.invite(pk))?)
     }
 
     /// Devices that asked to join in the last 15 minutes and are not
@@ -1904,6 +1914,7 @@ mod tests {
             reachable: false,
             control: false,
             connected: online,
+            state: MemberState::Active,
         }
     }
 

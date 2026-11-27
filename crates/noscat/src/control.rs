@@ -96,6 +96,29 @@ pub struct Row {
     /// Data can flow to it right now (see `noscat_client::Member`).
     #[serde(default)]
     pub connected: bool,
+    /// Whether it has shown up since it was added.
+    #[serde(default)]
+    pub state: RowState,
+}
+
+/// `noscat_client::MemberState` on the control channel.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RowState {
+    #[default]
+    Active,
+    Pending,
+    NeverJoined,
+}
+
+impl From<noscat_client::MemberState> for RowState {
+    fn from(s: noscat_client::MemberState) -> Self {
+        match s {
+            noscat_client::MemberState::Active => Self::Active,
+            noscat_client::MemberState::Pending => Self::Pending,
+            noscat_client::MemberState::NeverJoined => Self::NeverJoined,
+        }
+    }
 }
 
 /// One reply line.
@@ -180,6 +203,7 @@ pub async fn exec(
                     last_seen_secs: m.last_seen_secs,
                     reachable: m.reachable,
                     connected: m.connected,
+                    state: m.state.into(),
                 })
                 .collect();
             let _ = out.send(Reply::Members { mesh, members });
@@ -191,8 +215,8 @@ pub async fn exec(
         }
         Op::Invite { target } => {
             let t = target.clone();
-            ctx.blocking(move |c| c.invite(&t)).await?;
-            line(out, format!("invited {target}"));
+            let invited = ctx.blocking(move |c| c.invite(&t)).await?;
+            line(out, crate::ui::invited_line(&target, invited.welcome_accepted));
         }
         Op::Join { inviter, timeout_secs } => {
             line(out, format!("waiting up to {timeout_secs}s for an invitation from {inviter} (they run `noscat mesh invite <this npub>`)"));
