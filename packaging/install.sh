@@ -8,22 +8,26 @@ INSTALL_DIR="${NOSCAT_INSTALL_DIR:-$HOME/.local/bin}"
 
 os=$(uname -s)
 arch=$(uname -m)
-case "$os" in
-    Linux) os="linux" ;;
-    Darwin) os="macos" ;;
-    *) echo "unsupported OS: $os (see https://github.com/$REPO/releases for packages)" >&2; exit 1 ;;
-esac
 case "$arch" in
     x86_64|amd64) arch="x86_64" ;;
     aarch64|arm64) arch="aarch64" ;;
     *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+# The release tarballs are named by target triple.
+case "$os" in
+    Linux) target="$arch-unknown-linux-musl" ;;
+    Darwin) target="$arch-apple-darwin" ;;
+    FreeBSD)
+        [ "$arch" = x86_64 ] || { echo "FreeBSD builds are x86_64 only" >&2; exit 1; }
+        target="x86_64-unknown-freebsd" ;;
+    *) echo "unsupported OS: $os (see https://github.com/$REPO/releases for packages)" >&2; exit 1 ;;
 esac
 
 version=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
     sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
 [ -n "$version" ] || { echo "cannot determine the latest release" >&2; exit 1; }
 
-artifact="noscat-$version-$arch-$os.tar.gz"
+artifact="noscat-$version-$target.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$artifact"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
