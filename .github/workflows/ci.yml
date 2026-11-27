@@ -21,9 +21,13 @@
 name: ci
 
 on:
+  # The website (site.yml deploys it) needs no build: a push touching only
+  # site/ skips this workflow.
   push:
     branches: [main]
+    paths-ignore: ["site/**", ".github/workflows/site.yml"]
   pull_request:
+    paths-ignore: ["site/**", ".github/workflows/site.yml"]
   workflow_dispatch:
     inputs:
       only:

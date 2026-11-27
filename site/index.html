@@ -34,7 +34,7 @@
         <a class="btn ghost" href="private-mesh.html">Set up a private mesh</a>
       </div>
       <div class="facts">
-        <span>Linux</span><span>macOS</span><span>Windows</span><span>Android</span><span>x86_64 and ARM64</span>
+        <span>Linux</span><span>macOS</span><span>Windows</span><span>FreeBSD</span><span>Android</span><span>x86_64 and ARM64</span>
       </div>
     </div>
 
@@ -211,7 +211,7 @@ invite npub1f3a…2vd
     </div>
     <div class="install">
       <div class="tabs" role="tablist" aria-label="Install method">
-        <button role="tab" id="tab-script" aria-selected="true" aria-controls="p-script">Linux &amp; macOS</button>
+        <button role="tab" id="tab-script" aria-selected="true" aria-controls="p-script">Linux, macOS &amp; FreeBSD</button>
         <button role="tab" id="tab-brew" aria-selected="false" aria-controls="p-brew">Homebrew</button>
         <button role="tab" id="tab-arch" aria-selected="false" aria-controls="p-arch">Arch</button>
         <button role="tab" id="tab-win" aria-selected="false" aria-controls="p-win">Windows</button>
@@ -220,7 +220,7 @@ invite npub1f3a…2vd
       </div>
       <div class="panel" role="tabpanel" id="p-script" aria-labelledby="tab-script">
         <div class="snippet"><pre>curl -fsSL https://raw.githubusercontent.com/Letdown2491/noscat/main/packaging/install.sh | sh</pre><button type="button">copy</button></div>
-        <p>Installs into <code>~/.local/bin</code>. Prefer a package? <code>.deb</code>, <code>.rpm</code> and <code>.apk</code> files are attached to every release.</p>
+        <p>Installs into <code>~/.local/bin</code>, on FreeBSD (x86_64) too. Prefer a package? <code>.deb</code>, <code>.rpm</code> and <code>.apk</code> files are attached to every release.</p>
       </div>
       <div class="panel" role="tabpanel" id="p-brew" aria-labelledby="tab-brew" hidden>
         <div class="snippet"><pre>brew install Letdown2491/tap/noscat</pre><button type="button">copy</button></div>
@@ -243,7 +243,7 @@ scoop install noscat</pre><button type="button">copy</button></div>
       </div>
       <div class="panel" role="tabpanel" id="p-cargo" aria-labelledby="tab-cargo" hidden>
         <div class="snippet"><pre>cargo install --locked noscat</pre><button type="button">copy</button></div>
-        <p>Any platform with a Rust toolchain. On the BSDs it waits on an upstream fix: FreeBSD has a release binary, and INSTALL.md shows how to build there.</p>
+        <p>Any platform with a Rust toolchain. On FreeBSD use the release binary (the script above) until an upstream fix lands; INSTALL.md shows how to build there. OpenBSD and NetBSD do not build yet.</p>
       </div>
     </div>
     <p class="more">Every option, with details: <a href="https://github.com/Letdown2491/noscat/blob/main/INSTALL.md">INSTALL.md</a> · <a href="https://github.com/Letdown2491/noscat/releases">all releases</a></p>
@@ -260,7 +260,7 @@ scoop install noscat</pre><button type="button">copy</button></div>
       <div class="app">
         <span class="kind">Command line</span>
         <h3>noscat</h3>
-        <p>Creates meshes, runs on headless machines as a background service, and does everything described above. Runs on Linux, macOS and Windows.</p>
+        <p>Creates meshes, runs on headless machines as a background service, and does everything described above. Runs on Linux, macOS, Windows and FreeBSD.</p>
         <a href="https://github.com/Letdown2491/noscat">Letdown2491/noscat →</a>
       </div>
       <div class="app">

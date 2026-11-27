@@ -39,7 +39,7 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
      procfs) unless gated.
    - CI (.github/workflows/ci.yml) is the compile gate for the release
      targets: it builds and tests Linux, macOS, Windows and FreeBSD on
-     every push to main. Check it after pushing (`gh run list --workflow ci.yml`); the
+     every push to main (a push touching only `site/` skips it). Check it after pushing (`gh run list --workflow ci.yml`); the
      local container has the Linux target only, so lean on cfg hygiene and
      CI for the rest.
 2. **No em or en dashes anywhere in the repo, and no hyphen standing in for
