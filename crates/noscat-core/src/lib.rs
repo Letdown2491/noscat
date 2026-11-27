@@ -100,11 +100,24 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// A sensible default friendly name for this device: the hostname on unix
-/// systems (Android reports "localhost"; apps should pass something better,
-/// e.g. the device model). Falls back to "noscat".
+/// A sensible default friendly name for this device: the device model on
+/// Android (its hostname is "localhost"; the model is what the app shows,
+/// e.g. "Pixel 9a"), the hostname on other unix systems. Falls back to
+/// "noscat". Apps may still pass a name of their own.
 pub fn default_device_name() -> String {
-    #[cfg(unix)]
+    #[cfg(target_os = "android")]
+    {
+        let mut buf = [0u8; 92]; // PROP_VALUE_MAX
+        let len = unsafe { libc::__system_property_get(c"ro.product.model".as_ptr(), buf.as_mut_ptr().cast()) };
+        if len > 0 {
+            let end = (len as usize).min(buf.len());
+            let m = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+            if !m.is_empty() {
+                return m;
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         // gethostname(3) works on every unix (Linux, macOS, the BSDs);
         // the /proc file this used to read is Linux-only.

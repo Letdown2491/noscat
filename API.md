@@ -4,7 +4,7 @@ The public surface the client apps consume: `noscat-client` (Rust, embedded
 directly by noscat-desktop) and `noscat-ffi` (UniFFI, consumed by
 noscat-android and later mobile platforms).
 
-> **Current as of 0.7.0.** If your `Cargo.lock` pins a newer version than
+> **Current as of 0.7.1.** If your `Cargo.lock` pins a newer version than
 > this stamp, distrust this file and read the crate source; if you change
 > the public surface, update this file in the same commit.
 
@@ -48,7 +48,7 @@ pub struct ClientConfig {
     pub join_relays: Vec<String>,              // a pairing code's relays, when started to join through them
     pub listen: Option<SocketAddr>,            // FIPS UDP bind; None = any port (41641 when reachable)
     pub mesh_dir: Option<PathBuf>,             // device state dir; None = temp dir, gone on drop
-    pub device_name: Option<String>,           // shown to members (advert)
+    pub device_name: Option<String>,           // shown to members (advert); None = the device model on Android, the hostname elsewhere, else "noscat"
     pub reachable: Option<Option<SocketAddr>>, // Some(None) = STUN, Some(Some(a)) = advertise a
     pub lan_discovery: bool,                   // default: true (mDNS)
     pub max_incoming_bytes: Option<u64>,       // None = MAX_INCOMING_BYTES (64 GiB)
@@ -261,7 +261,7 @@ same `mesh_dir`), and otherwise run the device just for the call.
 | `generate_identity()` | New `Identity { npub, secret_hex }`. |
 | `identity_from_secret(secret)` | Restore from hex or nsec. |
 | `mesh_prepare(dir, owner?, relays?)` | This directory's npub, creating `identity.nsec` if missing. `owner` is unused (kept for call compatibility). |
-| `mesh_join(dir, timeout_secs, owner_npub, relays?)` | Wait for an invitation from `owner_npub` (bare npub or `noscat:` URI) and join; the inviter is sent a join request. A URI naming relays starts the device with them as `join_relays`, so nothing reaches public relays. Returns the members. A timeout is the error "no invitation arrived in time". |
+| `mesh_join(dir, timeout_secs, owner_npub, relays?)` | Wait for an invitation from `owner_npub` (bare npub or `noscat:` URI) and join; the inviter is sent a join request. A URI naming relays starts the device with them as `join_relays`, so nothing reaches public relays. Returns the members. A timeout is the error "no invitation arrived in time". The join request carries the default device name (on Android the device model, since 0.7.1; it was "noscat"). |
 | `mesh_members(dir, relays?)` | The members. Presence (`online`, `last_seen_secs`) is only known while a client runs for `dir`. |
 | `mesh_sync(dir, wait_secs, relays?)` | The members after catching up: immediate when a client runs for `dir`, else after running the device for `wait_secs`. |
 | `mesh_create(dir, name, relays?)` | New mesh with this device as the only member. |

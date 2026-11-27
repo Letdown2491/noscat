@@ -144,3 +144,14 @@ MDK interop:
       winget PR this time, 0.8.0 follows soon). noscat-relay 0.3.0 with
       the key package deletion. Released 2026-11-27; the VPS runs both.
       AUR not pushed from this machine (no AUR host key here).
+
+## 0.7.1 (patch, 2026-11-27)
+
+- [x] Two admins committing one member's leave at once kept their own
+      branches for good (each read its own commit as privileged, and
+      counted itself as a witness). Both sides of a race are now read
+      alike, and a lost race is evaluated again when late witnesses
+      arrive (`docs/nip-noscat.md`, Convergence). Found on the VPS mesh
+      after a phone left it.
+- [x] A join request from Android said "noscat": the default device name
+      there is now the device model, not the "localhost" hostname.

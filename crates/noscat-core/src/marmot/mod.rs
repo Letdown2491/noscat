@@ -343,6 +343,12 @@ struct Meta {
     /// Welcomes this device committed and keeps resending.
     #[serde(default)]
     owed_welcomes: Vec<OwedWelcome>,
+    /// Competing commits (MLSMessage, base64) that lost a branch race on
+    /// what this device knew then. Witnesses for their branch can arrive
+    /// later, so the race is run again when a payload no retained key
+    /// opens arrives.
+    #[serde(default)]
+    rivals: VecDeque<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -562,8 +568,6 @@ fn check_app_data_update(update: &AppDataUpdateProposal, required: &BTreeSet<u16
     r.map_err(|e| e.to_string())
 }
 
-/// Classify a commit: `Ok(false)` ordinary (a pure self-update, or only
-/// SelfRemove proposals), `Ok(true)` privileged (needs an admin).
 /// The key packages a commit adds: (ref, Marmot identity) for each.
 fn added_by(staged: &StagedCommit, crypto: &RustCrypto) -> Vec<([u8; 32], Option<[u8; 32]>)> {
     staged
@@ -576,16 +580,12 @@ fn added_by(staged: &StagedCommit, crypto: &RustCrypto) -> Vec<([u8; 32], Option
         .collect()
 }
 
+/// Classify a commit: ordinary (`false`: a pure self-update, or only
+/// SelfRemove proposals) or privileged (`true`: needs an admin). Own and
+/// received commits are classified alike, or a branch race reads the
+/// same commit differently on each side.
 fn is_privileged(staged: &StagedCommit) -> bool {
-    let mut any = false;
-    for p in staged.queued_proposals() {
-        any = true;
-        if !matches!(p.proposal(), Proposal::SelfRemove) {
-            return true;
-        }
-    }
-    let _ = any;
-    false
+    staged.queued_proposals().any(|p| !matches!(p.proposal(), Proposal::SelfRemove))
 }
 
 impl MeshGroup {
@@ -1245,6 +1245,7 @@ impl MeshGroup {
         let parent_epoch = self.epoch().ok_or(MeshError::NoMesh)?;
         let g = self.group.as_mut().ok_or(MeshError::NoMesh)?;
         let adds = g.pending_commit().map(|c| added_by(c, &self.provider.crypto)).unwrap_or_default();
+        let privileged = g.pending_commit().is_some_and(is_privileged);
         g.merge_pending_commit(&self.provider).map_err(mls("merge own commit"))?;
         self.note_adds(&adds);
         self.meta.history.push(Applied {
@@ -1252,7 +1253,7 @@ impl MeshGroup {
             snapshot,
             digest,
             committer: xonly(&self.device()),
-            privileged: true,
+            privileged,
             own: true,
         });
         self.note_epoch()?;
@@ -1469,7 +1470,13 @@ impl MeshGroup {
             return Ok(Vec::new());
         }
         self.dirty = false;
-        let changes = self.process_payload(&payload, true)?;
+        let p = B64.encode(&payload);
+        let known = self.meta.deferred_payloads.contains(&p);
+        let mut changes = self.process_payload(&payload, true)?;
+        if !known && self.meta.deferred_payloads.contains(&p) {
+            // Perhaps a witness for a branch that lost a race here.
+            changes.extend(self.reconsider_rivals()?);
+        }
         if self.dirty {
             self.save()?;
         }
@@ -1702,6 +1709,34 @@ impl MeshGroup {
         Ok(vec![Change::Removed])
     }
 
+    /// Run the races lost earlier again, with the witnesses known now. The
+    /// first rival that wins is adopted (which clears the others).
+    fn reconsider_rivals(&mut self) -> Result<Vec<Change>, MeshError> {
+        let rivals: Vec<String> = self.meta.rivals.iter().cloned().collect();
+        for r in rivals {
+            let Ok(bytes) = B64.decode(&r) else { continue };
+            let parent = MlsMessageIn::tls_deserialize_exact(bytes.as_slice())
+                .ok()
+                .and_then(|m| ProtocolMessage::try_from(m).ok())
+                .map(|p| p.epoch().as_u64());
+            let Some(parent) = parent else { continue };
+            let in_reach = self.epoch().is_some_and(|c| parent < c && c - parent <= MAX_REWIND)
+                && self.meta.history.iter().any(|a| a.parent_epoch == parent);
+            if !in_reach {
+                self.meta.rivals.retain(|x| x != &r);
+                self.dirty = true;
+                continue;
+            }
+            // race() keeps it as a rival again if it still loses.
+            self.meta.rivals.retain(|x| x != &r);
+            let changes = self.race(&bytes, parent, sha256(&bytes))?;
+            if !changes.is_empty() {
+                return Ok(changes);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// After an epoch change, retry inputs that could not be used before.
     fn retry_deferred(&mut self) -> Result<Vec<Change>, MeshError> {
         let mut out = Vec::new();
@@ -1779,19 +1814,25 @@ impl MeshGroup {
             }
         }
 
+        // The two committers do not count as witnesses: each has spoken
+        // on its own branch before it heard of the other, so counting them
+        // makes both devices keep their own branch for good.
+        let our_tip = self.meta.history.last().cloned().unwrap_or(fork.clone());
+        let committers = [hex::encode(our_tip.committer), hex::encode(their_tip.committer)];
+        let others = |s: Option<&BTreeSet<String>>| s.map_or(0, |s| s.iter().filter(|w| !committers.contains(w)).count());
         let ours = Branch {
             depth: current - parent,
-            witnesses: (parent + 1..=current)
-                .map(|e| self.meta.witnesses.get(&e).map_or(0, BTreeSet::len))
-                .collect(),
-            tip: self.meta.history.last().cloned().unwrap_or(fork.clone()),
+            witnesses: (parent + 1..=current).map(|e| others(self.meta.witnesses.get(&e))).collect(),
+            tip: our_tip,
         };
         let theirs = Branch {
             depth: 1,
-            witnesses: vec![trial.meta.witnesses.get(&(parent + 1)).map_or(0, BTreeSet::len)],
+            witnesses: vec![others(trial.meta.witnesses.get(&(parent + 1)))],
             tip: their_tip.clone(),
         };
         if !theirs.beats(&ours) {
+            push_bounded(&mut self.meta.rivals, B64.encode(mls_bytes));
+            self.dirty = true;
             return Ok(Vec::new());
         }
 
@@ -1816,6 +1857,7 @@ impl MeshGroup {
             self.meta.witnesses.insert(e, s);
         }
         self.meta.epoch_keys.retain(|(e, _)| *e <= parent);
+        self.meta.rivals.clear();
         self.note_epoch()?;
         let mut changes = superseded;
         changes.push(Change::Roster(self.roster()));

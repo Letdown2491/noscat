@@ -72,7 +72,7 @@ nix run github:Letdown2491/noscat
 
 A flake is at the repo root; `nix profile install github:Letdown2491/noscat`
 adds it to a profile. Linux and macOS, x86_64 and aarch64. It builds the
-`main` branch; add `?ref=v0.7.0` for the release.
+`main` branch; add `?ref=v0.7.1` for the release.
 
 ## cargo (any platform with a Rust toolchain)
 

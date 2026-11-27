@@ -77,7 +77,7 @@ interoperable by construction.
 
 ## Status
 
-Version 0.7.0. The design decisions are in [`docs/adr/`](docs/adr/).
+Version 0.7.1. The design decisions are in [`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them

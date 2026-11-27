@@ -7,7 +7,7 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). Version 0.7.0; `docs/releasing.md` is the
+library (`crates/noscat-client`). Version 0.7.1; `docs/releasing.md` is the
 release checklist, `docs/plan-0.7.0.md` the plan it came from, and
 `docs/adr/` records why things are the way they are. Build/test in the
 podman container only; the host has no toolchain:

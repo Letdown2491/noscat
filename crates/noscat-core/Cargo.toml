@@ -41,8 +41,8 @@ nostr-relay-builder = "0.44"
 # NOSCAT_TEST_LOG: device logs in a failing test's output.
 tracing-subscriber = { workspace = true }
 
-# gethostname(3) is unix-only; other platforms have no caller yet (the
-# default device name falls back to "noscat").
+# gethostname(3) on unix, __system_property_get on Android (the device
+# model as the default name); elsewhere the default is "noscat".
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

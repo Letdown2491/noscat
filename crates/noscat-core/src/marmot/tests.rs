@@ -476,3 +476,87 @@ fn later_publishes_keep_an_earlier_key_package_usable() {
     }
     assert!(b.g.join(&gw, Some(a.pk())).unwrap().is_some(), "the early Welcome still opens");
 }
+
+#[test]
+fn admins_committing_one_leave_converge_after_each_spoke() {
+    // Two admins both commit a third member's leave, and each sends an
+    // advert on its own branch before it sees the other's commit (the
+    // order a real mesh gives). They must still end on one branch.
+    let (mut a, mut b) = mesh_of_two();
+    let mut c = Dev::new("c");
+    let commit = invite(&mut a, &mut c);
+    b.g.process(&commit).unwrap();
+    let down = c.g.step_down().unwrap();
+    c.g.confirm().unwrap();
+    a.g.process(&down.commit).unwrap();
+    b.g.process(&down.commit).unwrap();
+
+    let req = c.g.leave_request().unwrap();
+    a.g.process(&req).unwrap();
+    b.g.process(&req).unwrap();
+    let oa = a.g.commit_pending().unwrap().expect("a commits the leave");
+    let ob = b.g.commit_pending().unwrap().expect("b commits the leave");
+    a.g.confirm().unwrap();
+    b.g.confirm().unwrap();
+    let ea = a.g.send_app(ADVERT_KIND, Vec::new(), "a".into()).unwrap();
+    let eb = b.g.send_app(ADVERT_KIND, Vec::new(), "b".into()).unwrap();
+
+    a.g.process(&ob.commit).unwrap();
+    a.g.process(&eb).unwrap();
+    b.g.process(&oa.commit).unwrap();
+    b.g.process(&ea).unwrap();
+
+    assert_eq!(a.g.epoch(), b.g.epoch());
+    assert_eq!(a.g.current_key().unwrap(), b.g.current_key().unwrap(), "a and b stayed on their own branches");
+    let ev = a.g.send_app(ADVERT_KIND, Vec::new(), "after".into()).unwrap();
+    assert_eq!(apps(&b.g.process(&ev).unwrap()).len(), 1);
+}
+
+#[test]
+fn a_witness_arriving_after_the_race_moves_the_loser() {
+    // As above with a third member D that takes A's commit first and
+    // speaks on A's branch. B decides its race before D's message reaches
+    // it; once it does, B moves to A's branch.
+    let (mut a, mut b) = mesh_of_two();
+    let mut c = Dev::new("c");
+    let mut d = Dev::new("d");
+    let commit = invite(&mut a, &mut c);
+    b.g.process(&commit).unwrap();
+    let commit = invite(&mut a, &mut d);
+    b.g.process(&commit).unwrap();
+    c.g.process(&commit).unwrap();
+    let down = c.g.step_down().unwrap();
+    c.g.confirm().unwrap();
+    for x in [&mut a, &mut b, &mut d] {
+        x.g.process(&down.commit).unwrap();
+    }
+    let req = c.g.leave_request().unwrap();
+    for x in [&mut a, &mut b, &mut d] {
+        x.g.process(&req).unwrap();
+    }
+    let oa = a.g.commit_pending().unwrap().expect("a commits the leave");
+    let ob = b.g.commit_pending().unwrap().expect("b commits the leave");
+    a.g.confirm().unwrap();
+    b.g.confirm().unwrap();
+    let ea = a.g.send_app(ADVERT_KIND, Vec::new(), "a".into()).unwrap();
+    let eb = b.g.send_app(ADVERT_KIND, Vec::new(), "b".into()).unwrap();
+
+    d.g.process(&oa.commit).unwrap();
+    let ed = d.g.send_app(ADVERT_KIND, Vec::new(), "d".into()).unwrap();
+    for ev in [&ed, &ob.commit, &eb] {
+        a.g.process(ev).unwrap();
+    }
+    for ev in [&oa.commit, &ea, &ed] {
+        b.g.process(ev).unwrap();
+    }
+    for ev in [&ob.commit, &eb, &ea] {
+        d.g.process(ev).unwrap();
+    }
+
+    let key = a.g.current_key().unwrap();
+    assert_eq!(b.g.current_key().unwrap(), key, "b is not on a's branch");
+    assert_eq!(d.g.current_key().unwrap(), key, "d is not on a's branch");
+    let ev = b.g.send_app(ADVERT_KIND, Vec::new(), "after".into()).unwrap();
+    assert_eq!(apps(&a.g.process(&ev).unwrap()).len(), 1);
+    assert_eq!(apps(&d.g.process(&ev).unwrap()).len(), 1);
+}

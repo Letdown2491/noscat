@@ -2,7 +2,7 @@
 
 `draft` `optional`
 
-Version: Noscat 0.7.0.
+Version: Noscat 0.7.1.
 
 ---
 
@@ -146,6 +146,16 @@ commits. When a competing commit for one of those epochs arrives and
 wins, the device rolls back and applies it. A device whose own change
 lost reports it so the change can be retried. After input settles,
 Noscat and MDK agree on the winning branch.
+
+Since 0.7.1 a device reads both sides of a race alike: its own commit is
+privileged or ordinary by its proposals, as a received one is (a commit
+of only SelfRemove proposals is ordinary), and the two competing
+committers do not count as witnesses for their own branches (each has
+spoken on its branch before it heard of the other). A commit that lost
+is kept, and the order is evaluated again when a group message no
+retained key opens arrives: it may be a witness for that branch.
+Without these, two admins committing one member's leave at once could
+each keep their own branch for good.
 
 ### Joining
 
