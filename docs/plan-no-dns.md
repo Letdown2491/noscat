@@ -4,8 +4,8 @@ Goal: a private mesh works end to end without DNS, without a certificate
 authority, and without anyone typing or reading a URL. Devices are found by
 npub; the only thing passed out of band is the pairing QR, which carries
 npubs and raw addresses. It builds on 0.6.0 (STUN from the mesh's own
-relay, invite codes in the apps). Phases 2 to 4 are phase 0 of 0.7.0
-(decided 2026-11-26, in place of pinned relay certificates in 0.6.1: the
+relay, invite codes in the apps). Phases 2 to 4 are phase 0 of 0.8.0
+(decided 2026-11-26, in place of pinned relay certificates in 0.7.0: the
 FIPS path gives the same protection with no certificate); phases 5 and 6
 are not yet slotted.
 
@@ -30,7 +30,7 @@ What the nvpn-fips crates (0.4.124) already give us, checked 2026-11-25:
 - A Tor transport exists (outbound by SOCKS5; inbound by onion service
   through the control port or a `HiddenServiceDir`), but needs a Tor daemon
   on the device. No embedded Arti.
-- A BLE transport exists behind `host-ble-transport` (note for 0.7.0).
+- A BLE transport exists behind `host-ble-transport` (note for 0.8.0).
 
 What does not change: reachability. A device behind carrier-grade NAT
 (this desktop, `100.64.55.93`) still cannot be the meeting point; the
@@ -83,7 +83,7 @@ join never leaves FIPS.
       the approval in the group; the relay host admits that npub in FIPS
       as a pending joiner, confined to the relay's service port, for one
       join or 15 minutes. The joiner publishes its key package and gets
-      its Welcome over that session (0.7.0 phase 0 has the details).
+      its Welcome over that session (0.8.0 phase 0 has the details).
 - [ ] No plain socket: noscat-relay listens on loopback only. The domain,
       Caddy and the certificate become optional on the relay host (kept
       for shared use and for anyone who prefers TLS).

@@ -33,7 +33,7 @@
   - An External signaling hook so traversal offers and answers can travel inside the Marmot group, like adverts (Phase 1).
 - [ ] Ask MDK about publishing `cgka-engine` to crates.io, and OpenMLS about the 0.10.0 stable timeline.
 - [x] Build the network test rig (`tests/netrig/`; NAT scenarios plus QUIC under 3% loss, relayed and punched): two or more network namespaces behind nftables NAT (full cone, symmetric) with `tc netem` loss, delay and reordering. It gates every later phase; 0.4's loss bug got past green container tests.
-- [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes. After 0.5.0: [#19](https://github.com/Letdown2491/noscat/issues/19), planned for 0.6.1 with our patches applied in the BSD CI job (`docs/plan-0.6.1.md`; moved from 0.6.0 on 2026-11-26).
+- [ ] Add a FreeBSD cross build to CI (FreeBSD sysroot plus clang/lld, as in the spike), using a CI-only `[patch]` until upstream ships the fixes. After 0.5.0: [#19](https://github.com/Letdown2491/noscat/issues/19), planned for 0.7.0 with our patches applied in the BSD CI job (`docs/plan-0.7.0.md`; moved from 0.6.0 on 2026-11-26).
 
 ## Phase 1: first-contact experiment (blocks the Dataplane design)
 

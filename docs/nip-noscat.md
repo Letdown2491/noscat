@@ -2,7 +2,7 @@
 
 `draft` `optional`
 
-Version: Noscat 0.6.1.
+Version: Noscat 0.7.0.
 
 ---
 

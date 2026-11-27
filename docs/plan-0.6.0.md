@@ -6,14 +6,14 @@ no third party at all. It ships in lockstep in noscat, noscat-desktop and
 noscat-android.
 
 Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
-0.7.0, macOS to 0.8.0, screen view and control to 0.9.0):
+0.8.0, macOS to 0.9.0, screen view and control to 0.10.0):
 
 - **Terminal**: a Terminal action on a member opens a shell on it, like
   SSH but with the mesh identity as the login: no keys, no sshd. Our own
   app protocol, not SSH carried over a forward.
 - **Each device decides** what other members may do to it, through
-  access groups (moved here from 0.7.0, since the terminal needs them and
-  the screen in 0.9.0 builds on them). Decided 2026-11-25 after a UX
+  access groups (moved here from 0.8.0, since the terminal needs them and
+  the screen in 0.10.0 builds on them). Decided 2026-11-25 after a UX
   review: three trust groups instead of per-action toggles, and the host
   is asked on first use for control instead of configuring it ahead of
   time. Settings is for review and revoking, not setup. To be tried and
@@ -22,7 +22,7 @@ Decided 2026-11-25 (the roadmap was re-cut that day: Bluetooth moved to
   mesh's relays ([#20](https://github.com/Letdown2491/noscat/issues/20)),
   and STUN comes from the mesh's own relay ([#1](https://github.com/Letdown2491/noscat/issues/1)).
 - **BSD binaries** ([#19](https://github.com/Letdown2491/noscat/issues/19))
-  moved to 0.6.1 on 2026-11-26 (`docs/plan-0.6.1.md`): CLI only and
+  moved to 0.7.0 on 2026-11-26 (`docs/plan-0.7.0.md`): CLI only and
   independent of the rest, so it no longer holds up this release.
 
 ## Phase 0: pairing codes in the apps (#20)
@@ -76,7 +76,7 @@ authenticated by the QUIC handshake, so a sender cannot get around it.
 |---|---|---|
 | Send me things | files, chat, clipboard | allowed |
 | Use my services | forwards to the default service and to served ports | allowed |
-| Control this device | terminal (0.6), screen view and control (0.9) | ask |
+| Control this device | terminal (0.6), screen view and control (0.10) | ask |
 
 - [x] Per member, each group is allowed, denied, or (Control only) ask.
       Control's choices on a prompt: allow once (this session), always
@@ -213,7 +213,7 @@ Done 2026-11-25; the rig test 2026-11-26. Choices:
 
 - [x] Windows: the CLI builds again (crossterm's `windows` feature),
       `noscat shell` sets a VT, UTF-8 console and restores it, and a
-      client test runs a terminal on cmd. BSD moved to 0.6.1.
+      client test runs a terminal on cmd. BSD moved to 0.7.0.
 - [x] `noscat up` waits (up to 30 s) for a one-off command holding the
       device instead of failing; the relay retries a failed first member
       load within seconds and serves its last list (`members.cache`) from

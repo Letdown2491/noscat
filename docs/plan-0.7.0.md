@@ -1,231 +1,140 @@
-# noscat 0.7.0 plan: Bluetooth
+# noscat 0.7.0 plan: BSD binaries, invitations that arrive
 
-0.7.0 lets a device with no working network (no Wi-Fi, no mobile data)
-stay in the mesh through a nearby member over Bluetooth LE. It ships in
-lockstep in noscat (Linux CLI), noscat-desktop (Linux) and
-noscat-android. macOS follows in 0.8.0 (`docs/plan-0.8.0.md`). Windows
-is out: it has no Bluetooth LE L2CAP channels for apps, and the
-alternative needs upstream FIPS work we are not taking on.
+Numbered 0.6.1 until 2026-11-27, when its release stopped at the API check:
+the member states and the invite result change the public API, which
+takes a minor release (0.x rules). The plans after it moved up one: two-way
+pairing and Bluetooth are 0.8.0, macOS 0.9.0, the screen 0.10.0.
 
-Decided 2026-11-25 (moved from 0.6.0 the same day, when 0.6.0 became
-access and privacy: `docs/plan-0.6.0.md`):
+BSD moved out of 0.6.0 on 2026-11-26, so the access and terminal release
+does not wait on it (issue [#19](https://github.com/Letdown2491/noscat/issues/19)).
+Also added that day: invitations that are retried until they arrive, and
+key packages that do not outlive their use (phase 2). The member list
+gains states, so both apps ship 0.7.0 too.
 
-- **Opt-in**, per device: a toggle in Settings (desktop and Android) and
-  a saved CLI setting (`--bluetooth`). A device with it on advertises,
-  accepts and relays for members nearby.
-- **Every Linux build has it**, glibc and musl alike: one static binary,
-  no new package dependencies. See [ADR 0008](adr/0008-bluetooth-through-the-host-bridge.md).
-- **Relays through the mesh in the same release**: without it, a
-  Bluetooth-only device would miss membership changes, invites and names
-  until it was back online.
-- STUN for private meshes, once planned here, ships earlier in 0.6.0; the
-  BSD binaries in 0.6.1.
+Pinned relay certificates were planned here the same day and dropped the
+same day: a private mesh without DNS comes from `docs/plan-no-dns.md`
+instead (phase 0 of 0.8.0), where members reach the relay over FIPS and
+need no certificate at all.
 
-## How it fits
+## Phase 1: BSD binaries
 
-FIPS already routes through members: a device whose only link is
-Bluetooth to a laptop reaches every other member through that laptop,
-end to end encrypted (the laptop forwards what it cannot read). FIPS's
-Bluetooth transport uses LE L2CAP connection-oriented channels and a
-small advertised record naming the channel. Its host bridge
-(`host-ble-transport`) hands the platform calls to the application as
-commands (listen, advertise, scan, connect) and events (stream data,
-discoveries); noscat answers them per platform.
+Decided 2026-11-25 (option A): ship BSD binaries built with our patches
+instead of waiting for upstream. Independent of everything else.
 
-```
-  noscat-core dataplane ── FIPS node ── UDP transport (as today)
-                               └─────── BLE transport (host bridge)
-                                            │ commands / events
-            ┌───────────────────────────────┼──────────────────────┐
-     Linux: zbus (BlueZ D-Bus)       Android: Kotlin via      macOS (0.8):
-     + kernel L2CAP sockets          noscat-ffi               CoreBluetooth
-     (CLI and desktop app)                                    (CLI and app)
-```
+- [x] The two patches from `docs/upstream/01-freebsd-build.md` live in the
+      repo (`packaging/bsd/patches/`): `nvpn-mdns-sd` on `socket-pktinfo`
+      0.4, and the `bind_socket_to_interface` fallback in
+      `nvpn-fips-core`. `packaging/bsd/patch-crates.sh` fetches and patches
+      the crates and prints `--config patch...` options, so Cargo.toml
+      stays untouched and every other platform keeps building pure
+      crates.io code. A cross build for FreeBSD 14.5 (clang, lld and the
+      base sysroot in the dev container) compiles and links with it.
+- [x] CI: FreeBSD build and tests in a VM (`vmactions/freebsd-vm`; the
+      whole suite passes since the buffer fix below); the release attaches
+      `noscat-<tag>-x86_64-unknown-freebsd.tar.gz` (job written) and the
+      shell installer picks it (done; the installer also asked for
+      tarball names no release had, so it failed everywhere: fixed).
+- [x] OpenBSD and NetBSD: tried in CI VMs (2026-11-27); neither builds,
+      even patched. Both fail in `socket-pktinfo` 0.4 (through
+      `nvpn-mdns-sd`, the mDNS for LAN discovery): OpenBSD has no
+      `IP_PKTINFO`/`in_pktinfo`, NetBSD lacks socket2's
+      `InterfaceIndexOrAddress` and `join_multicast_v4_n`. No binaries and
+      no CI job until that crate supports them (or mDNS becomes optional
+      in FIPS).
+- [x] FreeBSD refuses a socket buffer above `kern.ipc.maxsockbuf` (2 MiB
+      by default) instead of clamping it, so FIPS's 16 MiB default kept
+      UDP from starting (CI's first run). noscat asks for 1 MiB on the
+      BSDs (`dataplane.rs`).
+- [x] Docs: INSTALL's BSD section points at the binaries (`cargo install
+      noscat` keeps failing on the BSDs until upstream fixes it). README
+      and the site follow in the release commit (the site deploys from
+      main). A FreeBSD port (with the patches) and pkgsrc-wip later, on
+      demand.
+- [ ] When upstream ships the fixes, drop the patches; the upstream
+      draft stays unposted unless approved.
 
-Admission is unchanged: links of any kind are members only (ADR 0005).
+## Phase 2: invitations that arrive
 
-## Phase 0: two-way pairing, and a private mesh without DNS
+Decided 2026-11-26, after Nostr Compass #50 (MDK's Welcome fanout and
+delivery deadline; Marmot's key package rules and its invite link draft,
+marmot#429). Today an invite whose Welcome no relay accepts still reports
+success and leaves a member that never joins, and a joined device keeps its
+consumed key package (the private key in its state, the event on relays)
+for as long as it stays in the mesh.
 
-Decided 2026-11-26. Joining becomes a two-way exchange of pairing codes,
-on every mesh, and a private mesh needs no DNS, no certificate and no
-plain socket: phases 2 to 4 of `docs/plan-no-dns.md`, in place of the
-certificate pins once planned for 0.6.1. See
-[ADR 0010](adr/0010-two-way-pairing.md). The relay over FIPS is also what
-phase 4 below builds on, so the two are one piece of work.
+Key packages:
 
-Pairing (every mesh, private or on public relays):
+- [x] After a successful join, delete this device's key package private
+      keys (`init_key`) from the mesh state and publish a NIP-09 deletion
+      for the consumed kind 30443 event. A device in a mesh refuses
+      Welcomes, so it needs neither; Marmot (`foundation/key-packages.md`)
+      requires the deletion within 24 hours of a replacement or at
+      `not_after`. Otherwise anyone who later gets the state file can open
+      the original Welcome, still on the relays.
+- [x] Remember the key package refs of every Add the mesh commits
+      (bounded, in mesh state) and refuse them in `MeshGroup::add`.
+      Without it, re-inviting a device that was removed while offline
+      picks its old, consumed package from a relay, and the commit adds a
+      member that can never open its Welcome (its storage was wiped on
+      removal). `invite` then tries the next package, or says the device
+      must run `noscat join` to publish a fresh one. (A device knows only
+      the Adds it applied, so one that joined later cannot refuse a
+      package consumed before it arrived.)
+- [x] noscat-relay accepts the deletion: kind 5 for the author's own
+      key packages, by coordinate only, never served back.
+- [x] Tests: a joined device has no key package material left and its
+      event is deleted on the mock relay; re-inviting a removed device
+      that has only its consumed package is refused, and works once it
+      publishes a fresh one.
 
-- [ ] The joiner scans or pastes any member's pairing code; that member's
-      npub is the joiner's trust anchor. A member scans or pastes the
-      joiner's code (its npub and name), and that act is the approval.
-      Any member may approve, not only the one whose code was scanned
-      (every device is an admin, ADR 0007).
-- [ ] A pasted code (remote, or a headless machine over SSH) shows a short
-      check code derived from the joiner's npub on both screens, to
-      compare before approving; a scanned code skips it.
-- [ ] The approving member records the approval in the group (the joiner's
-      npub, an expiry of 15 minutes, single use). Any online member then
-      commits the Add once the joiner's key package is in hand, so a phone
-      that goes to sleep does not stall the join.
-- [ ] `join` accepts a Welcome for a mesh in which the scanned member is a
-      member (checked after staging), not only a Welcome from that exact
-      device.
-- [ ] Members see who added whom (an event in the client, a line in the
-      CLI, a notice in both apps).
-- [ ] Join requests go: no gift-wrapped request, no prompt anyone who
-      knows your npub can trigger, no `mesh requests`. The CLI's
-      `noscat join` prints this device's pairing code (and a terminal QR)
-      and waits; `noscat mesh add <code>` approves.
-- [ ] On a mesh on public relays, the approving member fetches the
-      joiner's key package from the relays as `invite` does today.
+Welcome delivery (`publish` already sends to every inbox relay at once and
+lets the slower ones finish, as MDK and Haven now do; what is missing is
+what happens when none of them takes it):
 
-A private mesh without DNS:
+- [x] Owed Welcomes are kept in mesh state with a deadline: 7 days after
+      the commit or the key package's `not_after`, whichever comes first
+      (as MDK's #3708). The inviter retries each with backoff (30 s,
+      doubling to 1 h) while it runs, until the new member is seen or the
+      deadline passes; once a relay has accepted it, only every hour,
+      doubling to a day (a relay may still never serve it back).
+- [x] Each retry wraps the Welcome again. NIP-59 backdates a gift wrap by
+      up to 2 days and a joiner looks back only 3
+      (`GIFT_WRAP_LOOKBACK_SECS`), so republishing the first wrap would
+      soon fall out of its window.
+- [x] A join request from a member that has never been seen means its
+      Welcome went missing: resend the owed Welcome at once instead of
+      dropping the request (`on_join_request` drops it today).
+- [x] Delivered means the new member's first advert arrived, not a
+      relay's OK: a relay can accept a gift wrap it never serves back (MDK
+      found relay.damus.io doing so for about 10% of recipients).
+- [x] `invite` reports "added; invitation not delivered yet" when no relay
+      took the Welcome, instead of a plain success (CLI and the client's
+      result).
 
-- [ ] Pairing codes carry the meeting point (`<host npub>@<ip:port>`)
-      instead of a relay URL, and the group state keeps it current
-      (no-dns phase 2).
-- [ ] Members reach the mesh relay over FIPS at its host's npub, through a
-      loopback forward; no hostname, no certificate (no-dns phase 3).
-      noscat-relay listens on loopback only: nothing of it faces the
-      internet.
-- [ ] An approval tells the relay host to admit the joiner's npub in FIPS
-      as a pending joiner: confined to the relay's service port (no
-      streams, no access rules, no other service), dropped after one join
-      or 15 minutes, a few at a time at most. Today FIPS admission means
-      membership (`dataplane.rs`, `streams.rs`, ADR 0005); the pending
-      joiner is the one exception and must stay that narrow. The joiner
-      publishes its key package and gets its Welcome over that session.
-- [ ] Netrig: a private mesh joined and used with DNS blocked and no relay
-      port reachable from outside.
+Member state:
 
-Not taken (ADR 0010): plain `ws://` for the join, a one-time guest key in
-the QR, a key the inviter makes for the joiner, pinned certificates.
+- [x] The member list (`MemberStatus` and the client's) marks a member
+      that was added but never seen as pending, and one past its Welcome
+      deadline as never joined; the fix for now is to remove it and invite
+      it again (automatic re-admission comes in 0.8.0, ADR 0009).
+      `noscat mesh members` shows the state and keeps the npubs that
+      noscat-relay reads; API.md and the man page follow.
+- [ ] Both apps show the states (joining, never joined) and the invite
+      result.
 
-## Phase 1: spike (Linux)
+MDK interop:
 
-- [ ] Linux bridge: BlueZ over zbus (advertising via LEAdvertisingManager1,
-      the bootstrap record via GattManager1, scanning via Adapter1 and
-      ObjectManager signals) plus kernel L2CAP sockets (AF_BLUETOOTH,
-      SOCK_SEQPACKET) through libc. Builds static on musl.
-- [ ] Two Linux machines, one with networking off: chat and a file
-      reach a third member through the other, over Bluetooth.
-- [ ] Measure throughput and latency over one Bluetooth hop; check what
-      a user needs to advertise without root (group or polkit) on Fedora,
-      Debian, Arch and Alpine.
-- [ ] Check whether dropping FIPS's own glibc Bluetooth code (`bluer`)
-      also drops the libdbus build dependency.
+- [x] Move `tests/mdk-interop` from `08f3ebf` to current MDK main (the
+      Welcome fanout, #3687, and delivery deadline, #3708, landed after
+      it) and add a scenario: `wn` invites a noscat device that is not
+      running, which joins later and finds the same Welcome on several
+      relays. Passes against MDK `9384348`, with scenario 2 also checking
+      that a White Noise member counts as active once it talks.
 
-## Phase 2: Linux CLI and desktop app
+## Phase 3: release
 
-- [ ] `Dataplane` config gains Bluetooth (off by default); the client
-      exposes it (`ClientConfig.bluetooth`, `set_bluetooth`).
-- [ ] CLI: `--bluetooth`, saved like the device name; `noscat status`
-      shows Bluetooth state (off, on, unavailable: no BlueZ, no adapter,
-      not permitted) and Bluetooth links.
-- [ ] Desktop: a Settings toggle with the same states and a hint when
-      advertising is not permitted.
-- [ ] Member list shows which links run over Bluetooth (CLI, desktop).
-
-## Phase 3: Android
-
-- [ ] noscat-ffi exposes the bridge (commands out, events in).
-- [ ] Kotlin side: L2CAP channels (Android 10+), advertising and
-      scanning, Bluetooth permissions, runs in the existing foreground
-      service.
-- [ ] Settings toggle; the member list marks Bluetooth links.
-- [ ] Test on the Pixel against a Linux desktop: phone in airplane mode
-      with Bluetooth on stays in the mesh through the desktop.
-
-## Phase 4: relays through the mesh
-
-- [ ] A device with no route to its mesh relays reaches them through a
-      member that has one: the member proxies the relay connection over
-      a stream (members only, the relays the mesh lists only).
-- [ ] Private meshes: login (NIP-42) still uses the device's own key,
-      end to end through the proxy.
-- [ ] Invites, removals, names and presence arrive on a Bluetooth-only
-      device; it catches up when its relay route comes back.
-- [ ] A private mesh's relay is already reached over FIPS (phase 0), and
-      FIPS routes that through any member, Bluetooth included, which
-      forwards what it cannot read. The proxy is for relays outside the
-      mesh (public relays of a shared mesh): it carries the connection's
-      raw bytes (TCP, with TLS end to end), not WebSocket frames, so the
-      member that forwards sees neither queries nor events. (Marmot's
-      accumulation relay idea, marmot#431, lets its buffer see the
-      queries it serves; we have no need to.)
-
-## Splits and healing
-
-Decided 2026-11-25: no relay or event sync on each device. Relays carry
-only the control plane (membership, invites, names, presence), and a
-membership change happens only once a relay has accepted it (`commit`
-publishes first and drops the change otherwise). So a group of devices
-cut off from every relay (an island) keeps its data plane (chat, files,
-forwards among its members, over any link including Bluetooth) but
-cannot change membership; when a route to a relay comes back, its
-devices catch up in order. History stays linear: nothing to reconcile.
-
-- [ ] Relays through the mesh work in either direction: whichever member
-      regains a relay route serves the others (phase 4).
-- [ ] An island device that tries to invite or remove gets a clear error
-      (no relay reachable), in the CLI and both apps.
-- [ ] Test in the netns rig: four devices, split into two islands, the
-      online island adds a device and removes one; on heal the offline
-      island converges on the same members.
-- [ ] Document the two edge cases: a removal made during a split takes
-      effect for the other island only once it catches up; two islands
-      that each reach a different relay could both commit, which the
-      convergence rule (ADR 0007) resolves within 5 commits per side, and
-      past that the losing side's devices rejoin (below).
-- [ ] A device that fell behind rejoins on its own
-      ([ADR 0009](adr/0009-rejoin-by-readmission.md)). It fell behind by
-      missing commits the relays no longer keep (noscat-relay prunes group
-      messages after 30 days) or more than the 5 a member can rewind (the
-      other island made more). It notices: its group's events keep
-      arriving but none decrypt, and its epoch stays put after catch-up.
-      It publishes a fresh key package and sends a rejoin request; any
-      member commits a re-admission (remove its old leaf, add the fresh
-      package in one commit) with no prompt, since the requester is in
-      the current roster.
-- [ ] The same re-admission replaces a member that never opened its
-      Welcome (0.6.1 marks it never joined): it is in the roster, so once
-      its Welcome deadline has passed it sends a rejoin request like any
-      device that fell behind.
-- [ ] Wire: the rejoin request in `docs/nip-noscat.md`; `join` accepts a
-      Welcome for the mesh this device is already in, from a member of
-      it, and replaces its state.
-- [ ] netns rig: the island test above with one island making 6 commits;
-      the other island's devices rejoin on heal and converge on the same
-      members.
-
-## Catching up with NIP-77
-
-Decided 2026-11-26: catch-up after a split or a long absence is where it
-pays, and it needs a relay change in the same lockstep release. Today
-`page_relay` walks back by time, 500 events a page (up to 200 pages), and
-misses events when one second holds more than a page.
-
-- [ ] noscat-relay: `relay.Negentropy = true` and 77 in `SupportedNIPs`.
-      khatru (v0.19.1) runs NEG-OPEN through `RejectFilter`, so the
-      member, login and `#h` checks apply unchanged.
-- [ ] noscat-core: record the id and time of each group event received
-      (bounded, in `relay-sync.json`; `seen` holds MLS digests, not event
-      ids). Catch-up first tries nostr-sdk's `Relay::sync` with those
-      items on a relay that supports NIP-77 (its NIP-11 document, or what
-      it answered last time, cached), then fetches the missing ids in
-      batches.
-- [ ] Fall back to paging, per relay, on a refusal (NEG-ERR or a NOTICE),
-      silence past a short initial timeout, or `auth-required:` (retried
-      after login). We never hold live events back behind history, so a
-      relay that ignores NIP-77 costs one timeout, not the 15 minute
-      stall MDK has (mdk#3643).
-- [ ] Tests on the mock relay (nostr-relay-builder speaks negentropy): a
-      gap holding more than a page of events in one second is filled; a
-      relay without NIP-77 falls back to paging.
-
-## Phase 5: release
-
-- [ ] Docs in all three repos (README, API, man page, nip-noscat for any
-      wire addition, CONTEXT terms), CI green, netns suite, a two-machine
-      Bluetooth test written down as a manual check.
-- [ ] Lockstep 0.7.0 per `docs/releasing.md`.
+- [x] INSTALL and README name the FreeBSD binary; README and the man page
+      cover the member states and the invite result.
+- [ ] Lockstep 0.7.0 per `docs/releasing.md` (noscat and both apps; no
+      winget PR this time, 0.8.0 follows soon). noscat-relay 0.3.0 with
+      the key package deletion.

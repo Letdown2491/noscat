@@ -10,7 +10,7 @@
 # - FreeBSD (x86_64): tests and a release build in a VM, with the FIPS
 #   crates patched (packaging/bsd/patch-crates.sh; they do not build on
 #   the BSDs from crates.io yet). OpenBSD and NetBSD do not build even
-#   patched (docs/plan-0.6.1.md says why), so they have no job.
+#   patched (docs/plan-0.7.0.md says why), so they have no job.
 # - Publish check: `cargo publish --workspace --dry-run` packages every
 #   crate and builds it from the package, as crates.io will.
 #

@@ -7,8 +7,8 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). Version 0.6.1; `docs/releasing.md` is the
-release checklist, `docs/plan-0.6.1.md` the plan it came from, and
+library (`crates/noscat-client`). Version 0.7.0; `docs/releasing.md` is the
+release checklist, `docs/plan-0.7.0.md` the plan it came from, and
 `docs/adr/` records why things are the way they are. Build/test in the
 podman container only; the host has no toolchain:
 
@@ -121,17 +121,17 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   groups (three trust groups, control asked on first use), a terminal
   into members that allow it, pairing codes and
   STUN for private meshes.
-- `docs/plan-0.6.1.md`: BSD binaries (#19), invitations retried until
+- `docs/plan-0.7.0.md`: BSD binaries (#19), invitations retried until
   they arrive.
-- `docs/plan-0.7.0.md`: two-way pairing and a private mesh without DNS
+- `docs/plan-0.8.0.md`: two-way pairing and a private mesh without DNS
   first (no-dns phases 2 to 4), then Bluetooth on Linux and Android,
   relays through the mesh, splits and healing, NIP-77 catch-up.
-- `docs/plan-0.8.0.md`: macOS (desktop app and Bluetooth).
-- `docs/plan-0.9.0.md`: viewing and controlling a member's screen (our own
+- `docs/plan-0.9.0.md`: macOS (desktop app and Bluetooth).
+- `docs/plan-0.10.0.md`: viewing and controlling a member's screen (our own
   Rust implementation, royalty-free codecs).
 - `docs/plan-no-dns.md`: private meshes with no DNS, no certificates and
   no URLs (QR carries npubs and addresses, relay over FIPS); phases 2 to 4
-  are 0.7.0's phase 0.
+  are 0.8.0's phase 0.
 - `docs/releasing.md`: the release checklist across the repos, from the
   tag on (crates.io first, then the desktop drops its git patch, then the
   Android release APK).

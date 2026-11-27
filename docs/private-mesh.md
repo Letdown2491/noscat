@@ -391,7 +391,7 @@ hide. Someone who can also change that traffic can reuse a device's login
 to the relay: they still cannot read or forge anything, but they can see
 the mesh's traffic pass and post junk that slows it down.
 
-Noscat 0.7.0 removes the need for the domain: devices reach the relay
+Noscat 0.8.0 removes the need for the domain: devices reach the relay
 through the mesh itself, encrypted end to end and checked against the
 server's npub, so there is no domain, no DNS, no certificate, and the
 relay no longer faces the internet at all. This guide will switch to that.
