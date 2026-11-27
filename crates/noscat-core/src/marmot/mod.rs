@@ -169,10 +169,11 @@ pub struct PendingWelcome {
 }
 
 /// Whether a member has shown up since it was added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemberState {
     /// It has sent something (an advert, a commit), or it was already a
     /// member when this device joined.
+    #[default]
     Active,
     /// Added while this device was in the mesh and not heard from yet: its
     /// invitation may still be on its way.

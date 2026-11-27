@@ -4,6 +4,9 @@
 //!    and kind 9 messages flow both ways.
 //! 2. A noscat device creates a mesh and invites the White Noise account;
 //!    it accepts, and messages flow both ways.
+//! 3. White Noise invites a noscat device that is not running and lists two
+//!    inbox relays; the device starts later, joins from the stored Welcome
+//!    (which arrives once per relay) and talks.
 //!
 //! `WN_BIN` points at the `wn` binary (`wnd` must sit next to it).
 
@@ -84,10 +87,14 @@ async fn eventually<F: FnMut() -> Result<bool>>(what: &str, mut f: F) -> Result<
 }
 
 async fn noscat(relay: &str, dir: &Path, name: &str) -> Result<Device> {
+    noscat_on(&[relay], dir, name, Identity::generate()).await
+}
+
+async fn noscat_on(relays: &[&str], dir: &Path, name: &str, id: Identity) -> Result<Device> {
     let cfg = DeviceConfig {
         dir: dir.to_path_buf(),
         name: name.into(),
-        relays: vec![relay.into()],
+        relays: relays.iter().map(|r| (*r).to_string()).collect(),
         join_relays: Vec::new(),
         dataplane: DataplaneConfig {
             bind: "127.0.0.1:0".parse()?,
@@ -97,7 +104,7 @@ async fn noscat(relay: &str, dir: &Path, name: &str) -> Result<Device> {
         },
         peer_addresses: Default::default(),
     };
-    Ok(Device::start(Identity::generate(), cfg).await?)
+    Ok(Device::start(id, cfg).await?)
 }
 
 async fn next_chat(rx: &mut tokio::sync::broadcast::Receiver<DeviceEvent>) -> Result<String> {
@@ -123,6 +130,8 @@ async fn main() -> Result<()> {
     let bin = PathBuf::from(std::env::var("WN_BIN").context("WN_BIN")?);
     let relay = nostr_relay_builder::MockRelay::run().await?;
     let url = relay.url().await.to_string();
+    let relay2 = nostr_relay_builder::MockRelay::run().await?;
+    let url2 = relay2.url().await.to_string();
     let base = std::env::temp_dir().join(format!("mdk-interop-{}", rand::random::<u32>()));
     std::fs::create_dir_all(&base)?;
 
@@ -198,8 +207,39 @@ async fn main() -> Result<()> {
         })
         .await?;
         anyhow::ensure!(b.members().await.len() == 2, "noscat roster");
+        // Its messages count as showing up: no longer pending.
+        let state = b.members().await.into_iter().find(|m| m.device == wn_pk).map(|m| m.state);
+        anyhow::ensure!(state == Some(noscat_core::marmot::MemberState::Active), "White Noise member state {state:?}");
         println!("2. both directions ok");
         b.shutdown().await;
+
+        // 3. White Noise invites a noscat device that is not running.
+        let id = Identity::generate();
+        let dir = base.join("c");
+        let c = noscat_on(&[&url, &url2], &dir, "noscat-c", id.clone()).await?;
+        c.publish_key_package().await?;
+        c.shutdown().await;
+        let created = wn.run(&["groups", "create", "interop-late", &id.public_key().to_hex()])?;
+        let gid3 = find(&created, "group_id")
+            .or_else(|| find(&created, "group_id_hex"))
+            .or_else(|| find(&created, "mls_group_id_hex"))
+            .with_context(|| format!("no group id in: {created}"))?
+            .to_string();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let c = noscat_on(&[&url, &url2], &dir, "noscat-c", id).await?;
+        c.join(wn_pk, &[], T).await.context("joining from the stored Welcome")?;
+        println!("3. noscat joined from a Welcome sent while it was stopped ({gid3})");
+        let mut rx = c.subscribe();
+        wn.run(&["messages", "send", &gid3, "you were away"])?;
+        let got = next_chat(&mut rx).await?;
+        anyhow::ensure!(got == "you were away", "noscat got {got:?}");
+        c.send_app(CHAT, Vec::new(), "back now".into()).await?;
+        eventually("White Noise sees the late joiner's message", || {
+            Ok(contains_text(&wn.run(&["messages", "list", &gid3, "--limit", "20"])?, "back now"))
+        })
+        .await?;
+        println!("3. both directions ok");
+        c.shutdown().await;
         Ok::<_, anyhow::Error>(())
     }
     .await;

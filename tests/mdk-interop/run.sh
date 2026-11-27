@@ -9,7 +9,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-MDK_REV=${1:-08f3ebf}
+MDK_REV=${1:-9384348}
 IMAGE=localhost/noscat-mdk
 
 podman build -q -t "$IMAGE" -f "$HERE/Containerfile" "$HERE" > /dev/null 2>&1 || { echo "mdk-interop: image build failed"; exit 1; }
