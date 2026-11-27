@@ -64,7 +64,8 @@ What this does not hide, so you know where the edges are:
 - The domain brings in a registrar, a DNS provider and a certificate
   authority. None of them can read or forge your mesh's messages, but
   whoever controls the domain could redirect it and see which devices
-  log in, and when. Running without a domain is covered below.
+  log in, and when. Why it is needed for now, and when that ends, is
+  under "Without a domain" below.
 - Installing downloads from GitHub once (Noscat, the relay and the apps).
   After that, running the mesh needs no outside site at all.
 
@@ -379,26 +380,21 @@ journalctl --user -u noscat-relay -f     # the relay
 
 ## Without a domain
 
-The domain is there only so the relay can have an HTTPS certificate. You
-can skip it today with a plain `ws://` relay on the server's IP address:
+The domain is there so the relay can have an HTTPS certificate, and for
+now this guide needs it. A plain `ws://` relay on the server's IP address
+works, but we no longer suggest it: the connection to the relay is not
+encrypted. Messages stay end-to-end encrypted and signed, so nobody on the
+way can read or forge them, but anyone between your devices and the
+server (a café's Wi-Fi, an ISP) can see which device keys log in, when,
+and how much they send, which is the metadata this setup is meant to
+hide. Someone who can also change that traffic can reuse a device's login
+to the relay: they still cannot read or forge anything, but they can see
+the mesh's traffic pass and post junk that slows it down.
 
-- In `.env`: `RELAY_URL="ws://203.0.113.10:3340"` and
-  `RELAY_PORT="0.0.0.0:3340"`; open TCP 3340 instead of 80 and 443, and
-  skip step 4.
-- Everywhere this guide says `wss://relay.example.com`, use
-  `ws://203.0.113.10:3340`.
-
-The cost: the connection to the relay is not encrypted. Messages stay
-end-to-end encrypted and signed, so nobody on the way can read or forge
-them, but anyone between your devices and the server (a café's Wi-Fi, an
-ISP) can see which device keys log in, when, and how much they send. That
-is the metadata this setup is meant to hide, so use it only if you accept
-that.
-
-Noscat 0.6.1 removes the trade-off: the relay makes its own certificate,
-and your pairing code carries its fingerprint, so devices trust it the
-same way they trust the npub you scan. No domain, no DNS, no certificate
-authority, and still encrypted. This guide will switch to that.
+Noscat 0.7.0 removes the need for the domain: devices reach the relay
+through the mesh itself, encrypted end to end and checked against the
+server's npub, so there is no domain, no DNS, no certificate, and the
+relay no longer faces the internet at all. This guide will switch to that.
 
 ## Going further
 

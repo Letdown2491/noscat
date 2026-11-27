@@ -3,8 +3,11 @@
 Goal: a private mesh works end to end without DNS, without a certificate
 authority, and without anyone typing or reading a URL. Devices are found by
 npub; the only thing passed out of band is the pairing QR, which carries
-npubs and raw addresses. Not yet slotted into a release: it builds on
-0.6.0 (STUN from the mesh's own relay, invite codes in the apps).
+npubs and raw addresses. It builds on 0.6.0 (STUN from the mesh's own
+relay, invite codes in the apps). Phases 2 to 4 are phase 0 of 0.7.0
+(decided 2026-11-26, in place of pinned relay certificates in 0.6.1: the
+FIPS path gives the same protection with no certificate); phases 5 and 6
+are not yet slotted.
 
 Decided 2026-11-25:
 
@@ -44,7 +47,8 @@ QR are written as `ip:port`, never a hostname.
 
 - [ ] The pairing QR names the reachable member by npub and raw address:
       `noscat:<npub>?peer=<member npub>@<ip:port>` (several `peer` entries
-      allowed, IPv4 and IPv6). Spec change in `docs/nip-noscat.md`.
+      allowed, IPv4 and IPv6). Spec change in `docs/nip-noscat.md`. The
+      joiner's own code goes the other way (phase 4).
 - [ ] At join, the device configures that member as a FIPS peer with those
       addresses, so its first link needs no relay, advert or DNS.
 - [ ] The group state of a private mesh carries the same entries, so a
@@ -70,21 +74,22 @@ QR are written as `ip:port`, never a hostname.
 ## Phase 4: joining without DNS or a certificate
 
 A joining device is not a member yet, so it cannot use the FIPS path of
-phase 3 (the reachable member's FIPS allowlist only admits members). It
-needs to publish its key package and receive its Welcome some other way.
+phase 3 (the reachable member's FIPS allowlist only admits members).
+Decided 2026-11-26 ([ADR 0010](adr/0010-two-way-pairing.md)): pairing is
+two-way, so the mesh knows the joiner's npub before it connects, and the
+join never leaves FIPS.
 
-- [ ] Default: noscat-relay also listens on a plain `ws://<ip>:<port>`
-      for the join, carried in the QR. Its policy already admits a
-      non-member's own key package and relay lists and nothing else. Plain
-      WebSocket exposes NIP-42 login metadata on path, not content (key
-      packages are public, group traffic is MLS-encrypted).
-- [ ] Once joined, the device switches to the FIPS path and stops using
-      the plain socket.
-- [ ] The domain, Caddy and the certificate become optional on the relay
-      host (kept for shared use and for anyone who prefers TLS).
-- [ ] Open question: an invite token in the QR that lets the reachable
-      member admit one specific joiner at the FIPS layer, so even the join
-      never leaves FIPS. Needs a look at FIPS `peer_admission`.
+- [ ] A member takes in the joiner's code (scanned or pasted) and records
+      the approval in the group; the relay host admits that npub in FIPS
+      as a pending joiner, confined to the relay's service port, for one
+      join or 15 minutes. The joiner publishes its key package and gets
+      its Welcome over that session (0.7.0 phase 0 has the details).
+- [ ] No plain socket: noscat-relay listens on loopback only. The domain,
+      Caddy and the certificate become optional on the relay host (kept
+      for shared use and for anyone who prefers TLS).
+- [ ] Not taken: a plain `ws://` listener for the join (path metadata, a
+      relay facing the internet) and a one-time guest key in the QR (a
+      secret in the code, a second identity on the joiner).
 
 ## Phase 5: onion, opt in
 
@@ -108,7 +113,6 @@ needs to publish its key package and receive its Welcome some other way.
 
 ## Open questions
 
-- Phase 4's token admission at the FIPS layer, versus the plain WebSocket.
 - When the reachable member's IP changes and no member saw it happen,
   devices fall back to onion if configured, else to a fresh QR. Is a
   last-resort public rendezvous (opt in) worth keeping?

@@ -1,10 +1,15 @@
-# noscat 0.6.1 plan: BSD binaries, and a private mesh without DNS
+# noscat 0.6.1 plan: BSD binaries, invitations that arrive
 
 BSD moved out of 0.6.0 on 2026-11-26, so the access and terminal release
 does not wait on it (issue [#19](https://github.com/Letdown2491/noscat/issues/19)).
-Pinned relay certificates were added the same day: with them a private mesh
-needs no domain, no DNS and no certificate authority. The pins live in the
-shared client, so both apps ship 0.6.1 too.
+Also added that day: invitations that are retried until they arrive, and
+key packages that do not outlive their use (phase 2). The member list
+gains states, so both apps ship 0.6.1 too.
+
+Pinned relay certificates were planned here the same day and dropped the
+same day: a private mesh without DNS comes from `docs/plan-no-dns.md`
+instead (phase 0 of 0.7.0), where members reach the relay over FIPS and
+need no certificate at all.
 
 ## Phase 1: BSD binaries
 
@@ -27,42 +32,79 @@ instead of waiting for upstream. Independent of everything else.
 - [ ] When upstream ships the fixes, drop the patches; the upstream
       draft stays unposted unless approved.
 
-## Phase 2: pinned relay certificates (no DNS, no CA)
+## Phase 2: invitations that arrive
 
-Decided 2026-11-26. A private mesh's relay can run on a bare IP address
-with its own self-signed certificate; devices trust it through the pairing
-code they already scan, the same way they trust the member's npub.
+Decided 2026-11-26, after Nostr Compass #50 (MDK's Welcome fanout and
+delivery deadline; Marmot's key package rules and its invite link draft,
+marmot#429). Today an invite whose Welcome no relay accepts still reports
+success and leaves a member that never joins, and a joined device keeps its
+consumed key package (the private key in its state, the event on relays)
+for as long as it stays in the mesh.
 
-- [ ] Optional and per relay: a relay with a pin accepts only the
-      certificate matching it; a relay without one is verified against
-      the usual certificate authorities, exactly as today. Public relays,
-      relays behind a domain, and a mix of both keep working. STUN is
-      unaffected (plain UDP; `mesh stun` stays its own choice).
-- [ ] Wire (`docs/nip-noscat.md`): the pin travels with the relay URL in
-      pairing codes (`?relay=wss://203.0.113.10:443&pin=<sha256 of the
-      certificate's public key>`, one pin per relay) and in the mesh's
-      relay list, so every member and every new device gets it. Devices
-      that predate pins ignore it and fall back to normal verification
-      (which fails for a self-signed relay: say so in the release notes).
-- [ ] noscat-core: relay connections check the pin with a custom TLS
-      verifier (the nostr-sdk transport); a mismatch refuses the relay
-      and logs why. Tests: right pin connects, wrong pin and a
-      CA-valid-but-unpinned certificate are refused, no pin uses the CAs.
-- [ ] CLI: `noscat mesh relays add wss://<ip>:<port> --pin <pin>`;
-      `mesh relays` and `mesh qr` show and carry it.
-- [ ] noscat-relay: serves TLS itself when asked (`TLS_ADDR`, generating
-      and keeping a self-signed certificate on first start) and prints its
-      pin at startup and with `noscat-relay pin`. Caddy stays the option
-      for a domain.
-- [ ] Apps: pairing codes with pins join as today (the parsing is in the
-      shared client); Settings shows a relay as "pinned".
-- [ ] Guide (`docs/private-mesh.md`): the no-DNS path becomes the main
-      one (no domain, no Caddy: steps 1 and 4 mostly go); the domain
-      stays as an alternative.
+Key packages:
+
+- [ ] After a successful join, delete this device's key package private
+      keys (`init_key`) from the mesh state and publish a NIP-09 deletion
+      for the consumed kind 30443 event. A device in a mesh refuses
+      Welcomes, so it needs neither; Marmot (`foundation/key-packages.md`)
+      requires the deletion within 24 hours of a replacement or at
+      `not_after`. Otherwise anyone who later gets the state file can open
+      the original Welcome, still on the relays.
+- [ ] Remember the key package refs of every Add the mesh commits
+      (bounded, in mesh state) and refuse them in `MeshGroup::add`.
+      Without it, re-inviting a device that was removed while offline
+      picks its old, consumed package from a relay, and the commit adds a
+      member that can never open its Welcome (its storage was wiped on
+      removal). `invite` then tries the next package, or says the device
+      must run `noscat join` to publish a fresh one.
+- [ ] Tests: a joined device has no key package material left and its
+      event is deleted on the mock relay; re-inviting a removed device
+      that has only its consumed package is refused, and works once it
+      publishes a fresh one.
+
+Welcome delivery (`publish` already sends to every inbox relay at once and
+lets the slower ones finish, as MDK and Haven now do; what is missing is
+what happens when none of them takes it):
+
+- [ ] Owed Welcomes are kept in mesh state with a deadline: 7 days after
+      the commit or the key package's `not_after`, whichever comes first
+      (as MDK's #3708). The inviter retries each with backoff (30 s,
+      doubling to 1 h) while it runs, until the new member is seen or the
+      deadline passes.
+- [ ] Each retry wraps the Welcome again. NIP-59 backdates a gift wrap by
+      up to 2 days and a joiner looks back only 3
+      (`GIFT_WRAP_LOOKBACK_SECS`), so republishing the first wrap would
+      soon fall out of its window.
+- [ ] A join request from a member that has never been seen means its
+      Welcome went missing: resend the owed Welcome at once instead of
+      dropping the request (`on_join_request` drops it today).
+- [ ] Delivered means the new member's first advert arrived, not a
+      relay's OK: a relay can accept a gift wrap it never serves back (MDK
+      found relay.damus.io doing so for about 10% of recipients).
+- [ ] `invite` reports "added; invitation not delivered yet" when no relay
+      took the Welcome, instead of a plain success (CLI and the client's
+      result).
+
+Member state:
+
+- [ ] The member list (`MemberStatus` and the client's) marks a member
+      that was added but never seen as pending, and one past its Welcome
+      deadline as never joined; the fix for now is to remove it and invite
+      it again (automatic re-admission comes in 0.7.0, ADR 0009).
+      `noscat mesh members` shows the state and keeps the npubs that
+      noscat-relay reads; API.md, the man page and both apps follow.
+
+MDK interop:
+
+- [ ] Move `tests/mdk-interop` from `08f3ebf` to current MDK main (the
+      Welcome fanout, #3687, and delivery deadline, #3708, landed after
+      it) and add a scenario: `wn` invites a noscat device that is not
+      running, which joins later and finds the same Welcome on several
+      relays.
 
 ## Phase 3: release
 
 - [ ] INSTALL, README and the man page name the BSD binaries; README and
-      the man page cover pins.
-- [ ] Lockstep 0.6.1 per `docs/releasing.md` (noscat, both apps, and
-      noscat-relay for its TLS).
+      the man page cover the member states and the invite result.
+- [ ] Lockstep 0.6.1 per `docs/releasing.md` (noscat and both apps;
+      noscat-relay has no change of its own).
