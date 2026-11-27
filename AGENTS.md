@@ -7,8 +7,8 @@ Guidance for AI agents working in this repo.
 noscat: a Nostr-native, userspace device mesh. Membership is a Marmot (MLS)
 group carried by Nostr relays; data goes device to device over FIPS with QUIC
 streams on top. Packaged as a Rust CLI (`crates/noscat`) and reusable client
-library (`crates/noscat-client`). Version 0.6.0; `docs/releasing.md` is the
-release checklist, `docs/plan-0.6.0.md` the plan it came from, and
+library (`crates/noscat-client`). Version 0.6.1; `docs/releasing.md` is the
+release checklist, `docs/plan-0.6.1.md` the plan it came from, and
 `docs/adr/` records why things are the way they are. Build/test in the
 podman container only; the host has no toolchain:
 
@@ -20,8 +20,9 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 ## Non-negotiable rules
 
 1. **Cross-platform, always.** The CLI ships for Linux (glibc and musl), macOS
-   (x86_64 and aarch64), Windows, and the BSDs (via `cargo install`; 0.5 waits
-   on an upstream FIPS fix, issue #19, so keep BSD cfg hygiene anyway). Every change
+   (x86_64 and aarch64), Windows, FreeBSD (a release binary built with
+   our FIPS patches, `packaging/bsd/`, until upstream fixes issue #19) and
+   the other BSDs (not building yet; keep cfg hygiene anyway). Every change
    must compile and behave correctly on all of them:
    - No platform-specific code outside `#[cfg(...)]` branches with a fallback for
      the other platforms (see `IdentitySource::File` in `crates/noscat-client` for
@@ -31,11 +32,14 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
      in `crates/noscat/src/main.rs`).
    - Unix-only APIs (file modes, symlinks, signals, fork) need a documented
      Windows/BSD fallback or a graceful degradation.
-   - BSDs are tested only by compilation (`cargo install`); keep dependencies
-     portable and avoid Linux-only crates (io_uring, procfs) unless gated.
+   - FreeBSD builds and tests in a CI VM with the FIPS crates patched
+     (`packaging/bsd/patch-crates.sh`); OpenBSD and NetBSD do not build
+     yet (`socket-pktinfo`, under FIPS's mDNS).
+     Keep dependencies portable and avoid Linux-only crates (io_uring,
+     procfs) unless gated.
    - CI (.github/workflows/ci.yml) is the compile gate for the release
-     targets: it builds and tests Linux, macOS and Windows on every push to
-     main. Check it after pushing (`gh run list --workflow ci.yml`); the
+     targets: it builds and tests Linux, macOS, Windows and FreeBSD on
+     every push to main. Check it after pushing (`gh run list --workflow ci.yml`); the
      local container has the Linux target only, so lean on cfg hygiene and
      CI for the rest.
 2. **No em or en dashes anywhere in the repo, and no hyphen standing in for
@@ -96,7 +100,8 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
 - `docs/nip-noscat.md`: the wire protocol spec (the interop contract).
 - `packaging/`: man page, nfpm, the AUR package and winget manifests
   (templates the release workflow fills and attaches to each release),
-  bottle script; `flake.nix` at the root;
+  bottle script, `bsd/` (patches for the FIPS crates and the script that
+  applies them, until upstream builds on the BSDs); `flake.nix` at the root;
   `.github/workflows/ci.yml`: build and test on every release platform
   for each push to main, plus a crates.io dry run;
   `.github/workflows/release.yml`: the whole release pipeline on a tag

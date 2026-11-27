@@ -19,9 +19,8 @@ Think Tailscale, but:
   account can even be invited into a mesh),
 - there is no coordinator and no single owner: lose any device and the
   mesh carries on,
-- everything runs in userspace on Linux, macOS, Windows and Android (the
-  BSDs are planned for 0.6.1, [#19](https://github.com/Letdown2491/noscat/issues/19));
-  no root, no kernel module,
+- everything runs in userspace on Linux, macOS, Windows, FreeBSD and
+  Android; no root, no kernel module,
 - it is written in Rust.
 
 The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-noscat.md).
@@ -31,9 +30,10 @@ The noscat-specific protocol is specified in [`docs/nip-noscat.md`](docs/nip-nos
 Noscat is a single binary, packaged for every major platform (the Linux
 packages are static, with no dependencies): Linux (x86_64 and aarch64: deb, rpm, apk, and a live pacman
 repository), macOS (Intel and Apple Silicon, via Homebrew with prebuilt
-bottles), and Windows (Scoop and winget, winget in community review). Nix
-and cargo cover everything else (the BSDs wait on an upstream fix,
-[#19](https://github.com/Letdown2491/noscat/issues/19)).
+bottles), Windows (Scoop and winget, winget in community review), and
+FreeBSD (a release tarball). Nix and cargo cover everything else
+(`cargo install` on the BSDs waits on an upstream fix; INSTALL says how to
+build there).
 
 **All installation options: [`INSTALL.md`](INSTALL.md)**
 
@@ -77,7 +77,7 @@ interoperable by construction.
 
 ## Status
 
-Version 0.6.0. The design decisions are in [`docs/adr/`](docs/adr/).
+Version 0.6.1. The design decisions are in [`docs/adr/`](docs/adr/).
 
 - `crates/noscat-core`: the library: `dataplane` (FIPS), `streams` (QUIC
   over FIPS), `marmot` (the mesh group), `device` (the runtime tying them

@@ -24,14 +24,22 @@ instead of waiting for upstream. Independent of everything else.
       stays untouched and every other platform keeps building pure
       crates.io code. A cross build for FreeBSD 14.5 (clang, lld and the
       base sysroot in the dev container) compiles and links with it.
-- [ ] CI: FreeBSD build and tests in a VM (`vmactions/freebsd-vm`, jobs
-      written; first run pending); the release attaches
+- [x] CI: FreeBSD build and tests in a VM (`vmactions/freebsd-vm`; the
+      whole suite passes since the buffer fix below); the release attaches
       `noscat-<tag>-x86_64-unknown-freebsd.tar.gz` (job written) and the
       shell installer picks it (done; the installer also asked for
       tarball names no release had, so it failed everywhere: fixed).
-- [ ] OpenBSD and NetBSD: CI tries the same (jobs written, failures not
-      fatal); ship binaries for those that build and pass, and record
-      what fails for the others.
+- [x] OpenBSD and NetBSD: tried in CI VMs (2026-11-27); neither builds,
+      even patched. Both fail in `socket-pktinfo` 0.4 (through
+      `nvpn-mdns-sd`, the mDNS for LAN discovery): OpenBSD has no
+      `IP_PKTINFO`/`in_pktinfo`, NetBSD lacks socket2's
+      `InterfaceIndexOrAddress` and `join_multicast_v4_n`. No binaries and
+      no CI job until that crate supports them (or mDNS becomes optional
+      in FIPS).
+- [x] FreeBSD refuses a socket buffer above `kern.ipc.maxsockbuf` (2 MiB
+      by default) instead of clamping it, so FIPS's 16 MiB default kept
+      UDP from starting (CI's first run). noscat asks for 1 MiB on the
+      BSDs (`dataplane.rs`).
 - [x] Docs: INSTALL's BSD section points at the binaries (`cargo install
       noscat` keeps failing on the BSDs until upstream fixes it). README
       and the site follow in the release commit (the site deploys from
@@ -120,7 +128,8 @@ MDK interop:
 
 ## Phase 3: release
 
-- [ ] INSTALL, README and the man page name the BSD binaries; README and
-      the man page cover the member states and the invite result.
-- [ ] Lockstep 0.6.1 per `docs/releasing.md` (noscat and both apps;
-      noscat-relay has no change of its own).
+- [x] INSTALL and README name the FreeBSD binary; README and the man page
+      cover the member states and the invite result.
+- [ ] Lockstep 0.6.1 per `docs/releasing.md` (noscat and both apps; no
+      winget PR this time, 0.7.0 follows soon). noscat-relay 0.3.0 with
+      the key package deletion.

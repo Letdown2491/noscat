@@ -72,7 +72,7 @@ nix run github:Letdown2491/noscat
 
 A flake is at the repo root; `nix profile install github:Letdown2491/noscat`
 adds it to a profile. Linux and macOS, x86_64 and aarch64. It builds the
-`main` branch; add `?ref=v0.6.0` for the release.
+`main` branch; add `?ref=v0.6.1` for the release.
 
 ## cargo (any platform with a Rust toolchain)
 
@@ -110,9 +110,9 @@ cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
 
 The script fetches the two crates, applies `packaging/bsd/patches/` and
 prints the cargo options that use the patched copies (it needs `patch`,
-which FreeBSD's base system has). OpenBSD and NetBSD are tried in CI the
-same way, with Rust from their packages; there are no binaries for them
-yet. A FreeBSD port (and then pkgsrc-wip) is on the table if there is
+which FreeBSD's base system has). OpenBSD and NetBSD do not build yet,
+even patched: the socket library behind LAN discovery does not support
+them (`docs/plan-0.6.1.md`). A FreeBSD port (and then pkgsrc-wip) is on the table if there is
 demand.
 
 ## Every package ships
