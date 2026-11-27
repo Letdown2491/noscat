@@ -126,7 +126,7 @@
       <li>Your hosting provider sees the server's traffic: which IP addresses talk to it, when, and how much. Not what is said.</li>
       <li>Your relay's domain name is public: anyone can see it exists (HTTPS certificates are published in public logs). Only your devices can use it.</li>
       <li>The server is a full member. Anyone who takes it over can do what any member can: invite a device, see who is in the mesh, use whatever your other devices allow it. Keep it updated and use SSH keys.</li>
-      <li>The domain brings in a registrar, a DNS provider and a certificate authority. None of them can read or forge your mesh's messages, but whoever controls the domain could redirect it and see which devices log in, and when. <a href="#no-domain" style="color: var(--accent)">Running without a domain</a> is covered below.</li>
+      <li>The domain brings in a registrar, a DNS provider and a certificate authority. None of them can read or forge your mesh's messages, but whoever controls the domain could redirect it and see which devices log in, and when. Why it is needed for now, and when that ends, is under <a href="#no-domain" style="color: var(--accent)">Without a domain</a> below.</li>
       <li>Installing downloads from GitHub once (Noscat, the relay and the apps). After that, running the mesh needs no outside site at all.</li>
     </ul>
   </div>
@@ -327,11 +327,9 @@ journalctl --user -u noscat-relay -f     # the relay</pre><button type="button">
       <div class="step" id="no-domain">
         <h2>Without a domain</h2>
         <div class="prose">
-          <p>The domain is there only so the relay can have an HTTPS certificate. You can skip it today with a plain <code>ws://</code> relay on the server's IP address: in <code>.env</code>, set the two lines below, open TCP 3340 instead of 80 and 443, and skip step 4. Everywhere this guide says <code>wss://relay.example.com</code>, use <code>ws://203.0.113.10:3340</code>.</p>
+          <p>The domain is there so the relay can have an HTTPS certificate, and for now this guide needs it. A plain <code>ws://</code> relay on the server's IP address works, but we no longer suggest it: the connection to the relay is not encrypted.</p>
         </div>
-        <div class="snippet"><pre>RELAY_URL="ws://203.0.113.10:3340"
-RELAY_PORT="0.0.0.0:3340"</pre><button type="button">copy</button></div>
-        <div class="callout">The cost: the connection to the relay is not encrypted. Messages stay end-to-end encrypted and signed, so nobody on the way can read or forge them, but anyone between your devices and the server (a café's Wi-Fi, an ISP) can see which device keys log in, when, and how much they send. Noscat 0.6.1 removes the trade-off: the relay makes its own certificate and your pairing code carries its fingerprint, so there is no domain, no DNS and no certificate authority, and the connection is still encrypted.</div>
+        <div class="callout">Messages stay end-to-end encrypted and signed, so nobody on the way can read or forge them, but anyone between your devices and the server (a café's Wi-Fi, an ISP) can see which device keys log in, when, and how much they send, which is the metadata this setup is meant to hide. Someone who can also change that traffic can reuse a device's login to the relay: they still cannot read or forge anything, but they can see the mesh's traffic pass and post junk that slows it down. Noscat 0.7.0 removes the need for the domain: devices reach the relay through the mesh itself, encrypted end to end and checked against the server's npub, so there is no domain, no DNS, no certificate, and the relay no longer faces the internet at all.</div>
         <p class="more">Going further: moving an existing mesh onto your own relay is in <a href="https://github.com/Letdown2491/noscat-relay">noscat-relay's README</a>; the protocol is in <a href="https://github.com/Letdown2491/noscat/blob/main/docs/nip-noscat.md">the NIP</a>.</p>
       </div>
     </div>
