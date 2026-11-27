@@ -50,7 +50,7 @@ jobs:
 
       - name: Install musl-gcc (native; bundled sqlite needs a C compiler)
         run: |
-          sudo apt-get update
+          sudo apt-get update || true # a broken third-party source (packages.microsoft.com, 403) must not stop the job
           sudo apt-get install -y musl-tools
 
       - name: Build (static musl)
@@ -166,7 +166,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install libdbus and libclang (the FIPS crates link them on glibc)
         run: |
-          sudo apt-get update
+          sudo apt-get update || true # a broken third-party source (packages.microsoft.com, 403) must not stop the job
           sudo apt-get install -y libdbus-1-dev libclang-dev
       - name: Flag breaking changes against the published crates
         # Mechanical backstop for API.md: a signature break must ride a
@@ -281,7 +281,7 @@ jobs:
 
       - name: Install libdbus and libclang (cargo publish builds each crate on glibc)
         run: |
-          sudo apt-get update
+          sudo apt-get update || true # a broken third-party source (packages.microsoft.com, 403) must not stop the job
           sudo apt-get install -y libdbus-1-dev libclang-dev
       - name: Publish to crates.io
         env:
