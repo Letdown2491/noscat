@@ -20,6 +20,9 @@ access and privacy: `docs/plan-0.6.0.md`):
   until it was back online.
 - STUN for private meshes, once planned here, ships earlier in 0.6.0; the
   BSD binaries in 0.7.0.
+- **Services by name in a browser** (#21, added 2026-11-27): a device
+  lists the services it offers, and every member reaches them at
+  `*.localhost` URLs. See "Services and `*.localhost` URLs" below.
 
 ## How it fits
 
@@ -222,6 +225,68 @@ misses events when one second holds more than a page.
 - [ ] Tests on the mock relay (nostr-relay-builder speaks negentropy): a
       gap holding more than a page of events in one second is filled; a
       relay without NIP-77 falls back to paging.
+
+## Services and `*.localhost` URLs (#21)
+
+Decided 2026-11-27. A device keeps a list of named services and announces
+it; every member runs a local proxy that turns them into browser URLs.
+Browsers resolve `*.localhost` to loopback themselves (RFC 6761) and treat
+it as a secure context, so there is no DNS and no certificate. The
+loopback leg is plain HTTP that never leaves the machine; the leg to the
+member is the existing forward path, end to end encrypted.
+
+- [ ] **Named, saved services**: `noscat expose add <name> <port>
+      [--tcp]`, `expose list`, `expose remove <name>`, saved in the device
+      directory and edited by the apps through the client API. A service is
+      on the member itself (a port on its loopback); no LAN targets for
+      now. `--tcp` marks a service a browser cannot use (SSH, a
+      database).
+- [ ] **Quick, temporary exposes**: `noscat expose <port>` exposes a port
+      while the command runs, named by its number, and is gone when it
+      stops (a dev server). `up --serve-port` becomes a hidden alias for
+      one release, then goes.
+- [ ] **Announced in adverts**: the advert gains a services field (name,
+      port, kind). Check first that 0.7 ignores an unknown advert field;
+      spec change in `docs/nip-noscat.md`. Every member sees the names;
+      the services access group still decides who may connect.
+- [ ] **The proxy**, on every member while a client runs (CLI `up`, both
+      apps): one listener on `127.0.0.1:7080` (configurable) for named
+      services, `http://<service>.<device>.localhost:7080`, and a listener
+      on each announced port number for `http://<device>.localhost:<port>`
+      (the dev server case), falling back to the 7080 form when that local
+      port is taken. Always 7080, never port 80: ports below 1024 need
+      root on Linux, the BSDs and Android.
+- [ ] **Routing per connection**: read the `Host` of a connection's first
+      request, pick the member and service, then splice bytes like
+      `forward` (browsers keep a connection per host name, and WebSockets
+      keep working). `Host` reaches the service unchanged. An unknown name
+      gets a page listing the known ones.
+- [ ] **Device names in URLs**: the member's current name, lowercased,
+      anything but a letter or digit turned into `-`, repeats merged, at
+      most 63 characters ("Pixel 9a" is `pixel-9a`, "Noscat VPS"
+      `noscat-vps`). Read from the roster at each connection, so a rename
+      works at once; an old name redirects to the new one for 30 days.
+      Two members with the same name: the second in roster order gets a
+      short tag from its key (`pixel-9a-x7k`). The npub (63 characters,
+      one DNS label) always works as a name that never changes.
+- [ ] **Web pages cannot use it**: refuse a request whose `Origin` or
+      `Referer` is not a `*.localhost` URL, so a site in the same browser
+      cannot send requests to a member's service. Other users on the same
+      machine can still connect to the loopback listener, as with
+      `forward`; documented.
+- [ ] **Apps**: each member's services on its card, with Open (web) or
+      Forward to a local port (`--tcp`); a Services section in Settings
+      to add and remove this device's own.
+- [ ] **Spike first**: `*.localhost` (subdomains included) in Chrome,
+      Firefox, Safari and Edge on each platform, and in Chrome and Firefox
+      on Android; Vite's host check and live reload through the proxy.
+      Document the fallback where a browser does not resolve it.
+- [ ] Netrig: a member's HTTP service through the proxy by name and by
+      port, a WebSocket through it, a rename, an unknown name, and a
+      request from another origin refused.
+
+Later, not 0.8.0: the desktop app offering to expose a port it sees a
+local dev server open; LAN targets (a router behind a member).
 
 ## Phase 5: release
 
