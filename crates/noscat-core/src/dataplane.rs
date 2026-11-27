@@ -36,6 +36,15 @@ use crate::identity::Identity;
 /// fits behind `PPPoE` and most tunnels. Measured in `tests/netrig`; ADR 0003.
 pub const FIPS_UDP_MTU: u16 = 1320;
 
+/// UDP socket buffer size: FIPS's defaults (16 MiB receive, 8 MiB send)
+/// everywhere except the BSDs, which refuse a buffer above
+/// `kern.ipc.maxsockbuf` (2 MiB by default, about 1.8 MiB usable) instead
+/// of clamping it as Linux does, so the UDP transport would not start.
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+const UDP_SOCKET_BUFFER: Option<usize> = Some(1 << 20);
+#[cfg(not(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")))]
+const UDP_SOCKET_BUFFER: Option<usize> = None;
+
 /// Largest service datagram every path (direct or relayed) delivers.
 pub const MAX_DATAGRAM: usize = FIPS_UDP_MTU as usize - 110;
 
@@ -244,6 +253,8 @@ impl Dataplane {
             advertise_on_nostr: Some(advertise_udp),
             public: Some(public),
             external_addr,
+            recv_buf_size: UDP_SOCKET_BUFFER,
+            send_buf_size: UDP_SOCKET_BUFFER,
             ..UdpConfig::default()
         });
         // The bind future is large (about 32 KB); box it off the caller's stack.

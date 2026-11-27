@@ -446,7 +446,10 @@ async fn a_lost_invitation_is_resent_and_the_used_key_package_deleted() {
 
     let j = b.clone();
     let inviter = a.device();
-    let waiting = tokio::spawn(async move { j.join(inviter, &[], T).await });
+    // Long enough for either resend: the joiner's next request (15 s after
+    // its stored-invitation fetch, which is slow on some CI hosts) or the
+    // inviter's own retry (30 s after the invite, on a 15 s tick).
+    let waiting = tokio::spawn(async move { j.join(inviter, &[], Duration::from_secs(90)).await });
     tokio::time::sleep(Duration::from_secs(1)).await;
     refuse.store(false, std::sync::atomic::Ordering::SeqCst);
     waiting.await.unwrap().expect("the resent Welcome arrives");

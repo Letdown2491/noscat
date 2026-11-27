@@ -9,8 +9,8 @@
 #   build.
 # - FreeBSD (x86_64): tests and a release build in a VM, with the FIPS
 #   crates patched (packaging/bsd/patch-crates.sh; they do not build on
-#   the BSDs from crates.io yet). OpenBSD and NetBSD are tried the same
-#   way; their failures are reported, not fatal.
+#   the BSDs from crates.io yet). OpenBSD and NetBSD do not build even
+#   patched (docs/plan-0.6.1.md says why), so they have no job.
 # - Publish check: `cargo publish --workspace --dry-run` packages every
 #   crate and builds it from the package, as crates.io will.
 #
@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Run just this job: linux-test, linux-musl, macos, windows, bsd or publish-check (empty: all)"
+        description: "Run just this job: linux-test, linux-musl, macos, windows, bsd (FreeBSD) or publish-check (empty: all)"
         required: false
         default: ""
 
@@ -157,38 +157,6 @@ jobs:
             cargo build --release -p noscat $patches
             target/release/noscat --version
             ls -l target/release/noscat
-
-  openbsd:
-    name: openbsd x86_64 (trial)
-    if: ${{ !inputs.only || inputs.only == 'bsd' }}
-    continue-on-error: true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build in an OpenBSD VM (rust from packages; rustup has no OpenBSD host)
-        uses: vmactions/openbsd-vm@v1
-        with:
-          prepare: pkg_add rust curl
-          run: |
-            cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
-            target/release/noscat --version
-
-  netbsd:
-    name: netbsd x86_64 (trial)
-    if: ${{ !inputs.only || inputs.only == 'bsd' }}
-    continue-on-error: true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build in a NetBSD VM
-        uses: vmactions/netbsd-vm@v1
-        with:
-          prepare: /usr/sbin/pkg_add rust curl
-          run: |
-            cargo build --release -p noscat $(packaging/bsd/patch-crates.sh)
-            target/release/noscat --version
 
   publish-check:
     name: crates.io dry run
