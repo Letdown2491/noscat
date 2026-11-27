@@ -140,6 +140,7 @@ MDK interop:
 
 - [x] INSTALL and README name the FreeBSD binary; README and the man page
       cover the member states and the invite result.
-- [ ] Lockstep 0.7.0 per `docs/releasing.md` (noscat and both apps; no
+- [x] Lockstep 0.7.0 per `docs/releasing.md` (noscat and both apps; no
       winget PR this time, 0.8.0 follows soon). noscat-relay 0.3.0 with
-      the key package deletion.
+      the key package deletion. Released 2026-11-27; the VPS runs both.
+      AUR not pushed from this machine (no AUR host key here).
