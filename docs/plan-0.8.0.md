@@ -274,9 +274,33 @@ member is the existing forward path, end to end encrypted.
       cannot send requests to a member's service. Other users on the same
       machine can still connect to the loopback listener, as with
       `forward`; documented.
-- [ ] **Apps**: each member's services on its card, with Open (web) or
-      Forward to a local port (`--tcp`); a Services section in Settings
-      to add and remove this device's own.
+- [ ] **Client and FFI API** (API.md in the same commit): this device's
+      saved services (list, add, remove), quick exposes, every member's
+      announced services with the URL that works on this device, and an
+      event when either list changes. The proxy runs with the client, so
+      the apps get it without starting anything.
+
+Apps (both replace today's Services tab, which is built around a single
+expose target and the port forwards):
+
+- [ ] **Desktop**: the Services tab becomes two lists. "On this device":
+      this device's services (name, port, web or TCP), add and remove,
+      plus any quick exposes running. Exposing no longer switches the app
+      into an expose mode with a Stop button: services are served whenever
+      the device runs. "In the mesh": every member's services, grouped by
+      member, with Open (in the default browser) and Copy URL for web
+      services and Forward to a local port for TCP ones. Port forwards
+      stay, under the TCP services. Each member's card in Devices shows
+      its services too.
+- [ ] **Android**: the Services tab shows "In the mesh" as on the
+      desktop: Open hands the URL to the browser (the proxy runs in the
+      app's foreground service, so it works while the app runs), Copy URL,
+      Forward for TCP. Members' cards show their services. The phone
+      offering services itself stays out of 0.8.0 (it rarely runs one;
+      Termux users have the CLI).
+- [ ] Both apps: a rename or a member leaving updates the lists live
+      (the event above); a service whose member is offline shows as such
+      instead of disappearing.
 - [ ] **Spike first**: `*.localhost` (subdomains included) in Chrome,
       Firefox, Safari and Edge on each platform, and in Chrome and Firefox
       on Android; Vite's host check and live reload through the proxy.
