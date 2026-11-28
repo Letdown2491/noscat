@@ -123,15 +123,18 @@ podman run --rm -v noscat-cargo-home:/usr/local/cargo:z -v "$PWD:/work:Z" -w /wo
   STUN for private meshes.
 - `docs/plan-0.7.0.md`: BSD binaries (#19), invitations retried until
   they arrive.
-- `docs/plan-0.8.0.md`: two-way pairing and a private mesh without DNS
-  first (no-dns phases 2 to 4), then Bluetooth on Linux and Android,
-  relays through the mesh, splits and healing, NIP-77 catch-up.
-- `docs/plan-0.9.0.md`: macOS (desktop app and Bluetooth).
-- `docs/plan-0.10.0.md`: viewing and controlling a member's screen (our own
+- `docs/plan-0.8.0.md`: services by name at `*.localhost` URLs (#21),
+  rejoin by readmission with splits and healing, NIP-77 catch-up.
+- `docs/plan-0.9.0.md`: two-way pairing and a private mesh without DNS
+  (no-dns phases 2 to 4).
+- `docs/plan-0.10.0.md`: Bluetooth on Linux and Android, relays through
+  the mesh.
+- `docs/plan-0.11.0.md`: macOS (desktop app and Bluetooth).
+- `docs/plan-0.12.0.md`: viewing and controlling a member's screen (our own
   Rust implementation, royalty-free codecs).
 - `docs/plan-no-dns.md`: private meshes with no DNS, no certificates and
   no URLs (QR carries npubs and addresses, relay over FIPS); phases 2 to 4
-  are 0.8.0's phase 0.
+  are 0.9.0.
 - `docs/releasing.md`: the release checklist across the repos, from the
   tag on (crates.io first, then the desktop drops its git patch, then the
   Android release APK).

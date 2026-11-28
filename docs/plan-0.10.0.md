@@ -1,98 +1,111 @@
-# noscat 0.10.0 plan: view and control a device
+# noscat 0.10.0 plan: Bluetooth
 
-0.10.0 adds a **Screen** action to every member that allows it: click it
-in the desktop app or the Android app (or run `noscat screen <device>`)
-to see that device's screen and control it. It ships in lockstep in
-noscat, noscat-desktop and noscat-android, after 0.6.0 (access groups and
-the terminal), 0.8.0 (Bluetooth) and 0.9.0 (macOS). It was 0.9.0 until
-the roadmap was re-cut on 2026-11-25.
+0.10.0 lets a device with no working network (no Wi-Fi, no mobile data)
+stay in the mesh through a nearby member over Bluetooth LE. It ships in
+lockstep in noscat (Linux CLI), noscat-desktop (Linux) and
+noscat-android. macOS follows in 0.11.0 (`docs/plan-0.11.0.md`). Windows
+is out: it has no Bluetooth LE L2CAP channels for apps, and the
+alternative needs upstream FIPS work we are not taking on.
 
-Decided 2026-11-25:
+Decided 2026-11-25 (moved from 0.6.0 the same day, when 0.6.0 became
+access and privacy: `docs/plan-0.6.0.md`; moved from 0.8.0 to 0.10.0
+on 2026-11-27, after two-way pairing and a private mesh without DNS in
+0.9.0, which phase 4 builds on):
 
-- **Our own implementation, in Rust**, not voxl. voxl covers X11, macOS
-  and Windows hosts but not Wayland or Android, wraps its stream in a
-  WebSocket we do not need inside the mesh, and links x264 (GPL-2.0, and
-  H.264 is patent-encumbered). voxl is MIT, so we may borrow pieces
-  (damage tracking, encoder tuning, touch handling) with attribution.
-- **Royalty-free codecs**: the OS hardware encoders first, VP8/VP9
-  (libvpx, BSD) as the software fallback. No software H.264 (x264 or
-  OpenH264) unless decided otherwise.
-- **Nothing hosted anywhere**: the device being viewed captures and
-  encodes locally; the stream is a noscat stream between members, end
-  to end encrypted. No server, no relay for video.
-- **Off by default** on every device: "Allow members to view this
-  device", with view only or view and control, and ask each time (the
-  default) or unattended. Screen view and control join the terminal in
-  0.6.0's Control group (asked on first use; allow once, always, or
-  deny), so a device can allow some members only. Whether view only
-  needs its own level inside Control is decided when 0.10.0 starts.
-- **Control from every client**: built-in viewers in both apps; the CLI
-  opens a small viewer noscat serves on localhost.
+- **Opt-in**, per device: a toggle in Settings (desktop and Android) and
+  a saved CLI setting (`--bluetooth`). A device with it on advertises,
+  accepts and relays for members nearby.
+- **Every Linux build has it**, glibc and musl alike: one static binary,
+  no new package dependencies. See [ADR 0008](adr/0008-bluetooth-through-the-host-bridge.md).
+- **Relays through the mesh in the same release**: without it, a
+  Bluetooth-only device would miss membership changes, invites and names
+  until it was back online.
+- STUN for private meshes, once planned here, ships earlier in 0.6.0; the
+  BSD binaries in 0.7.0; services, rejoin and NIP-77 in 0.8.0; two-way
+  pairing and a private mesh without DNS in 0.9.0.
 
-## Components
+## How it fits
+
+FIPS already routes through members: a device whose only link is
+Bluetooth to a laptop reaches every other member through that laptop,
+end to end encrypted (the laptop forwards what it cannot read). FIPS's
+Bluetooth transport uses LE L2CAP connection-oriented channels and a
+small advertised record naming the channel. Its host bridge
+(`host-ble-transport`) hands the platform calls to the application as
+commands (listen, advertise, scan, connect) and events (stream data,
+discoveries); noscat answers them per platform.
 
 ```
-  viewer (app or browser)                 device being viewed
-  ───────────────────────                 ──────────────────────────
-  decode + draw  <── video ── noscat stream ── encode <── capture
-  input events   ── input ──> noscat stream ──> inject
+  noscat-core dataplane ── FIPS node ── UDP transport (as today)
+                               └─────── BLE transport (host bridge)
+                                            │ commands / events
+            ┌───────────────────────────────┼──────────────────────┐
+     Linux: zbus (BlueZ D-Bus)       Android: Kotlin via      macOS (0.9):
+     + kernel L2CAP sockets          noscat-ffi               CoreBluetooth
+     (CLI and desktop app)                                    (CLI and app)
 ```
 
-| Piece | Linux X11 / headless | Linux Wayland | macOS | Windows (CLI) | Android |
-|---|---|---|---|---|---|
-| Capture | XShm + XDamage | portal ScreenCast + PipeWire | ScreenCaptureKit | DXGI duplication | MediaProjection |
-| Encode | VA-API, else libvpx | VA-API, else libvpx | VideoToolbox | Media Foundation, else libvpx | MediaCodec |
-| Input | XTest | portal RemoteDesktop (libei) | CGEvent | SendInput | accessibility service |
-| Unattended | yes | when the portal restores the grant (GNOME, KDE), else a prompt | after granting permissions once | yes | **no**: Android 14+ needs a tap per session |
+Admission is unchanged: links of any kind are members only (ADR 0005).
 
-Packaging: the CLI stays one static binary, so headless and CLI-only
-machines (a VPS serving a virtual desktop) install a small
-`noscat-screen` companion package. The desktop app links the screen code
-directly; the Android app has its own. Viewers need nothing extra.
+## Phase 1: spike (Linux)
 
-## Phase 1: core and spike (Linux X11)
+- [ ] Linux bridge: BlueZ over zbus (advertising via LEAdvertisingManager1,
+      the bootstrap record via GattManager1, scanning via Adapter1 and
+      ObjectManager signals) plus kernel L2CAP sockets (AF_BLUETOOTH,
+      SOCK_SEQPACKET) through libc. Builds static on musl.
+- [ ] Two Linux machines, one with networking off: chat and a file
+      reach a third member through the other, over Bluetooth.
+- [ ] Measure throughput and latency over one Bluetooth hop; check what
+      a user needs to advertise without root (group or polkit) on Fedora,
+      Debian, Arch and Alpine.
+- [ ] Check whether dropping FIPS's own glibc Bluetooth code (`bluer`)
+      also drops the libdbus build dependency.
 
-- [ ] Protocol (`docs/nip-noscat.md`): a screen service on a noscat
-      stream: session setup (codec, size, view only or control), video
-      frames, input events, clipboard later. Advertised in the member's
-      advert so apps know who offers a screen.
-- [ ] Host: X11 capture with damage tracking, encode (VA-API or libvpx),
-      XTest input. Works on Xvfb, so a VPS can serve a virtual desktop.
-- [ ] Viewer spike in the desktop app: decode in Rust and draw frames in
-      GPUI at 60 fps on Linux. If GPUI cannot keep up, fall back to a
-      native child window for the video.
-- [ ] Browser viewer for the CLI (WebCodecs), served on localhost.
-- [ ] Measure latency and bandwidth over a direct link and through the
-      reachable member.
+## Phase 2: Linux CLI and desktop app
 
-## Phase 2: Linux Wayland
-
-- [ ] Capture through the ScreenCast portal and PipeWire; input through
-      the RemoteDesktop portal; keep the restore token so unattended
-      access survives restarts where the desktop allows it.
+- [ ] `Dataplane` config gains Bluetooth (off by default); the client
+      exposes it (`ClientConfig.bluetooth`, `set_bluetooth`).
+- [ ] CLI: `--bluetooth`, saved like the device name; `noscat status`
+      shows Bluetooth state (off, on, unavailable: no BlueZ, no adapter,
+      not permitted) and Bluetooth links.
+- [ ] Desktop: a Settings toggle with the same states and a hint when
+      advertising is not permitted.
+- [ ] Member list shows which links run over Bluetooth (CLI, desktop).
 
 ## Phase 3: Android
 
-- [ ] Host: MediaProjection capture, MediaCodec encode, input through an
-      accessibility service (the user enables it once); a notification
-      to approve each session.
-- [ ] Viewer: native MediaCodec decode on a surface; tap and drag as
-      mouse, long press as right click, pinch to zoom, on-screen keyboard
-      with a key bar (Esc, Ctrl, Alt).
+- [ ] noscat-ffi exposes the bridge (commands out, events in).
+- [ ] Kotlin side: L2CAP channels (Android 10+), advertising and
+      scanning, Bluetooth permissions, runs in the existing foreground
+      service.
+- [ ] Settings toggle; the member list marks Bluetooth links.
+- [ ] Test on the Pixel against a Linux desktop: phone in airplane mode
+      with Bluetooth on stays in the mesh through the desktop.
 
-## Phase 4: macOS and Windows hosts
+## Phase 4: relays through the mesh
 
-- [ ] macOS: ScreenCaptureKit, VideoToolbox, CGEvent, in the 0.9 desktop
-      app and `noscat-screen`.
-- [ ] Windows: DXGI, Media Foundation (libvpx fallback), SendInput, in
-      `noscat-screen` (there is no Windows app).
+- [ ] A device with no route to its mesh relays reaches them through a
+      member that has one: the member proxies the relay connection over
+      a stream (members only, the relays the mesh lists only).
+- [ ] Private meshes: login (NIP-42) still uses the device's own key,
+      end to end through the proxy.
+- [ ] Relays through the mesh work in either direction: whichever member
+      regains a relay route serves the others (splits and
+      healing, 0.8.0).
+- [ ] Invites, removals, names and presence arrive on a Bluetooth-only
+      device; it catches up when its relay route comes back.
+- [ ] A private mesh's relay is already reached over FIPS (0.9.0), and
+      FIPS routes that through any member, Bluetooth included, which
+      forwards what it cannot read. The proxy is for relays outside the
+      mesh (public relays of a shared mesh): it carries the connection's
+      raw bytes (TCP, with TLS end to end), not WebSocket frames, so the
+      member that forwards sees neither queries nor events. (Marmot's
+      accumulation relay idea, marmot#431, lets its buffer see the
+      queries it serves; we have no need to.)
 
 ## Phase 5: release
 
-- [ ] Settings in both apps and the CLI (off, view only, view and
-      control; ask each time or unattended); a visible indicator on a
-      device while someone is viewing it, and a way to end the session.
-- [ ] A "send key" menu for shortcuts the viewer's own desktop takes
-      (Super, Alt+Tab).
-- [ ] Docs in all three repos, `noscat-screen` packaging, CI, and the
-      lockstep release per `docs/releasing.md`.
+- [ ] Docs in all three repos (README, API, man page, nip-noscat for any
+      wire addition, CONTEXT terms), CI green, netns suite, a two-machine
+      Bluetooth test written down as a manual check.
+- [ ] Lockstep 0.10.0 per `docs/releasing.md`.
